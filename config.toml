@@ -1,0 +1,26 @@
+[runtime]
+log_level = "INFO"
+prefer_local_models = false
+hil_timeout_seconds = 3600
+
+[budget]
+monthly_limit_usd = 50.0
+alert_at_pct = 0.80
+
+[substrate]
+db_path = "data/belief_ledger.db"
+cold_storage_path = "cold/"
+
+[bus]
+type = "memory"
+# redis_url = "redis://localhost:6379"
+
+[models]
+# Override tier defaults here
+fast = "gpt-4o-mini"
+balanced = "gpt-4o"
+powerful = "o1-preview"
+# local = "ollama/llama3.2"
+
+[api_keys]
+# Do NOT put keys here. Set as environment variables: OPENAI_API_KEY, ANTHROPIC_API_KEY

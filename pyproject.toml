@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "question-engine"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "litellm>=1.30",
+    "instructor>=1.2",
+    "aiosqlite>=0.20",
+    "pydantic>=2.6",
+    "typer>=0.12",
+    "rich>=13",
+    "watchdog>=4",
+    "yoyo-migrations>=8",
+    "jinja2>=3.1",
+    "tiktoken>=0.7",
+    "python-dotenv>=1.0",
+    "tenacity>=8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+    "pytest-timeout>=2",
+    "respx",
+    "ruff>=0.9",
+    "mypy>=1.11",
+    "pre-commit>=4",
+    "types-toml",
+    "icecream",
+]
+
+[project.scripts]
+qe = "qe.cli.main:app"
+
+[tool.ruff]
+target-version = "py311"
+src = ["src"]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "ASYNC"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ANN"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--tb=short"]
+markers = [
+    "unit: no bus, no DB",
+    "integration: in-memory bus + SQLite in /tmp",
+    "slow: requires real LLM API call",
+]
+
+[tool.coverage.run]
+source = ["src/qe"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "# TODO",
+]
