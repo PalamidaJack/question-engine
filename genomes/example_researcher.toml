@@ -11,7 +11,7 @@ Rules:
 """
 
 [model_preference]
-tier = "balanced"
+tier = "local"
 max_cost_per_call_usd = 0.05
 
 [capabilities]
