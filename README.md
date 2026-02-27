@@ -37,11 +37,11 @@ qe claims list
 | Phase 3 — Bus | ✅ | In-memory message bus |
 | Phase 4 — Substrate | ✅ | SQLite Belief Ledger + Cold Storage |
 | Phase 5 — Runtime | ✅ | BaseService, AutoRouter, ContextManager |
-| Phase 6 — Researcher | ⏳ | First working service |
-| Phase 7 — Kernel | ⏳ | Supervisor, genome loading |
-| Phase 8 — HIL | ⏳ | Human-in-the-loop file queue |
-| Phase 9 — CLI | ⏳ | qe command-line interface |
-| Phase 10 — E2E | ⏳ | Submit → claim visible in 30s |
+| Phase 6 — Researcher | ✅ | First working service |
+| Phase 7 — Kernel | ✅ | Supervisor, genome loading |
+| Phase 8 — HIL | ✅ | Human-in-the-loop file queue |
+| Phase 9 — CLI | ✅ | qe command-line interface |
+| Phase 10 — E2E | ✅ | Submit → claim visible in 30s |
 
 ## Architecture
 

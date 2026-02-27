@@ -9,7 +9,7 @@ TIER_MODELS = {
     "fast": ["gpt-4o-mini", "claude-haiku-3-5"],
     "balanced": ["gpt-4o", "claude-sonnet-3-5"],
     "powerful": ["o1-preview", "claude-opus-3"],
-    "local": ["ollama/llama3.2", "ollama/mistral"],
+    "local": ["ollama/qwen3:8b", "ollama/llama3.1:8b"],
 }
 
 

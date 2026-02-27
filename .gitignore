@@ -1,6 +1,9 @@
 # Application data (never commit these)
 cold/
 data/
+!data/hil_queue/
+!data/hil_queue/pending/
+!data/hil_queue/completed/
 *.db
 *.sqlite
 *.sqlite3
@@ -57,3 +60,7 @@ logs/
 
 # HIL queue (runtime state, not source)
 data/hil_queue/
+!data/hil_queue/pending/.gitkeep
+!data/hil_queue/completed/.gitkeep
+data/hil_queue/pending/*.json
+data/hil_queue/completed/*.json
