@@ -1,0 +1,398 @@
+                    GNU AFFERO GENERAL PUBLIC LICENSE
+                       Version 3, 19 November 2007
+
+ Copyright (C) 2026 Ziv
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License version 3 as
+published by the Free Software Foundation.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero
+General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+The full text of the AGPLv3 license follows:
+
+                        GNU AFFERO GENERAL PUBLIC LICENSE
+           Version 3, 19 November 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+
+Everyone is permitted to copy and distribute verbatim copies
+of this license document, but changing it is not allowed.
+
+                            Preamble
+
+The GNU Affero General Public License is a free, copyleft license for
+software and other kinds of works, specifically designed to ensure
+proper cooperation for the benefit of all.  For example, the
+holders of this License grant you the right to use, modify, and
+distribute the Program, and ensure that any derivative works which
+you make available to the public is also available to those
+holders under the terms and conditions of this License.  To the
+extent permitted by applicable law, you may also, at your option,
+treat any or all works not covered by this License as though they were
+not part of this License, and distribute them separately.  When you
+do so, the Program must be accompanied by a prominent notice
+stating that the Program and any derivative works are licensed under the
+terms of this License, and informing them that you provide these
+terms.  You may charge any price or no fee for such copies, and
+you may at your option offer warranty protection in exchange for a fee.
+
+THE FOLLOWING TERMS AND CONDITIONS APPLY TO THIS PROGRAM AND TO
+ANY DERIVATIVE WORK OF YOURS UNLESS REQUIRED BY APPLICABLE
+LAW OR AGREED TO IN WRITING.  Terms and conditions for
+copying, distribution and modification follow the GNU Affero General Public
+License version 3, 19 November 2007.
+
+1. Definitions.
+
+"License" shall mean this GNU Affero General Public License.
+
+"Copyright" also means copyright-like laws that apply to works of
+copyright, including copyright for derivative works.
+
+"Program" shall mean the copyrightable work, whether in source or
+object code, made available under the License, and any work
+based on the Program.
+
+"Licensee" shall mean the terms and conditions for use, reproduction,
+and distribution as defined by Sections 1 through 9 of this document.
+
+"Licensor" shall mean the copyright owner or entity authorized by
+the copyright owner that is granting the License.
+
+"Legal Entity" shall mean the union of the acting entity and all
+other entities that control, are controlled by, or are under common
+control with that entity.  For the purposes of this definition,
+"control" means (i) the power, direct or indirect, to cause the
+direction or management of such entity, whether by contract or
+otherwise, or (ii) ownership of fifty percent (50%) or more of the
+outstanding shares, or (iii) beneficial ownership of such entity.
+
+"You" (or "Your") shall mean an individual or Legal Entity
+exercising permissions granted by this License.
+
+"Source" form shall mean the preferred form for making modifications,
+including but not limited to software source code, documentation
+source, and configuration files.
+
+"Object" form shall mean any form resulting from mechanical
+transformation or translation of a Source form, including but
+not limited to compiled object code, generated documentation,
+and conversions to other media types.
+
+"Work" shall mean the work of authorship or the Program, whether in
+Source or Object form, made available under the License.
+
+"Derivative Works" shall mean:
+a) any work based on the Program, and
+b) any work based on the Program, and
+c) any work based on the Program, and
+d) any work based on the Program, and
+
+e) any work based on the Program, and
+
+f) any work based on the Program, and
+
+g) any work based on the Program, and
+
+A "combined work" is a work that includes material from the Program or a
+Derivative Work of the Program.
+
+"Convey" shall mean any act or process that enables communication of a
+work, including but not limited to physical transfer of a copy.
+
+"Propagation" shall mean the distribution of copies or phonorecords of a
+work to the public.
+
+"System Libraries" shall mean fundamental software that (a) is included
+in the normal form of a Package that is distributed, and (b) serves only
+to enable use of the work with that Package, and (c) is a work that
+expressly states in the Package's documentation that it is required by
+recipients to use the Package, and (d) a work that is
+distributed together with the Program and based on the Program, which to any
+extent requires modification of the Program.
+
+"System Library" means a work that (a) is included in the normal form
+of a System Library, and (b) serves only to enable use of the work
+with that System Library, or (c) is a derivative work that (i) includes the
+System Library, and (ii) places the Program under a different namespace
+than the original System Library, but makes some feature or service of the
+Program available to recipients of the System Library.
+
+"User Product" shall mean (a) any work, whether in Source or Object form,
+that is distributed under the License, and (b) a work that is
+distributed under the License, is a derivative work of a Work, and that
+is not itself a System Library, and (c) a work that is
+distributed under the License, and that includes a notice stating that it is
+a User Product by the work that distributes it, and (d) a User Product
+that is otherwise a derivative work of the Work.  A "User Product" is a
+product that (i) contains material from the Program or a derivative work
+thereof, and (ii) that has a separate documentation file from the Program
+or the derivative work, and (iii) that is distributed separately from the
+Program or its derivatives under a License.  The documentation must state
+that it is a User Product of the work that distributes it and that the
+notice includes the License.
+
+2. Basic Permissions.
+
+All rights granted under this License are granted for the term of
+copyright on the Program, and are irrevocable except as stated in
+Sections 3, 4, 5, 6, 7, 8, and 9.
+
+a) Redistribution
+
+You may reproduce and distribute copies of the Program or
+Derivative Works, in Source or Object form, provided that you
+conspicuously convey to recipients the notice that they are receiving the
+Program under the License, and conspicuously and appropriately publish on
+each copy an appropriate copyright notice; keep intact all notices
+that refer to this License and to the absence of any warranty; and
+conspicuously provide all recipients with a copy of the License along
+with the Program, including any System Library that is distributed with it.
+
+You may charge any price or no fee for copies that you distribute
+and you are at your option to offer warranty or support in exchange
+for a fee.
+
+b) Conveying and Distributing Source and Object Forms
+
+You may convey a work based on the Program in Source or Object form
+under the terms of this License, provided that you also meet the
+following conditions for Source form:
+
+1) The work must carry prominent notices stating that it is a
+Derivative Work of the Program and that it is available under the
+License, and that it includes the License.
+
+2) The work must carry prominent notices stating that it is a User
+Product of the Program, and that it includes the License, and that the
+License is included with a prominent notice stating that it is a User
+Product of the work.
+
+3) You may charge a price or no fee for copies of the work you
+convey, and you may at your option offer warranty or support in exchange
+for a fee.
+
+c) Conveying Non-Source Forms
+
+You may convey a covered work in Object form under the terms of this
+License, provided that the copy of the work is distributed under the
+License, the copy conspicuously displays a valid copyright notice,
+includes a notice stating that it is a User Product of the work, and
+includes a notice stating that the License applies to the work.
+
+3. Permissions of the Licensor.
+
+The Licensor grants you the following rights in addition to the rights
+granted by Section 2:
+
+a) Copyright Grant
+
+Subject to the terms and conditions of this License, the Licensor
+grants you a non-exclusive, worldwide, royalty-free license to use,
+reproduce, modify, and display the Program, and to distribute
+Derivative Works based on the Program, and to license any such Derivative
+Works to third parties.
+
+b) Patent Grant
+
+The Licensor grants you a non-exclusive, worldwide, royalty-free patent
+license under the Licensor's patents essential to the Program to make, use,
+sell, offer for sale, import, and otherwise transfer the Program and any
+Derivative Works thereof, and to sublicense and to authorize others to do
+the same, subject to the following conditions:
+
+1) Any sublicense shall include the License grant to the third party,
+and the third party shall have the same rights to use the Program and
+Derivative Works as the recipient, including but not limited to the rights
+under Section 2 and the right to sublicense any Derivative Works of
+the Program, subject to the condition that the third party includes the
+License grant to the first party.
+
+2) The license grant in the third party's sublicense must include an
+additional grant to the third party to the extent that the third party
+grants a license to its third-party licensors for the Program, subject to the
+conditions of Section 3.  For example, if a third party receives a copy of the
+Program under this License, and then a third party receives a copy of the
+Program from the third party under a sublicense that includes the right to
+sublicense to third parties, then the first third party's sublicense must
+include a right to sublicense to the third parties from the first third party.
+
+3) If the Program includes a System Library that is covered by this
+License, and if the Program is modified to include the System Library
+in a combined work that is distributed under this License, and if the
+System Library is separately distributed under this License, then each party
+that contributes the System Library must ensure that the System Library,
+and any Derivative Works of the System Library that are distributed
+under this License, include a license grant to the third party to use the
+Program and Derivative Works of the Program, subject to the conditions of
+Section 3.
+
+4) Sublicensing
+
+You may sublicense Derivative Works of the Program to third parties
+under the terms of this License, provided that you also meet the
+following conditions for sublicensing:
+
+1) You must prominently display the License on each copy of the Derivative
+Work and each System Library that you sublicense or distribute, and on each
+copy of the Program that you sublicense or distribute.
+
+2) You must provide all recipients with a copy of the License along with the
+Derivative Work or System Library, and conspicuously display the License
+on each copy of the Program that is included in the Derivative Work or
+System Library.
+
+3) You must ensure that any Derivative Work or System Library that you
+sublicense or distribute includes a notice stating that it is a Derivative
+Work of the Program, that it includes the License, and that the License
+applies to the Derivative Work or System Library.
+
+5. Patent Grant Subject to Additional Terms
+
+The patent grant in Section 2(b) is subject to the following
+additional conditions:
+
+1) The patent grant does not include any patent licenses that the Licensor
+receives from third parties, whether by cross-license, patent pooling, or
+other means.
+
+2) The patent grant does not include any patents that the Licensor receives from
+third parties in exchange for the third party's license to the Program,
+unless the Licensor and the third party agree to include the patent licenses
+from the third party in the patent grant.
+
+3) The patent grant does not include any patents that are essential to the
+Program for the Program to function as a whole, unless the Licensor and the
+third party agree to include the patent licenses from the third party in
+the patent grant.
+
+6. License Notices
+
+a) Copyright Notice
+
+You must include a prominent notice on each copy of the Program and
+each Derivative Work and System Library that states:
+
+"This work is part of Question Engine OS."
+
+b) License Notice
+
+You must include a prominent notice on each copy of the Program and
+each Derivative Work and System Library that states:
+
+"This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License version 3 as
+published by the Free Software Foundation."
+
+If the Program includes a notice stating that it is a User Product,
+the notice must also include the License.
+
+7. Disclaimer of Warranty
+
+UNLESS REQUIRED BY APPLICABLE LAW, THE LICENSOR PROVIDES THE PROGRAM
+"AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED,
+INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.  IN NO
+EVENT SHALL THE LICENSOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+PROGRAM, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+8. Termination
+
+You may terminate the exercise of rights under this License at any time,
+and terminate all grants and permissions under this License, except that
+any rights that you have received as a result of exercising or being
+granted the rights under this License shall survive termination.
+
+9. Limitation of Liability
+
+EXCEPT AS REQUIRED BY APPLICABLE LAW, IN NO EVENT SHALL THE LICENSOR
+BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+PROGRAM, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+10. Provision of Resources
+
+You must not attempt to circumvent the terms of this License by providing
+resources in ways other than as expressly permitted.  For example, you
+may not provide the resources in such a way that requires the recipient to
+exercise rights under the License that the recipient may not exercise.
+
+11. Versions of the License
+
+The Free Software Foundation may publish revised and/or new versions of the
+GNU Affero General Public License from time to time.  Such new versions
+will be similar in spirit to the present version, but may differ in detail
+to address new problems or concerns.
+
+Each version is given a distinguishing version number.  If the Program
+specifies a version number of the License which applies to it and "any later
+version", you have the option of following the terms and conditions of that
+version or of any later version published by the Free Software Foundation.
+If the Program specifies that a proxy can decide which future versions
+of the GNU Affero General Public License can be used, that proxy's public
+statement of acceptance of a version permanently authorizes you to choose that
+version for the Program.
+
+Later license versions may give you additional or different
+permissions.  However, no additional obligations are imposed on any author or
+copyright holder as a result of your choosing to follow a later version.
+
+12. No Warranty
+
+THE PROGRAM IS DISTRIBUTED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EITHER EXPRESSED OR IMPLIED, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE PROGRAM OR THE USE OR OTHER DEALINGS IN THE PROGRAM.
+
+13. Accepting Warranty or Additional Liability
+
+While redistributing the Program or Derivative Works thereof, you may
+choose to offer, and charge a fee for, acceptance of support,
+warranty, indemnity, or other liability obligations and/or rights consistent
+with this License.  However, in accepting such obligations, you may act
+only on your own behalf and on your sole responsibility, not on behalf
+of any other party, and only if you agree to indemnify, defend, and hold each
+other party harmless for any liability incurred by, or claims asserted against,
+such other party by reason of your accepting any such warranty or additional
+liability.
+
+14. Accepting the License
+
+By exercising any rights granted to you under the License, you indicate
+your acceptance of the License to do so, and you accept all its terms and
+conditions.
+
+END OF TERMS AND CONDITIONS
+
+Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+
+Everyone is permitted to copy and distribute verbatim copies of this license
+document, but changing it is not allowed.
+
+If you wish to copy parts of the text of the GNU Affero General Public
+License into other programs, and to adapt it for your use, you do so by
+removing references to "the above copyright notice" and "this license text" and
+replacing them with a notice stating that this file contains GNU Affero General
+Public License version 3 and a pointer to where the full text is found.
+
+The full text of the GNU Affero General Public License version 3 can be found at:
+https://www.gnu.org/licenses/agpl-3.0.html

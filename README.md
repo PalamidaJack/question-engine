@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/YOUR_USERNAME/question-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/question-engine/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
 An operating system for AI agents. Persistent daemon services, deterministic message routing, and a three-layer knowledge substrate.
 
