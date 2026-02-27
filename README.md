@@ -32,11 +32,11 @@ qe claims list
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| Phase 1 — Scaffold | ⏳ | Project structure, installs cleanly |
-| Phase 2 — Models | ⏳ | Pydantic models pass unit tests |
-| Phase 3 — Bus | ⏳ | In-memory message bus |
-| Phase 4 — Substrate | ⏳ | SQLite Belief Ledger + Cold Storage |
-| Phase 5 — Runtime | ⏳ | BaseService, AutoRouter, ContextManager |
+| Phase 1 — Scaffold | ✅ | Project structure, installs cleanly |
+| Phase 2 — Models | ✅ | Pydantic models pass unit tests |
+| Phase 3 — Bus | ✅ | In-memory message bus |
+| Phase 4 — Substrate | ✅ | SQLite Belief Ledger + Cold Storage |
+| Phase 5 — Runtime | ✅ | BaseService, AutoRouter, ContextManager |
 | Phase 6 — Researcher | ⏳ | First working service |
 | Phase 7 — Kernel | ⏳ | Supervisor, genome loading |
 | Phase 8 — HIL | ⏳ | Human-in-the-loop file queue |
