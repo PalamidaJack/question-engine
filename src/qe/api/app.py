@@ -16,10 +16,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from qe.api.setup import (
+    PROVIDERS,
+    get_configured_providers,
+    get_current_tiers,
+    is_setup_complete,
+    save_setup,
+)
 from qe.api.ws import ConnectionManager
 from qe.bus import get_bus
+from qe.bus.event_log import EventLog
 from qe.kernel.supervisor import Supervisor
 from qe.models.envelope import Envelope
+from qe.services.query import answer_question
 from qe.substrate import Substrate
 
 load_dotenv()
@@ -32,6 +41,7 @@ ws_manager = ConnectionManager()
 _supervisor: Supervisor | None = None
 _substrate: Substrate | None = None
 _supervisor_task: asyncio.Task | None = None
+_event_log: EventLog | None = None
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -83,7 +93,7 @@ def _bus_to_ws_bridge() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
-    global _supervisor, _substrate, _supervisor_task
+    global _supervisor, _substrate, _supervisor_task, _event_log
 
     logging.basicConfig(
         level=logging.INFO,
@@ -92,27 +102,39 @@ async def lifespan(app: FastAPI):
     )
 
     bus = get_bus()
+
+    # Initialize durable event log
+    _event_log = EventLog()
+    await _event_log.initialize()
+    bus.set_event_log(_event_log)
+
     _substrate = Substrate()
     await _substrate.initialize()
 
-    _supervisor = Supervisor(
-        bus=bus, substrate=_substrate, config_path=Path("config.toml")
-    )
+    relay_task: asyncio.Task | None = None
 
-    _bus_to_ws_bridge()
+    if is_setup_complete():
+        _supervisor = Supervisor(
+            bus=bus, substrate=_substrate, config_path=Path("config.toml")
+        )
 
-    relay_task = asyncio.create_task(_inbox_relay_loop())
-    _supervisor_task = asyncio.create_task(
-        _supervisor.start(_genome_paths())
-    )
+        _bus_to_ws_bridge()
 
-    log.info("QE API server started")
+        relay_task = asyncio.create_task(_inbox_relay_loop())
+        _supervisor_task = asyncio.create_task(
+            _supervisor.start(_genome_paths())
+        )
+        log.info("QE API server started (engine running)")
+    else:
+        log.info("QE API server started (setup required — no API keys configured)")
+
     yield
 
     # Shutdown
     if _supervisor:
         await _supervisor.stop()
-    relay_task.cancel()
+    if relay_task:
+        relay_task.cancel()
     if _supervisor_task:
         _supervisor_task.cancel()
     log.info("QE API server stopped")
@@ -145,6 +167,61 @@ if _static_dir.exists():
 async def dashboard():
     """Serve the dashboard UI."""
     return FileResponse(str(_static_dir / "index.html"))
+
+
+# ── Setup Endpoints ─────────────────────────────────────────────────────────
+
+
+@app.get("/api/setup/status")
+async def setup_status():
+    """Return setup status: whether complete, configured providers, tier mapping."""
+    return {
+        "complete": is_setup_complete(),
+        "providers": get_configured_providers(),
+        "tiers": get_current_tiers(),
+    }
+
+
+@app.get("/api/setup/providers")
+async def setup_providers():
+    """Return the static list of supported providers."""
+    return {
+        "providers": [
+            {
+                "name": p["name"],
+                "env_var": p["env_var"],
+                "example_models": p["example_models"],
+                "tier_defaults": p["tier_defaults"],
+            }
+            for p in PROVIDERS
+        ],
+    }
+
+
+@app.post("/api/setup/save")
+async def setup_save(body: dict[str, Any]):
+    """Save provider API keys and tier assignments.
+
+    Expects:
+        {
+            "providers": {"OPENAI_API_KEY": "sk-...", ...},
+            "tiers": {
+                "fast": {"provider": "OpenAI", "model": "gpt-4o-mini"},
+                "balanced": {"provider": "OpenAI", "model": "gpt-4o"},
+                "powerful": {"provider": "Anthropic", "model": "claude-sonnet-4-20250514"}
+            }
+        }
+    """
+    providers = body.get("providers", {})
+    tiers = body.get("tiers", {})
+
+    if not providers and not tiers:
+        return JSONResponse(
+            {"error": "providers or tiers required"}, status_code=400
+        )
+
+    save_setup(providers=providers, tier_config=tiers)
+    return {"status": "saved", "complete": is_setup_complete()}
 
 
 # ── REST Endpoints ──────────────────────────────────────────────────────────
@@ -206,6 +283,22 @@ async def submit(body: dict[str, Any]):
     return {"envelope_id": envelope.envelope_id, "status": "submitted"}
 
 
+@app.post("/api/ask")
+async def ask(body: dict[str, Any]):
+    """Ask a question against the belief ledger."""
+    if not _substrate:
+        return JSONResponse({"error": "Substrate not ready"}, status_code=503)
+
+    question = body.get("question", "")
+    if not question:
+        return JSONResponse(
+            {"error": "question is required"}, status_code=400
+        )
+
+    result = await answer_question(question, _substrate)
+    return result
+
+
 @app.get("/api/claims")
 async def list_claims(
     subject: str | None = None,
@@ -236,6 +329,76 @@ async def get_claim(claim_id: str):
         if claim.claim_id == claim_id:
             return claim.model_dump(mode="json")
     return JSONResponse({"error": "Claim not found"}, status_code=404)
+
+
+@app.delete("/api/claims/{claim_id}")
+async def retract_claim(claim_id: str):
+    """Soft-retract a claim (mark as superseded by 'retracted')."""
+    if not _substrate:
+        return JSONResponse({"error": "Substrate not ready"}, status_code=503)
+
+    retracted = await _substrate.retract_claim(claim_id)
+    if not retracted:
+        return JSONResponse({"error": "Claim not found"}, status_code=404)
+    return {"status": "retracted", "claim_id": claim_id}
+
+
+@app.get("/api/entities")
+async def list_entities():
+    """List all entities with claim counts."""
+    if not _substrate:
+        return JSONResponse({"error": "Substrate not ready"}, status_code=503)
+
+    entities = await _substrate.entity_resolver.list_entities()
+    # Enrich with claim counts
+    for ent in entities:
+        claims = await _substrate.get_claims(
+            subject_entity_id=ent["canonical_name"]
+        )
+        ent["claim_count"] = len(claims)
+    return {"entities": entities, "count": len(entities)}
+
+
+@app.get("/api/entities/{name}")
+async def get_entity(name: str):
+    """Get claims for a specific entity."""
+    if not _substrate:
+        return JSONResponse({"error": "Substrate not ready"}, status_code=503)
+
+    canonical = await _substrate.entity_resolver.resolve(name)
+    claims = await _substrate.get_claims(subject_entity_id=canonical)
+    return {
+        "canonical_name": canonical,
+        "claims": [c.model_dump(mode="json") for c in claims],
+        "count": len(claims),
+    }
+
+
+@app.post("/api/entities/{name}/alias")
+async def add_entity_alias(name: str, body: dict[str, Any]):
+    """Add an alias for an entity."""
+    if not _substrate:
+        return JSONResponse({"error": "Substrate not ready"}, status_code=503)
+
+    alias = body.get("alias", "")
+    if not alias:
+        return JSONResponse({"error": "alias is required"}, status_code=400)
+
+    await _substrate.entity_resolver.add_alias(name, alias)
+    return {"status": "alias_added", "canonical_name": name, "alias": alias}
+
+
+@app.get("/api/events")
+async def list_events(
+    topic: str | None = None,
+    limit: int = 100,
+):
+    """Query the durable event log."""
+    if not _event_log:
+        return JSONResponse({"error": "Event log not ready"}, status_code=503)
+
+    events = await _event_log.replay(topic=topic, limit=limit)
+    return {"events": events, "count": len(events)}
 
 
 @app.get("/api/hil/pending")

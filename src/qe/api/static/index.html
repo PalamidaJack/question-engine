@@ -16,6 +16,7 @@
     ::-webkit-scrollbar-thumb { background: #1e2330; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #2a3040; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
     button:hover { filter: brightness(1.1); }
     textarea::placeholder, input::placeholder { color: #5c6478; }
   </style>
@@ -23,7 +24,7 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useCallback, useRef } = React;
+    const { useState, useEffect, useRef } = React;
 
     const API = window.location.origin;
     const WS_URL = `ws://${window.location.host}/ws`;
@@ -52,12 +53,15 @@
       dashboard: "M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z M9 22V12h6v10",
       submit: "M12 19V5 M5 12l7-7 7 7",
       claims: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2 M9 5a2 2 0 002 2h2a2 2 0 002-2 M9 5a2 2 0 012-2h2a2 2 0 012 2",
+      ask: "M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3 M12 17h.01 M12 2a10 10 0 100 20 10 10 0 000-20z",
+      entities: "M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2 M9 7a4 4 0 100-8 4 4 0 000 8z M23 21v-2a4 4 0 00-3-3.87 M16 3.13a4 4 0 010 7.75",
       hil: "M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2 M8.5 7a4 4 0 100-8 4 4 0 000 8z M20 8v6 M23 11h-6",
       bus: "M22 12h-4l-3 9L9 3l-3 9H2",
       check: "M20 6L9 17l-5-5",
       x: "M18 6L6 18 M6 6l12 12",
-      clock: "M12 2a10 10 0 100 20 10 10 0 000-20z M12 6v6l4 2",
       search: "M11 3a8 8 0 100 16 8 8 0 000-16z M21 21l-4.35-4.35",
+      trash: "M3 6h18 M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2",
+      alert: "M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z M12 9v4 M12 17h.01",
     };
 
     const Badge = ({ children, color = palette.accent, bg }) => (
@@ -95,10 +99,13 @@
     function TopicBadge({ topic }) {
       const colors = {
         "observations": palette.blue, "claims": palette.purple,
-        "hil": palette.accent, "system": palette.textDim, "investigations": palette.green,
+        "hil": palette.accent, "system": palette.textDim,
+        "investigations": palette.green, "queries": palette.blue,
+        "entities": palette.green, "ingestion": palette.accent,
       };
       const prefix = topic.split(".")[0];
-      return <Badge color={colors[prefix] || palette.textDim}>{topic}</Badge>;
+      const isContradiction = topic === "claims.contradiction_detected";
+      return <Badge color={isContradiction ? palette.red : (colors[prefix] || palette.textDim)}>{topic}</Badge>;
     }
 
     function ConfidenceBar({ value }) {
@@ -114,17 +121,300 @@
       );
     }
 
+    // ── Setup Screen ──────────────────────────────────────────────────────
+    function SetupScreen({ onComplete }) {
+      const [providers, setProviders] = useState([]);
+      const [tierConfig, setTierConfig] = useState({
+        fast:     { provider: "", model: "" },
+        balanced: { provider: "", model: "" },
+        powerful: { provider: "", model: "" },
+      });
+      const [apiKeys, setApiKeys] = useState({});
+      const [saving, setSaving] = useState(false);
+      const [error, setError] = useState(null);
+      const [ollamaEnabled, setOllamaEnabled] = useState(false);
+
+      useEffect(() => {
+        fetch(`${API}/api/setup/providers`).then(r => r.json()).then(data => {
+          setProviders(data.providers || []);
+        }).catch(() => {});
+        // Pre-fill from existing status
+        fetch(`${API}/api/setup/status`).then(r => r.json()).then(data => {
+          if (data.tiers) {
+            const tiers = {};
+            for (const [tier, model] of Object.entries(data.tiers)) {
+              // Try to detect provider from model name
+              const prov = detectProvider(model, data.providers || []);
+              tiers[tier] = { provider: prov, model };
+            }
+            setTierConfig(prev => ({ ...prev, ...tiers }));
+          }
+        }).catch(() => {});
+      }, []);
+
+      const detectProvider = (model, provList) => {
+        if (!model) return "";
+        if (model.startsWith("ollama/")) return "Ollama (local)";
+        if (model.startsWith("groq/")) return "Groq";
+        if (model.startsWith("mistral/")) return "Mistral";
+        if (model.startsWith("gemini/")) return "Google Gemini";
+        if (model.startsWith("together_ai/")) return "Together AI";
+        if (model.startsWith("openrouter/")) return "OpenRouter";
+        if (model.startsWith("claude")) return "Anthropic";
+        return "OpenAI";
+      };
+
+      const getProviderByName = (name) => providers.find(p => p.name === name);
+
+      const handleProviderChange = (tier, providerName) => {
+        const prov = getProviderByName(providerName);
+        const model = prov ? (prov.tier_defaults[tier] || prov.example_models[0]) : "";
+        setTierConfig(prev => ({ ...prev, [tier]: { provider: providerName, model } }));
+        if (providerName === "Ollama (local)") setOllamaEnabled(true);
+      };
+
+      const handleModelChange = (tier, model) => {
+        setTierConfig(prev => ({ ...prev, [tier]: { ...prev[tier], model } }));
+      };
+
+      const handleKeyChange = (envVar, value) => {
+        setApiKeys(prev => ({ ...prev, [envVar]: value }));
+      };
+
+      // Collect unique providers that need keys
+      const neededKeys = {};
+      Object.values(tierConfig).forEach(tc => {
+        const prov = getProviderByName(tc.provider);
+        if (prov && prov.env_var && !neededKeys[prov.env_var]) {
+          neededKeys[prov.env_var] = prov.name;
+        }
+      });
+
+      const handleSave = async () => {
+        setSaving(true);
+        setError(null);
+        try {
+          const res = await fetch(`${API}/api/setup/save`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ providers: apiKeys, tiers: tierConfig }),
+          });
+          const data = await res.json();
+          if (!res.ok) { setError(data.error || "Save failed"); setSaving(false); return; }
+          if (data.complete) {
+            onComplete();
+          } else {
+            setError("Setup saved but no valid API key detected. Please enter at least one API key.");
+            setSaving(false);
+          }
+        } catch (e) {
+          setError("Network error");
+          setSaving(false);
+        }
+      };
+
+      const tierLabels = {
+        fast: { label: "Fast", desc: "Quick responses, lower cost", color: palette.green },
+        balanced: { label: "Balanced", desc: "Good quality / cost tradeoff", color: palette.blue },
+        powerful: { label: "Powerful", desc: "Best quality, higher cost", color: palette.purple },
+      };
+
+      return (
+        <div style={{
+          minHeight: "100vh", background: palette.bg, display: "flex",
+          alignItems: "center", justifyContent: "center", fontFamily: FONT_SANS, padding: 20,
+          overflow: "auto",
+        }}>
+          <div style={{
+            width: "100%", maxWidth: 720, background: palette.surface,
+            border: `1px solid ${palette.border}`, borderRadius: 12, padding: "40px 36px",
+          }}>
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 8 }}>
+              <div style={{
+                width: 44, height: 44, borderRadius: 8, background: palette.accentDim,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                border: `1px solid ${palette.accent}40`, fontSize: 18, fontFamily: FONT_MONO,
+                color: palette.accent, fontWeight: 800,
+              }}>QE</div>
+              <div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: palette.textBright }}>Welcome to Question Engine</div>
+                <div style={{ fontSize: 13, color: palette.textDim, fontFamily: FONT_MONO }}>Configure your LLM providers to get started</div>
+              </div>
+            </div>
+
+            <div style={{ height: 1, background: palette.border, margin: "24px 0" }} />
+
+            {/* Tier Cards */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 20, marginBottom: 28 }}>
+              {["fast", "balanced", "powerful"].map(tier => {
+                const tc = tierConfig[tier];
+                const info = tierLabels[tier];
+                return (
+                  <div key={tier} style={{
+                    background: palette.bg, border: `1px solid ${palette.border}`,
+                    borderRadius: 8, padding: "18px 20px",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                      <span style={{
+                        display: "inline-block", width: 10, height: 10, borderRadius: "50%",
+                        background: info.color,
+                      }} />
+                      <span style={{ fontSize: 15, fontWeight: 700, color: palette.textBright }}>{info.label}</span>
+                      <span style={{ fontSize: 12, color: palette.textDim, fontFamily: FONT_MONO }}>{info.desc}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: 180 }}>
+                        <label style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Provider</label>
+                        <select
+                          value={tc.provider}
+                          onChange={e => handleProviderChange(tier, e.target.value)}
+                          style={{
+                            width: "100%", padding: "8px 10px", borderRadius: 5,
+                            border: `1px solid ${palette.border}`, background: palette.surface,
+                            color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                          }}
+                        >
+                          <option value="">Select provider...</option>
+                          {providers.map(p => (
+                            <option key={p.name} value={p.name}>{p.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 220 }}>
+                        <label style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Model</label>
+                        <input
+                          type="text"
+                          value={tc.model}
+                          onChange={e => handleModelChange(tier, e.target.value)}
+                          placeholder="e.g. gpt-4o-mini"
+                          style={{
+                            width: "100%", padding: "8px 10px", borderRadius: 5,
+                            border: `1px solid ${palette.border}`, background: palette.surface,
+                            color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* API Keys */}
+            {Object.keys(neededKeys).length > 0 && (
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: palette.textBright, marginBottom: 14 }}>API Keys</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {Object.entries(neededKeys).map(([envVar, provName]) => (
+                    <div key={envVar} style={{
+                      background: palette.bg, border: `1px solid ${palette.border}`,
+                      borderRadius: 8, padding: "14px 18px",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: palette.text }}>{provName}</span>
+                        <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>{envVar}</span>
+                      </div>
+                      <input
+                        type="password"
+                        value={apiKeys[envVar] || ""}
+                        onChange={e => handleKeyChange(envVar, e.target.value)}
+                        placeholder={`Enter ${envVar}...`}
+                        style={{
+                          width: "100%", padding: "8px 10px", borderRadius: 5,
+                          border: `1px solid ${palette.border}`, background: palette.surface,
+                          color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Ollama toggle */}
+            <div style={{
+              background: palette.bg, border: `1px solid ${palette.border}`,
+              borderRadius: 8, padding: "14px 18px", marginBottom: 28,
+              display: "flex", alignItems: "center", gap: 12,
+            }}>
+              <div style={{
+                width: 38, height: 22, borderRadius: 11, cursor: "pointer",
+                background: ollamaEnabled ? palette.green : palette.border,
+                transition: "background 0.2s", position: "relative",
+              }} onClick={() => {
+                const next = !ollamaEnabled;
+                setOllamaEnabled(next);
+                if (next) {
+                  // Auto-set any empty tiers to Ollama
+                  setTierConfig(prev => {
+                    const updated = { ...prev };
+                    for (const t of ["fast", "balanced", "powerful"]) {
+                      if (!updated[t].provider) {
+                        const ollamaP = getProviderByName("Ollama (local)");
+                        updated[t] = { provider: "Ollama (local)", model: ollamaP ? ollamaP.tier_defaults[t] : "ollama/llama3.2" };
+                      }
+                    }
+                    return updated;
+                  });
+                }
+              }}>
+                <div style={{
+                  width: 18, height: 18, borderRadius: "50%", background: "#fff",
+                  position: "absolute", top: 2,
+                  left: ollamaEnabled ? 18 : 2,
+                  transition: "left 0.2s",
+                }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: palette.text }}>Ollama (local models)</div>
+                <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>No API key needed — runs on your machine</div>
+              </div>
+            </div>
+
+            {/* Error */}
+            {error && (
+              <div style={{
+                background: palette.redDim, border: `1px solid ${palette.red}40`,
+                borderRadius: 6, padding: "10px 14px", marginBottom: 16,
+                fontSize: 13, color: palette.red, fontFamily: FONT_MONO,
+              }}>{error}</div>
+            )}
+
+            {/* Start Button */}
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              style={{
+                width: "100%", padding: "14px 20px", borderRadius: 8, border: "none",
+                cursor: saving ? "default" : "pointer",
+                background: saving ? palette.border : `linear-gradient(135deg, ${palette.accent}, #c47e2a)`,
+                color: saving ? palette.textDim : "#fff",
+                fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700,
+                letterSpacing: "0.02em", transition: "all 0.2s",
+              }}
+            >{saving ? "Saving..." : "Start Engine"}</button>
+          </div>
+        </div>
+      );
+    }
+
     function App() {
       const [activeTab, setActiveTab] = useState("dashboard");
       const [claims, setClaims] = useState([]);
       const [events, setEvents] = useState([]);
       const [hilQueue, setHilQueue] = useState([]);
       const [services, setServices] = useState([]);
+      const [entities, setEntities] = useState([]);
       const [engineRunning, setEngineRunning] = useState(false);
       const [budget, setBudget] = useState(null);
       const [observationText, setObservationText] = useState("");
       const [submitting, setSubmitting] = useState(false);
       const [searchQuery, setSearchQuery] = useState("");
+      const [question, setQuestion] = useState("");
+      const [asking, setAsking] = useState(false);
+      const [answer, setAnswer] = useState(null);
+      const [contradictions, setContradictions] = useState([]);
       const wsRef = useRef(null);
 
       // Connect WebSocket
@@ -144,9 +434,11 @@
                   payload: typeof data.payload === "string" ? data.payload : JSON.stringify(data.payload).slice(0, 120),
                 }, ...prev].slice(0, 200));
 
-                // Auto-refresh claims on commit
                 if (data.topic === "claims.committed") fetchClaims();
                 if (data.topic === "hil.approval_required") fetchHil();
+                if (data.topic === "claims.contradiction_detected") {
+                  setContradictions(prev => [data.payload, ...prev].slice(0, 50));
+                }
               }
             } catch {}
           };
@@ -178,47 +470,65 @@
       const fetchClaims = async () => {
         try {
           const res = await fetch(`${API}/api/claims`);
-          if (res.ok) {
-            const data = await res.json();
-            setClaims(data.claims || []);
-          }
+          if (res.ok) { setClaims((await res.json()).claims || []); }
         } catch {}
       };
 
       const fetchHil = async () => {
         try {
           const res = await fetch(`${API}/api/hil/pending`);
-          if (res.ok) {
-            const data = await res.json();
-            setHilQueue(data.pending || []);
-          }
+          if (res.ok) { setHilQueue((await res.json()).pending || []); }
         } catch {}
       };
 
-      useEffect(() => { fetchClaims(); fetchHil(); }, []);
+      const fetchEntities = async () => {
+        try {
+          const res = await fetch(`${API}/api/entities`);
+          if (res.ok) { setEntities((await res.json()).entities || []); }
+        } catch {}
+      };
+
+      useEffect(() => { fetchClaims(); fetchHil(); fetchEntities(); }, []);
 
       const handleSubmit = async () => {
         if (!observationText.trim()) return;
         setSubmitting(true);
         try {
           const res = await fetch(`${API}/api/submit`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text: observationText.trim() }),
           });
-          if (res.ok) {
-            setObservationText("");
-            setTimeout(fetchClaims, 3000);
-          }
+          if (res.ok) { setObservationText(""); setTimeout(fetchClaims, 3000); }
         } catch {}
         setSubmitting(false);
+      };
+
+      const handleAsk = async () => {
+        if (!question.trim()) return;
+        setAsking(true);
+        setAnswer(null);
+        try {
+          const res = await fetch(`${API}/api/ask`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question: question.trim() }),
+          });
+          if (res.ok) { setAnswer(await res.json()); }
+        } catch {}
+        setAsking(false);
+      };
+
+      const handleRetract = async (claimId) => {
+        if (!confirm("Retract this claim?")) return;
+        try {
+          await fetch(`${API}/api/claims/${claimId}`, { method: "DELETE" });
+          fetchClaims();
+        } catch {}
       };
 
       const handleHilDecision = async (id, decision) => {
         try {
           await fetch(`${API}/api/hil/${id}/${decision}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ reason: "user decision" }),
           });
           fetchHil();
@@ -237,8 +547,10 @@
 
       const navItems = [
         { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
+        { id: "ask", label: "Ask", icon: Icons.ask },
         { id: "submit", label: "Submit", icon: Icons.submit },
         { id: "claims", label: "Claims", icon: Icons.claims, count: claims.length },
+        { id: "entities", label: "Entities", icon: Icons.entities, count: entities.length },
         { id: "hil", label: "HIL Queue", icon: Icons.hil, count: pendingHil },
         { id: "bus", label: "Event Bus", icon: Icons.bus, count: events.length },
       ];
@@ -263,7 +575,7 @@
               }}>QE</div>
               <div>
                 <div style={{ fontSize: 13, fontWeight: 700, color: palette.textBright }}>Question Engine</div>
-                <div style={{ fontSize: 10, color: palette.textDim, fontFamily: FONT_MONO }}>v0.1.0</div>
+                <div style={{ fontSize: 10, color: palette.textDim, fontFamily: FONT_MONO }}>v0.2.0</div>
               </div>
             </div>
 
@@ -307,6 +619,18 @@
               })}
             </div>
 
+            {contradictions.length > 0 && (
+              <div style={{ padding: "8px 12px", borderTop: `1px solid ${palette.border}`, background: palette.redDim }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <Icon d={Icons.alert} size={14} color={palette.red} />
+                  <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.red, fontWeight: 600 }}>CONTRADICTIONS ({contradictions.length})</span>
+                </div>
+                <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.red }}>
+                  {contradictions[0]?.subject} / {contradictions[0]?.predicate}
+                </span>
+              </div>
+            )}
+
             <div style={{ padding: "12px 16px", borderTop: `1px solid ${palette.border}` }}>
               <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Services</div>
               {services.map(s => (
@@ -333,7 +657,7 @@
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 28 }}>
                   {[
                     { label: "Claims", value: claims.length, color: palette.blue },
-                    { label: "Pending HIL", value: pendingHil, color: pendingHil > 0 ? palette.accent : palette.textDim },
+                    { label: "Entities", value: entities.length, color: palette.green },
                     { label: "Events", value: events.length, color: palette.purple },
                     { label: "Services", value: services.filter(s => s.status === "alive").length, sub: engineRunning ? "online" : "offline", color: engineRunning ? palette.green : palette.textDim },
                   ].map((s, i) => (
@@ -385,6 +709,99 @@
               </div>
             )}
 
+            {/* ASK */}
+            {activeTab === "ask" && (
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Ask a Question</h1>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 28, fontFamily: FONT_MONO }}>Query the belief ledger with natural language</p>
+                <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: 24, maxWidth: 720 }}>
+                  <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+                    <input
+                      value={question}
+                      onChange={e => setQuestion(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && handleAsk()}
+                      placeholder="What do you want to know?"
+                      style={{
+                        flex: 1, padding: "12px 14px", borderRadius: 6,
+                        background: palette.bg, border: `1px solid ${palette.border}`, color: palette.text,
+                        fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                      }}
+                    />
+                    <button onClick={handleAsk} disabled={!question.trim() || asking} style={{
+                      padding: "10px 24px", borderRadius: 6, border: "none", cursor: question.trim() && !asking ? "pointer" : "not-allowed",
+                      fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600,
+                      background: palette.accent, color: palette.bg,
+                      opacity: !question.trim() || asking ? 0.5 : 1,
+                    }}>{asking ? "Thinking..." : "Ask"}</button>
+                  </div>
+
+                  {asking && (
+                    <div style={{ padding: 20, textAlign: "center" }}>
+                      <span style={{ fontSize: 13, fontFamily: FONT_MONO, color: palette.accent, animation: "pulse 1.5s infinite" }}>
+                        Searching belief ledger and synthesizing answer...
+                      </span>
+                    </div>
+                  )}
+
+                  {answer && !asking && (
+                    <div style={{ animation: "fadeIn 0.3s ease" }}>
+                      <div style={{ padding: "16px 18px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}`, marginBottom: 16 }}>
+                        <div style={{ fontSize: 14, color: palette.textBright, lineHeight: 1.6, marginBottom: 12 }}>{answer.answer}</div>
+                        <div style={{ display: "flex", gap: 16 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>Confidence:</span>
+                            <ConfidenceBar value={answer.confidence} />
+                          </div>
+                        </div>
+                        {answer.reasoning && (
+                          <div style={{ marginTop: 12, padding: "10px 14px", background: palette.surface, borderRadius: 4, fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim, lineHeight: 1.5 }}>
+                            {answer.reasoning}
+                          </div>
+                        )}
+                      </div>
+
+                      {answer.supporting_claims && answer.supporting_claims.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 8, textTransform: "uppercase" }}>
+                            Supporting Claims ({answer.supporting_claims.length})
+                          </div>
+                          {answer.supporting_claims.map(c => (
+                            <div key={c.claim_id} style={{
+                              padding: "8px 14px", borderLeft: `3px solid ${palette.blue}`, marginBottom: 6,
+                              background: palette.bg, borderRadius: "0 4px 4px 0",
+                            }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <Badge color={palette.blue}>{c.subject_entity_id}</Badge>
+                                <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim }}>{c.predicate}</span>
+                                <span style={{ fontSize: 12, color: palette.text }}>{c.object_value}</span>
+                                <span style={{ marginLeft: "auto", fontSize: 11, fontFamily: FONT_MONO, color: c.confidence > 0.8 ? palette.green : palette.accent }}>{(c.confidence * 100).toFixed(0)}%</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ marginTop: 24, maxWidth: 720 }}>
+                  <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 10 }}>EXAMPLE QUESTIONS</div>
+                  {[
+                    "What do we know about SpaceX?",
+                    "Has water vapor been detected on any exoplanets?",
+                    "What claims have high confidence?",
+                    "Are there any contradictions in our beliefs?",
+                  ].map((ex, i) => (
+                    <button key={i} onClick={() => { setQuestion(ex); setAnswer(null); }} style={{
+                      display: "block", width: "100%", textAlign: "left", padding: "10px 14px",
+                      background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 6,
+                      color: palette.text, fontSize: 12, fontFamily: FONT_MONO, cursor: "pointer", marginBottom: 6,
+                    }}>{ex}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* SUBMIT */}
             {activeTab === "submit" && (
               <div>
@@ -404,31 +821,22 @@
                     }}
                   />
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16 }}>
-                    <button
-                      onClick={handleSubmit}
-                      disabled={!observationText.trim() || submitting}
-                      style={{
-                        padding: "10px 24px", borderRadius: 6, border: "none",
-                        cursor: observationText.trim() && !submitting ? "pointer" : "not-allowed",
-                        fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600,
-                        background: palette.accent, color: palette.bg,
-                        opacity: !observationText.trim() || submitting ? 0.5 : 1,
-                      }}
-                    >
-                      {submitting ? "Processing..." : "Submit"}
-                    </button>
+                    <button onClick={handleSubmit} disabled={!observationText.trim() || submitting} style={{
+                      padding: "10px 24px", borderRadius: 6, border: "none",
+                      cursor: observationText.trim() && !submitting ? "pointer" : "not-allowed",
+                      fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600,
+                      background: palette.accent, color: palette.bg,
+                      opacity: !observationText.trim() || submitting ? 0.5 : 1,
+                    }}>{submitting ? "Processing..." : "Submit"}</button>
                     {submitting && <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.accent }}>extracting claims...</span>}
                   </div>
                   <div style={{ marginTop: 24, padding: "14px 16px", borderRadius: 6, background: palette.bg, border: `1px solid ${palette.border}` }}>
                     <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 8 }}>PIPELINE</div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, flexWrap: "wrap" }}>
-                      <Badge color={palette.blue}>observation</Badge>
-                      <span>-&gt;</span>
-                      <Badge color={palette.purple}>researcher LLM</Badge>
-                      <span>-&gt;</span>
-                      <Badge color={palette.accent}>claims.proposed</Badge>
-                      <span>-&gt;</span>
-                      <Badge color={palette.green}>claims.committed</Badge>
+                      <Badge color={palette.blue}>observation</Badge><span>&rarr;</span>
+                      <Badge color={palette.purple}>researcher</Badge><span>&rarr;</span>
+                      <Badge color={palette.accent}>validator</Badge><span>&rarr;</span>
+                      <Badge color={palette.green}>committed</Badge>
                     </div>
                   </div>
                 </div>
@@ -472,19 +880,19 @@
                 ) : (
                   <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, overflow: "hidden" }}>
                     <div style={{
-                      display: "grid", gridTemplateColumns: "140px 1fr 100px 80px 160px",
+                      display: "grid", gridTemplateColumns: "120px 1fr 90px 70px 140px 40px",
                       padding: "10px 18px", borderBottom: `1px solid ${palette.border}`,
                       fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em",
                     }}>
-                      <span>Claim ID</span><span>Subject / Predicate / Object</span><span>Service</span><span>Conf.</span><span>Created</span>
+                      <span>Claim ID</span><span>Subject / Predicate / Object</span><span>Service</span><span>Conf.</span><span>Created</span><span></span>
                     </div>
                     <div style={{ maxHeight: 500, overflow: "auto" }}>
                       {filteredClaims.map(c => (
                         <div key={c.claim_id} style={{
-                          display: "grid", gridTemplateColumns: "140px 1fr 100px 80px 160px",
+                          display: "grid", gridTemplateColumns: "120px 1fr 90px 70px 140px 40px",
                           padding: "10px 18px", borderBottom: `1px solid ${palette.border}`, alignItems: "center", fontSize: 12,
                         }}>
-                          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: palette.textDim }}>{(c.claim_id || "").slice(0, 16)}</span>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: palette.textDim }}>{(c.claim_id || "").slice(0, 12)}</span>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
                             <Badge color={palette.blue}>{c.subject_entity_id}</Badge>
                             <span style={{ color: palette.textDim, fontFamily: FONT_MONO, fontSize: 11 }}>{c.predicate}</span>
@@ -493,9 +901,53 @@
                           <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: palette.textDim }}>{(c.source_service_id || "").replace("_", " ")}</span>
                           <ConfidenceBar value={c.confidence} />
                           <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: palette.textDim }}>{new Date(c.created_at).toLocaleString()}</span>
+                          <button onClick={() => handleRetract(c.claim_id)} title="Retract claim" style={{
+                            background: "none", border: "none", cursor: "pointer", padding: 4, borderRadius: 4, display: "flex", alignItems: "center",
+                          }}>
+                            <Icon d={Icons.trash} size={14} color={palette.red} />
+                          </button>
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ENTITIES */}
+            {activeTab === "entities" && (
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Entity Explorer</h1>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 24, fontFamily: FONT_MONO }}>{entities.length} entities</p>
+                {entities.length === 0 ? (
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
+                    <EmptyState icon={Icons.entities} message="No entities yet. Submit observations to populate." />
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+                    {entities.map(e => (
+                      <div key={e.canonical_name} style={{
+                        background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "16px 20px",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                          <Badge color={palette.green}>{e.canonical_name}</Badge>
+                          <span style={{ marginLeft: "auto", fontSize: 20, fontWeight: 700, fontFamily: FONT_MONO, color: palette.blue }}>{e.claim_count || 0}</span>
+                        </div>
+                        <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>
+                          {e.claim_count || 0} claims
+                        </div>
+                        {e.aliases && e.aliases.length > 0 && (
+                          <div style={{ marginTop: 8, display: "flex", gap: 4, flexWrap: "wrap" }}>
+                            {e.aliases.map(a => (
+                              <span key={a} style={{
+                                fontSize: 10, fontFamily: FONT_MONO, padding: "2px 6px", borderRadius: 3,
+                                background: palette.border, color: palette.textDim,
+                              }}>{a}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -563,19 +1015,25 @@
                       <span>Time</span><span>Topic</span><span>Source</span><span>Payload</span><span>Envelope</span>
                     </div>
                     <div style={{ maxHeight: 520, overflow: "auto" }}>
-                      {events.map((e, i) => (
-                        <div key={e.envelope_id + i} style={{
-                          display: "grid", gridTemplateColumns: "100px 180px 130px 1fr 100px",
-                          padding: "8px 18px", borderBottom: `1px solid ${palette.border}`, alignItems: "center",
-                          animation: i === 0 ? "fadeIn 0.3s ease" : undefined,
-                        }}>
-                          <span style={{ fontSize: 10, color: palette.textDim }}>{new Date(e.timestamp).toLocaleTimeString()}</span>
-                          <TopicBadge topic={e.topic} />
-                          <span style={{ fontSize: 11, color: palette.textDim }}>{e.source_service_id}</span>
-                          <span style={{ fontSize: 11, color: palette.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.payload}</span>
-                          <span style={{ fontSize: 10, color: palette.textDim }}>{(e.envelope_id || "").slice(0, 10)}</span>
-                        </div>
-                      ))}
+                      {events.map((e, i) => {
+                        const isContradiction = e.topic === "claims.contradiction_detected";
+                        return (
+                          <div key={e.envelope_id + i} style={{
+                            display: "grid", gridTemplateColumns: "100px 180px 130px 1fr 100px",
+                            padding: "8px 18px", borderBottom: `1px solid ${palette.border}`, alignItems: "center",
+                            animation: i === 0 ? "fadeIn 0.3s ease" : undefined,
+                            background: isContradiction ? palette.redDim : "transparent",
+                          }}>
+                            <span style={{ fontSize: 10, color: palette.textDim }}>{new Date(e.timestamp).toLocaleTimeString()}</span>
+                            <TopicBadge topic={e.topic} />
+                            <span style={{ fontSize: 11, color: palette.textDim }}>{e.source_service_id}</span>
+                            <span style={{ fontSize: 11, color: isContradiction ? palette.red : palette.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {isContradiction && "CONTRADICTION: "}{e.payload}
+                            </span>
+                            <span style={{ fontSize: 10, color: palette.textDim }}>{(e.envelope_id || "").slice(0, 10)}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -586,7 +1044,34 @@
       );
     }
 
-    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    function Root() {
+      const [setupComplete, setSetupComplete] = useState(null); // null = loading
+
+      useEffect(() => {
+        fetch(`${API}/api/setup/status`).then(r => r.json()).then(data => {
+          setSetupComplete(data.complete);
+        }).catch(() => setSetupComplete(false));
+      }, []);
+
+      if (setupComplete === null) {
+        return (
+          <div style={{
+            minHeight: "100vh", background: palette.bg, display: "flex",
+            alignItems: "center", justifyContent: "center",
+          }}>
+            <div style={{ fontFamily: FONT_MONO, color: palette.textDim, fontSize: 14 }}>Loading...</div>
+          </div>
+        );
+      }
+
+      if (!setupComplete) {
+        return <SetupScreen onComplete={() => window.location.reload()} />;
+      }
+
+      return <App />;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
   </script>
 </body>
 </html>
