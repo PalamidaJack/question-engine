@@ -1,14 +1,12 @@
-import aiosqlite
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
-from yoyo import read_migrations, get_backend
+import aiosqlite
+from yoyo import get_backend, read_migrations
 
-from qe.models.claim import Claim, Prediction, NullResult
-
+from qe.models.claim import Claim, NullResult, Prediction
 
 log = logging.getLogger(__name__)
 
@@ -94,10 +92,10 @@ class BeliefLedger:
 
     async def get_claims(
         self,
-        subject_entity_id: Optional[str] = None,
-        predicate: Optional[str] = None,
+        subject_entity_id: str | None = None,
+        predicate: str | None = None,
         min_confidence: float = 0.0,
-        tags: Optional[list[str]] = None,
+        tags: list[str] | None = None,
         include_superseded: bool = False,
     ) -> list[Claim]:
         """Standard filtered read. include_superseded=False returns only current beliefs."""
@@ -142,7 +140,11 @@ class BeliefLedger:
                     prediction.statement,
                     prediction.confidence,
                     prediction.resolution_criteria,
-                    prediction.resolution_deadline.isoformat() if prediction.resolution_deadline else None,
+                    (
+                        prediction.resolution_deadline.isoformat()
+                        if prediction.resolution_deadline
+                        else None
+                    ),
                     prediction.source_service_id,
                     prediction.created_at.isoformat(),
                     prediction.resolved_at.isoformat() if prediction.resolved_at else None,
@@ -168,7 +170,12 @@ class BeliefLedger:
                 SET resolution = ?, resolved_at = ?, resolution_evidence_ids = ?
                 WHERE prediction_id = ?
                 """,
-                (resolution, datetime.utcnow().isoformat(), json.dumps(evidence_envelope_ids), prediction_id)
+                (
+                    resolution,
+                    datetime.now(UTC).isoformat(),
+                    json.dumps(evidence_envelope_ids),
+                    prediction_id,
+                )
             )
             await db.commit()
 
@@ -193,7 +200,7 @@ class BeliefLedger:
                 WHERE resolution = 'unresolved' AND resolution_deadline < ?
                 ORDER BY resolution_deadline ASC
             """
-            params = (datetime.utcnow().isoformat(),)
+            params = (datetime.now(UTC).isoformat(),)
         else:
             query = """
                 SELECT * FROM predictions

@@ -1,5 +1,3 @@
-import inspect
-from typing import Any
 
 from pydantic import BaseModel
 
@@ -15,7 +13,9 @@ class ResearcherService(BaseService):
         await self._maybe_await(self.bus.subscribe("claims.proposed", self._handle_claim_proposed))
 
     async def stop(self) -> None:
-        await self._maybe_await(self.bus.unsubscribe("claims.proposed", self._handle_claim_proposed))
+        await self._maybe_await(
+            self.bus.unsubscribe("claims.proposed", self._handle_claim_proposed)
+        )
         await super().stop()
 
     def get_response_schema(self, topic: str) -> type[BaseModel]:

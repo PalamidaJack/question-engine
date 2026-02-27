@@ -1,6 +1,5 @@
 from qe.models.envelope import Envelope
 
-
 TOPICS = {
     # Ingestion
     "observations.raw",
@@ -21,6 +20,9 @@ TOPICS = {
     # System
     "system.heartbeat",
     "system.error",
+    "system.circuit_break",
+    "system.service_stalled",
+    "system.budget_alert",
 }
 
 

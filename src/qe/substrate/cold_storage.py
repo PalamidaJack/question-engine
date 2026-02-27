@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from typing import Optional
 
 from qe.models.envelope import Envelope
 
@@ -27,7 +26,7 @@ class ColdStorage:
 
         return file_path
 
-    def read(self, envelope_id: str, year: int, month: int) -> Optional[Envelope]:
+    def read(self, envelope_id: str, year: int, month: int) -> Envelope | None:
         """
         Read and deserialize envelope from cold/YYYY/MM/{envelope_id}.json.
         Returns None if not found.
@@ -37,7 +36,7 @@ class ColdStorage:
         if not file_path.exists():
             return None
 
-        with open(file_path, "r") as f:
+        with open(file_path) as f:
             data = json.load(f)
 
         return Envelope(**data)

@@ -1,6 +1,6 @@
 # Question Engine OS
 
-[![CI](https://github.com/YOUR_USERNAME/question-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/question-engine/actions)
+[![CI](https://github.com/PalamidaJack/question-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/PalamidaJack/question-engine/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
@@ -10,7 +10,7 @@ An operating system for AI agents. Persistent daemon services, deterministic mes
 
 ```bash
 # Install
-git clone https://github.com/YOUR_USERNAME/question-engine.git
+git clone https://github.com/PalamidaJack/question-engine.git
 cd question-engine
 pip install -e ".[dev]"
 

@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Question Engine OS</title>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0c10; overflow: hidden; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #1e2330; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #2a3040; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    button:hover { filter: brightness(1.1); }
+    textarea::placeholder, input::placeholder { color: #5c6478; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    const API = window.location.origin;
+    const WS_URL = `ws://${window.location.host}/ws`;
+
+    const FONT_MONO = "'IBM Plex Mono', 'Fira Code', 'SF Mono', monospace";
+    const FONT_SANS = "'IBM Plex Sans', 'DM Sans', system-ui, sans-serif";
+
+    const palette = {
+      bg: "#0a0c10", surface: "#12151c", surfaceHover: "#181c26",
+      border: "#1e2330", borderBright: "#2a3040",
+      text: "#c8cdd8", textDim: "#5c6478", textBright: "#e8ecf4",
+      accent: "#e09840", accentDim: "rgba(224,152,64,0.15)",
+      green: "#3ddc84", greenDim: "rgba(61,220,132,0.12)",
+      red: "#f44060", redDim: "rgba(244,64,96,0.12)",
+      blue: "#4a9eff", blueDim: "rgba(74,158,255,0.10)",
+      purple: "#a78bfa",
+    };
+
+    const Icon = ({ d, size = 16, color = palette.textDim, style }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>
+        <path d={d} />
+      </svg>
+    );
+
+    const Icons = {
+      dashboard: "M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z M9 22V12h6v10",
+      submit: "M12 19V5 M5 12l7-7 7 7",
+      claims: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2 M9 5a2 2 0 002 2h2a2 2 0 002-2 M9 5a2 2 0 012-2h2a2 2 0 012 2",
+      hil: "M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2 M8.5 7a4 4 0 100-8 4 4 0 000 8z M20 8v6 M23 11h-6",
+      bus: "M22 12h-4l-3 9L9 3l-3 9H2",
+      check: "M20 6L9 17l-5-5",
+      x: "M18 6L6 18 M6 6l12 12",
+      clock: "M12 2a10 10 0 100 20 10 10 0 000-20z M12 6v6l4 2",
+      search: "M11 3a8 8 0 100 16 8 8 0 000-16z M21 21l-4.35-4.35",
+    };
+
+    const Badge = ({ children, color = palette.accent, bg }) => (
+      <span style={{
+        display: "inline-flex", alignItems: "center", gap: 4,
+        padding: "2px 8px", borderRadius: 4, fontSize: 11, fontFamily: FONT_MONO,
+        color, background: bg || `${color}18`, fontWeight: 600, letterSpacing: "0.02em",
+        lineHeight: "18px", whiteSpace: "nowrap",
+      }}>{children}</span>
+    );
+
+    const StatusDot = ({ alive }) => (
+      <span style={{
+        display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+        background: alive ? palette.green : palette.red, flexShrink: 0,
+        boxShadow: alive ? `0 0 6px ${palette.green}80` : `0 0 6px ${palette.red}80`,
+      }} />
+    );
+
+    const Stat = ({ label, value, sub, color = palette.textBright }) => (
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <span style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</span>
+        <span style={{ fontSize: 28, fontWeight: 700, fontFamily: FONT_MONO, color, lineHeight: 1 }}>{value}</span>
+        {sub && <span style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO }}>{sub}</span>}
+      </div>
+    );
+
+    const EmptyState = ({ icon, message }) => (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "48px 24px", gap: 12, opacity: 0.5 }}>
+        <Icon d={icon} size={32} color={palette.textDim} />
+        <span style={{ fontSize: 13, color: palette.textDim, fontFamily: FONT_MONO }}>{message}</span>
+      </div>
+    );
+
+    function TopicBadge({ topic }) {
+      const colors = {
+        "observations": palette.blue, "claims": palette.purple,
+        "hil": palette.accent, "system": palette.textDim, "investigations": palette.green,
+      };
+      const prefix = topic.split(".")[0];
+      return <Badge color={colors[prefix] || palette.textDim}>{topic}</Badge>;
+    }
+
+    function ConfidenceBar({ value }) {
+      const pct = Math.round(value * 100);
+      const color = value > 0.8 ? palette.green : value > 0.6 ? palette.accent : palette.red;
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ width: 40, height: 4, background: palette.border, borderRadius: 2, overflow: "hidden" }}>
+            <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 2 }} />
+          </div>
+          <span style={{ fontSize: 11, fontFamily: FONT_MONO, color }}>{pct}%</span>
+        </div>
+      );
+    }
+
+    function App() {
+      const [activeTab, setActiveTab] = useState("dashboard");
+      const [claims, setClaims] = useState([]);
+      const [events, setEvents] = useState([]);
+      const [hilQueue, setHilQueue] = useState([]);
+      const [services, setServices] = useState([]);
+      const [engineRunning, setEngineRunning] = useState(false);
+      const [budget, setBudget] = useState(null);
+      const [observationText, setObservationText] = useState("");
+      const [submitting, setSubmitting] = useState(false);
+      const [searchQuery, setSearchQuery] = useState("");
+      const wsRef = useRef(null);
+
+      // Connect WebSocket
+      useEffect(() => {
+        const connect = () => {
+          const ws = new WebSocket(WS_URL);
+          ws.onopen = () => console.log("WebSocket connected");
+          ws.onmessage = (msg) => {
+            try {
+              const data = JSON.parse(msg.data);
+              if (data.type === "bus_event") {
+                setEvents(prev => [{
+                  envelope_id: data.envelope_id,
+                  topic: data.topic,
+                  source_service_id: data.source_service_id,
+                  timestamp: data.timestamp,
+                  payload: typeof data.payload === "string" ? data.payload : JSON.stringify(data.payload).slice(0, 120),
+                }, ...prev].slice(0, 200));
+
+                // Auto-refresh claims on commit
+                if (data.topic === "claims.committed") fetchClaims();
+                if (data.topic === "hil.approval_required") fetchHil();
+              }
+            } catch {}
+          };
+          ws.onclose = () => setTimeout(connect, 2000);
+          wsRef.current = ws;
+        };
+        connect();
+        return () => { if (wsRef.current) wsRef.current.close(); };
+      }, []);
+
+      // Poll status
+      useEffect(() => {
+        const poll = async () => {
+          try {
+            const res = await fetch(`${API}/api/status`);
+            if (res.ok) {
+              const data = await res.json();
+              setServices(data.services || []);
+              setBudget(data.budget || null);
+              setEngineRunning(data.services?.some(s => s.status === "alive") || false);
+            }
+          } catch {}
+        };
+        poll();
+        const interval = setInterval(poll, 5000);
+        return () => clearInterval(interval);
+      }, []);
+
+      const fetchClaims = async () => {
+        try {
+          const res = await fetch(`${API}/api/claims`);
+          if (res.ok) {
+            const data = await res.json();
+            setClaims(data.claims || []);
+          }
+        } catch {}
+      };
+
+      const fetchHil = async () => {
+        try {
+          const res = await fetch(`${API}/api/hil/pending`);
+          if (res.ok) {
+            const data = await res.json();
+            setHilQueue(data.pending || []);
+          }
+        } catch {}
+      };
+
+      useEffect(() => { fetchClaims(); fetchHil(); }, []);
+
+      const handleSubmit = async () => {
+        if (!observationText.trim()) return;
+        setSubmitting(true);
+        try {
+          const res = await fetch(`${API}/api/submit`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: observationText.trim() }),
+          });
+          if (res.ok) {
+            setObservationText("");
+            setTimeout(fetchClaims, 3000);
+          }
+        } catch {}
+        setSubmitting(false);
+      };
+
+      const handleHilDecision = async (id, decision) => {
+        try {
+          await fetch(`${API}/api/hil/${id}/${decision}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: "user decision" }),
+          });
+          fetchHil();
+        } catch {}
+      };
+
+      const filteredClaims = claims.filter(c => {
+        if (!searchQuery) return true;
+        const q = searchQuery.toLowerCase();
+        return (c.subject_entity_id || "").toLowerCase().includes(q) ||
+               (c.object_value || "").toLowerCase().includes(q) ||
+               (c.claim_id || "").includes(q);
+      });
+
+      const pendingHil = hilQueue.filter(h => h.status === "pending").length;
+
+      const navItems = [
+        { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
+        { id: "submit", label: "Submit", icon: Icons.submit },
+        { id: "claims", label: "Claims", icon: Icons.claims, count: claims.length },
+        { id: "hil", label: "HIL Queue", icon: Icons.hil, count: pendingHil },
+        { id: "bus", label: "Event Bus", icon: Icons.bus, count: events.length },
+      ];
+
+      return (
+        <div style={{
+          display: "flex", height: "100vh", width: "100%", background: palette.bg,
+          fontFamily: FONT_SANS, color: palette.text, overflow: "hidden",
+        }}>
+          {/* Sidebar */}
+          <nav style={{
+            width: 220, minWidth: 220, background: palette.surface,
+            borderRight: `1px solid ${palette.border}`,
+            display: "flex", flexDirection: "column",
+          }}>
+            <div style={{ padding: "20px 16px 16px", borderBottom: `1px solid ${palette.border}`, display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{
+                width: 32, height: 32, borderRadius: 6, background: palette.accentDim,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                border: `1px solid ${palette.accent}40`, fontSize: 14, fontFamily: FONT_MONO,
+                color: palette.accent, fontWeight: 800,
+              }}>QE</div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: palette.textBright }}>Question Engine</div>
+                <div style={{ fontSize: 10, color: palette.textDim, fontFamily: FONT_MONO }}>v0.1.0</div>
+              </div>
+            </div>
+
+            <div style={{ padding: "12px 16px", borderBottom: `1px solid ${palette.border}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <StatusDot alive={engineRunning} />
+                <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: engineRunning ? palette.green : palette.textDim }}>
+                  {engineRunning ? "ENGINE ONLINE" : "ENGINE OFFLINE"}
+                </span>
+              </div>
+              {budget && (
+                <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>
+                  Budget: ${budget.total_spend?.toFixed(4)} / ${budget.limit_usd?.toFixed(2)}
+                </div>
+              )}
+            </div>
+
+            <div style={{ padding: "8px 8px", flex: 1 }}>
+              {navItems.map(item => {
+                const active = activeTab === item.id;
+                return (
+                  <button key={item.id} onClick={() => setActiveTab(item.id)} style={{
+                    display: "flex", alignItems: "center", gap: 10, width: "100%",
+                    padding: "9px 10px", borderRadius: 6, border: "none", cursor: "pointer",
+                    background: active ? palette.accentDim : "transparent",
+                    color: active ? palette.accent : palette.textDim,
+                    fontFamily: FONT_SANS, fontSize: 13, fontWeight: active ? 600 : 400,
+                    marginBottom: 2, textAlign: "left",
+                  }}>
+                    <Icon d={item.icon} size={16} color={active ? palette.accent : palette.textDim} />
+                    <span style={{ flex: 1 }}>{item.label}</span>
+                    {item.count > 0 && (
+                      <span style={{
+                        fontSize: 10, fontFamily: FONT_MONO, padding: "1px 6px", borderRadius: 10,
+                        background: active ? `${palette.accent}30` : palette.border,
+                        color: active ? palette.accent : palette.textDim,
+                      }}>{item.count}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ padding: "12px 16px", borderTop: `1px solid ${palette.border}` }}>
+              <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Services</div>
+              {services.map(s => (
+                <div key={s.service_id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <StatusDot alive={s.status === "alive"} />
+                  <span style={{ fontSize: 11, color: palette.text, flex: 1 }}>{s.display_name || s.service_id}</span>
+                  <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>t{s.turn_count || 0}</span>
+                </div>
+              ))}
+              {services.length === 0 && (
+                <span style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO }}>No services</span>
+              )}
+            </div>
+          </nav>
+
+          {/* Main content */}
+          <main style={{ flex: 1, overflow: "auto", padding: "24px 32px" }}>
+
+            {/* DASHBOARD */}
+            {activeTab === "dashboard" && (
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Dashboard</h1>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 24, fontFamily: FONT_MONO }}>System overview</p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 28 }}>
+                  {[
+                    { label: "Claims", value: claims.length, color: palette.blue },
+                    { label: "Pending HIL", value: pendingHil, color: pendingHil > 0 ? palette.accent : palette.textDim },
+                    { label: "Events", value: events.length, color: palette.purple },
+                    { label: "Services", value: services.filter(s => s.status === "alive").length, sub: engineRunning ? "online" : "offline", color: engineRunning ? palette.green : palette.textDim },
+                  ].map((s, i) => (
+                    <div key={i} style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 20px" }}>
+                      <Stat {...s} />
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, overflow: "hidden" }}>
+                    <div style={{ padding: "14px 18px", borderBottom: `1px solid ${palette.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: palette.textBright }}>Recent Claims</span>
+                      {claims.length > 0 && <button onClick={() => setActiveTab("claims")} style={{ fontSize: 11, color: palette.accent, background: "none", border: "none", cursor: "pointer", fontFamily: FONT_MONO }}>View all</button>}
+                    </div>
+                    {claims.length === 0 ? <EmptyState icon={Icons.claims} message="No claims yet." /> : (
+                      <div style={{ maxHeight: 320, overflow: "auto" }}>
+                        {claims.slice(0, 8).map(c => (
+                          <div key={c.claim_id} style={{ padding: "10px 18px", borderBottom: `1px solid ${palette.border}`, display: "flex", alignItems: "center", gap: 12 }}>
+                            <Badge color={palette.blue}>{c.subject_entity_id}</Badge>
+                            <span style={{ fontSize: 12, color: palette.textDim, fontFamily: FONT_MONO, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {c.predicate} - {c.object_value}
+                            </span>
+                            <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: c.confidence > 0.8 ? palette.green : palette.accent }}>{(c.confidence * 100).toFixed(0)}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, overflow: "hidden" }}>
+                    <div style={{ padding: "14px 18px", borderBottom: `1px solid ${palette.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: palette.textBright }}>Event Bus</span>
+                      {events.length > 0 && <button onClick={() => setActiveTab("bus")} style={{ fontSize: 11, color: palette.accent, background: "none", border: "none", cursor: "pointer", fontFamily: FONT_MONO }}>View all</button>}
+                    </div>
+                    {events.length === 0 ? <EmptyState icon={Icons.bus} message="No events yet." /> : (
+                      <div style={{ maxHeight: 320, overflow: "auto" }}>
+                        {events.slice(0, 10).map(e => (
+                          <div key={e.envelope_id} style={{ padding: "8px 18px", borderBottom: `1px solid ${palette.border}`, display: "flex", alignItems: "center", gap: 10 }}>
+                            <TopicBadge topic={e.topic} />
+                            <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.payload}</span>
+                            <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>{new Date(e.timestamp).toLocaleTimeString()}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SUBMIT */}
+            {activeTab === "submit" && (
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Submit Observation</h1>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 28, fontFamily: FONT_MONO }}>Feed observations into the engine for claim extraction</p>
+                <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: 24, maxWidth: 640 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: palette.textBright, display: "block", marginBottom: 8 }}>Observation Text</label>
+                  <textarea
+                    value={observationText}
+                    onChange={e => setObservationText(e.target.value)}
+                    placeholder="e.g. SpaceX launched Starship on March 3rd and achieved full orbit"
+                    rows={4}
+                    style={{
+                      width: "100%", padding: "12px 14px", borderRadius: 6, resize: "vertical",
+                      background: palette.bg, border: `1px solid ${palette.border}`, color: palette.text,
+                      fontFamily: FONT_MONO, fontSize: 13, outline: "none", boxSizing: "border-box", lineHeight: 1.5,
+                    }}
+                  />
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16 }}>
+                    <button
+                      onClick={handleSubmit}
+                      disabled={!observationText.trim() || submitting}
+                      style={{
+                        padding: "10px 24px", borderRadius: 6, border: "none",
+                        cursor: observationText.trim() && !submitting ? "pointer" : "not-allowed",
+                        fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600,
+                        background: palette.accent, color: palette.bg,
+                        opacity: !observationText.trim() || submitting ? 0.5 : 1,
+                      }}
+                    >
+                      {submitting ? "Processing..." : "Submit"}
+                    </button>
+                    {submitting && <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.accent }}>extracting claims...</span>}
+                  </div>
+                  <div style={{ marginTop: 24, padding: "14px 16px", borderRadius: 6, background: palette.bg, border: `1px solid ${palette.border}` }}>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 8 }}>PIPELINE</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, flexWrap: "wrap" }}>
+                      <Badge color={palette.blue}>observation</Badge>
+                      <span>-&gt;</span>
+                      <Badge color={palette.purple}>researcher LLM</Badge>
+                      <span>-&gt;</span>
+                      <Badge color={palette.accent}>claims.proposed</Badge>
+                      <span>-&gt;</span>
+                      <Badge color={palette.green}>claims.committed</Badge>
+                    </div>
+                  </div>
+                </div>
+                <div style={{ marginTop: 24, maxWidth: 640 }}>
+                  <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 10 }}>EXAMPLES</div>
+                  {[
+                    "Water vapor was found in the atmosphere of exoplanet K2-18b by JWST",
+                    "SpaceX launched Starship and achieved full orbital insertion",
+                    "DeepMind announced AlphaFold 4 with protein interaction predictions",
+                    "CERN reported anomalous readings at the LHC suggesting new physics",
+                  ].map((ex, i) => (
+                    <button key={i} onClick={() => setObservationText(ex)} style={{
+                      display: "block", width: "100%", textAlign: "left", padding: "10px 14px",
+                      background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 6,
+                      color: palette.text, fontSize: 12, fontFamily: FONT_MONO, cursor: "pointer", marginBottom: 6,
+                    }}>{ex}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* CLAIMS */}
+            {activeTab === "claims" && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+                  <div>
+                    <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Belief Ledger</h1>
+                    <p style={{ fontSize: 13, color: palette.textDim, fontFamily: FONT_MONO }}>{claims.length} claims</p>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 6 }}>
+                    <Icon d={Icons.search} size={14} color={palette.textDim} />
+                    <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search claims..." style={{
+                      background: "none", border: "none", outline: "none", color: palette.text, fontFamily: FONT_MONO, fontSize: 12, width: 180,
+                    }} />
+                  </div>
+                </div>
+                {filteredClaims.length === 0 ? (
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
+                    <EmptyState icon={Icons.claims} message={searchQuery ? "No matching claims." : "No claims yet."} />
+                  </div>
+                ) : (
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, overflow: "hidden" }}>
+                    <div style={{
+                      display: "grid", gridTemplateColumns: "140px 1fr 100px 80px 160px",
+                      padding: "10px 18px", borderBottom: `1px solid ${palette.border}`,
+                      fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em",
+                    }}>
+                      <span>Claim ID</span><span>Subject / Predicate / Object</span><span>Service</span><span>Conf.</span><span>Created</span>
+                    </div>
+                    <div style={{ maxHeight: 500, overflow: "auto" }}>
+                      {filteredClaims.map(c => (
+                        <div key={c.claim_id} style={{
+                          display: "grid", gridTemplateColumns: "140px 1fr 100px 80px 160px",
+                          padding: "10px 18px", borderBottom: `1px solid ${palette.border}`, alignItems: "center", fontSize: 12,
+                        }}>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: palette.textDim }}>{(c.claim_id || "").slice(0, 16)}</span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
+                            <Badge color={palette.blue}>{c.subject_entity_id}</Badge>
+                            <span style={{ color: palette.textDim, fontFamily: FONT_MONO, fontSize: 11 }}>{c.predicate}</span>
+                            <span style={{ color: palette.text, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.object_value}</span>
+                          </div>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: palette.textDim }}>{(c.source_service_id || "").replace("_", " ")}</span>
+                          <ConfidenceBar value={c.confidence} />
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: palette.textDim }}>{new Date(c.created_at).toLocaleString()}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* HIL QUEUE */}
+            {activeTab === "hil" && (
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Human-in-the-Loop Queue</h1>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 24, fontFamily: FONT_MONO }}>{hilQueue.length} items</p>
+                {hilQueue.length === 0 ? (
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
+                    <EmptyState icon={Icons.hil} message="No HIL requests." />
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {hilQueue.map(h => (
+                      <div key={h.envelope_id} style={{
+                        background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "16px 20px",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                          <Badge color={palette.accent}>PENDING</Badge>
+                          <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim }}>{h.reason}</span>
+                          <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>
+                            expires {h.expires_at ? new Date(h.expires_at).toLocaleTimeString() : "N/A"}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 13, color: palette.text, marginBottom: 12, fontFamily: FONT_MONO }}>{h.proposal_summary || JSON.stringify(h.full_payload || {}).slice(0, 120)}</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>id: {(h.envelope_id || "").slice(0, 12)}</span>
+                          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                            <button onClick={() => handleHilDecision(h.envelope_id, "approve")} style={{
+                              padding: "6px 16px", borderRadius: 5, border: "none", cursor: "pointer",
+                              background: palette.greenDim, color: palette.green, fontFamily: FONT_MONO, fontSize: 11, fontWeight: 600,
+                            }}>Approve</button>
+                            <button onClick={() => handleHilDecision(h.envelope_id, "reject")} style={{
+                              padding: "6px 16px", borderRadius: 5, border: "none", cursor: "pointer",
+                              background: palette.redDim, color: palette.red, fontFamily: FONT_MONO, fontSize: 11, fontWeight: 600,
+                            }}>Reject</button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* EVENT BUS */}
+            {activeTab === "bus" && (
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Event Bus</h1>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 24, fontFamily: FONT_MONO }}>Real-time message flow - {events.length} events</p>
+                {events.length === 0 ? (
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
+                    <EmptyState icon={Icons.bus} message="No events yet." />
+                  </div>
+                ) : (
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, overflow: "hidden", fontFamily: FONT_MONO, fontSize: 12 }}>
+                    <div style={{
+                      display: "grid", gridTemplateColumns: "100px 180px 130px 1fr 100px",
+                      padding: "10px 18px", borderBottom: `1px solid ${palette.border}`,
+                      fontSize: 10, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em",
+                    }}>
+                      <span>Time</span><span>Topic</span><span>Source</span><span>Payload</span><span>Envelope</span>
+                    </div>
+                    <div style={{ maxHeight: 520, overflow: "auto" }}>
+                      {events.map((e, i) => (
+                        <div key={e.envelope_id + i} style={{
+                          display: "grid", gridTemplateColumns: "100px 180px 130px 1fr 100px",
+                          padding: "8px 18px", borderBottom: `1px solid ${palette.border}`, alignItems: "center",
+                          animation: i === 0 ? "fadeIn 0.3s ease" : undefined,
+                        }}>
+                          <span style={{ fontSize: 10, color: palette.textDim }}>{new Date(e.timestamp).toLocaleTimeString()}</span>
+                          <TopicBadge topic={e.topic} />
+                          <span style={{ fontSize: 11, color: palette.textDim }}>{e.source_service_id}</span>
+                          <span style={{ fontSize: 11, color: palette.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.payload}</span>
+                          <span style={{ fontSize: 10, color: palette.textDim }}>{(e.envelope_id || "").slice(0, 10)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

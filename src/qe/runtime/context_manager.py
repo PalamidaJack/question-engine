@@ -1,11 +1,9 @@
 import logging
-from typing import Any
 
 from litellm import token_counter
 
 from qe.models.envelope import Envelope
 from qe.models.genome import Blueprint
-
 
 log = logging.getLogger(__name__)
 
@@ -15,6 +13,11 @@ class ContextManager:
         self.blueprint = blueprint
         self.history: list[dict] = []
         self.token_limit = blueprint.max_context_tokens
+
+    @property
+    def _immutable_count(self) -> int:
+        """Number of leading messages that must never be truncated."""
+        return 2 if self.blueprint.constitution else 1
 
     def build_messages(
         self,
@@ -26,18 +29,29 @@ class ContextManager:
         Structure:
         [
             {"role": "system", "content": system_prompt},
+            {"role": "system", "content": constitution},  # immutable safety zone
             ... compressed history ...,
             {"role": "user", "content": format_envelope_as_user_message(envelope)}
         ]
-        Phase 0: truncate oldest non-system messages when over limit.
+        The constitution (if present) is NEVER truncated — it survives all compression.
         """
         messages = [{"role": "system", "content": self.blueprint.system_prompt}]
+
+        # Immutable safety zone: constitution is never compressed away
+        if self.blueprint.constitution:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[CONSTITUTION — IMMUTABLE SAFETY CONSTRAINTS]\n"
+                    + self.blueprint.constitution
+                ),
+            })
 
         # Reinforcement: re-inject system prompt every N turns
         if turn_count > 0 and turn_count % self.blueprint.reinforcement_interval_turns == 0:
             messages.append({
                 "role": "user",
-                "content": f"[SYSTEM REMINDER] {self.blueprint.system_prompt}"
+                "content": f"[SYSTEM REMINDER] {self.blueprint.system_prompt}",
             })
 
         messages.extend(self.history)
@@ -45,21 +59,22 @@ class ContextManager:
         # Add current envelope as user message
         messages.append({
             "role": "user",
-            "content": self._format_envelope(envelope)
+            "content": self._format_envelope(envelope),
         })
 
-        # Phase 0 compression: truncate if over token limit
-        # TODO Phase 1: replace with LLM summarization
+        # Compression: truncate if over token limit
+        # Never drop immutable messages (system prompt + constitution)
         threshold = int(self.token_limit * self.blueprint.context_compression_threshold)
         model = "gpt-4o-mini"  # Default model for counting
 
         token_count = token_counter(model=model, messages=messages)
-        while token_count > threshold and len(messages) > 1:
-            # Remove oldest non-system message (index 1)
-            removed = messages.pop(1)
+        immutable = self._immutable_count
+        while token_count > threshold and len(messages) > immutable:
+            removed = messages.pop(immutable)
             log.warning(
-                f"Context truncated: removed message role={removed['role']}, "
-                f"tokens now={token_counter(model=model, messages=messages)}"
+                "Context truncated: removed message role=%s, tokens now=%d",
+                removed["role"],
+                token_counter(model=model, messages=messages),
             )
             token_count = token_counter(model=model, messages=messages)
 

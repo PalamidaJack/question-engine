@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections import defaultdict
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from qe.bus.protocol import validate_envelope
 from qe.models.envelope import Envelope
@@ -11,7 +11,9 @@ log = logging.getLogger(__name__)
 
 class MemoryBus:
     def __init__(self) -> None:
-        self._subscribers: dict[str, list[Callable[[Envelope], Awaitable[None]]]] = defaultdict(list)
+        self._subscribers: dict[
+            str, list[Callable[[Envelope], Awaitable[None]]]
+        ] = defaultdict(list)
 
     def subscribe(self, topic: str, handler: Callable[[Envelope], Awaitable[None]]) -> None:
         self._subscribers[topic].append(handler)

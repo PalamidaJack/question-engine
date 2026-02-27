@@ -3,13 +3,14 @@ import inspect
 import logging
 from typing import Any
 
-from dotenv import load_dotenv
 import instructor
 import litellm
+from dotenv import load_dotenv
 from pydantic import BaseModel
 
 from qe.models.envelope import Envelope
 from qe.models.genome import Blueprint
+from qe.runtime.budget import BudgetTracker
 from qe.runtime.context_manager import ContextManager
 from qe.runtime.router import AutoRouter
 
@@ -19,12 +20,19 @@ log = logging.getLogger(__name__)
 
 
 class BaseService:
+    # Shared budget tracker across all services in this process
+    _shared_budget: BudgetTracker | None = None
+
+    @classmethod
+    def set_budget_tracker(cls, tracker: BudgetTracker) -> None:
+        cls._shared_budget = tracker
+
     def __init__(self, blueprint: Blueprint, bus: Any, substrate: Any) -> None:
         self.blueprint = blueprint
         self.bus = bus
         self.substrate = substrate
         self.context_manager = ContextManager(blueprint)
-        self.router = AutoRouter(blueprint.model_preference)
+        self.router = AutoRouter(blueprint.model_preference, self._shared_budget)
         self._turn_count = 0
         self._running = False
         self._heartbeat_task: asyncio.Task | None = None
@@ -71,11 +79,20 @@ class BaseService:
 
     async def _call_llm(self, model: str, messages: list[dict], schema: type[BaseModel]) -> Any:
         client = instructor.from_litellm(litellm.acompletion)
-        return await client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=model,
             messages=messages,
             response_model=schema,
         )
+        # Record cost if budget tracking is active
+        if self._shared_budget is not None:
+            cost = litellm.completion_cost(
+                model=model,
+                messages=messages,
+                completion="",
+            )
+            self._shared_budget.record_cost(model, cost)
+        return response
 
     async def reconfigure(self, new_config: dict[str, Any]) -> None:
         self.config = new_config

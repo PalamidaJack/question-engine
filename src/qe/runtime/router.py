@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 import os
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
-from qe.models.genome import ModelPreference
 from qe.models.envelope import Envelope
+from qe.models.genome import ModelPreference
 
+if TYPE_CHECKING:
+    from qe.runtime.budget import BudgetTracker
 
 TIER_MODELS = {
     "fast": ["gpt-4o-mini", "claude-haiku-3-5"],
@@ -14,8 +19,13 @@ TIER_MODELS = {
 
 
 class AutoRouter:
-    def __init__(self, preference: ModelPreference) -> None:
+    def __init__(
+        self,
+        preference: ModelPreference,
+        budget_tracker: BudgetTracker | None = None,
+    ) -> None:
         self.preference = preference
+        self.budget_tracker = budget_tracker
         self._error_timestamps: dict[str, datetime] = {}
 
     def select(self, envelope: Envelope) -> str:
@@ -66,17 +76,15 @@ class AutoRouter:
         if model not in self._error_timestamps:
             return False
 
-        cooldown_window = datetime.utcnow() - timedelta(minutes=5)
+        cooldown_window = datetime.now(UTC) - timedelta(minutes=5)
         return self._error_timestamps[model] > cooldown_window
 
     def _budget_remaining_pct(self) -> float:
-        """
-        Return budget remaining percentage.
-        TODO Phase 1: implement real budget tracking via litellm.
-        """
-        # TODO Phase 1: implement real budget tracking via litellm
-        return 1.0
+        """Return budget remaining percentage from the budget tracker."""
+        if self.budget_tracker is None:
+            return 1.0
+        return self.budget_tracker.remaining_pct()
 
     def record_error(self, model: str) -> None:
         """Record the current timestamp for a model error."""
-        self._error_timestamps[model] = datetime.utcnow()
+        self._error_timestamps[model] = datetime.now(UTC)

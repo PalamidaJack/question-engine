@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-import sys
-from datetime import datetime
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
@@ -17,6 +18,8 @@ from qe.models.envelope import Envelope
 from qe.substrate import Substrate
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 app = typer.Typer(help="Question Engine CLI")
 claims_app = typer.Typer(help="Claim inspection commands")
@@ -38,10 +41,10 @@ def _genome_paths() -> list[Path]:
 async def _inbox_relay_loop() -> None:
     """Relay cross-process submissions into the in-memory bus singleton."""
     bus = get_bus()
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
 
     while True:
-        for item in sorted(INBOX_DIR.glob("*.json")):
+        for item in sorted(INBOX_DIR.glob("*.json")):  # noqa: ASYNC240
             try:
                 payload = json.loads(item.read_text(encoding="utf-8"))
                 env = Envelope.model_validate(payload)
@@ -51,15 +54,28 @@ async def _inbox_relay_loop() -> None:
         await asyncio.sleep(0.5)
 
 
+def _configure_logging(verbose: bool = False) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
 @app.command()
-def start() -> None:
+def start(verbose: bool = typer.Option(False, "--verbose", "-v")) -> None:
+    """Start the Question Engine daemon."""
+    _configure_logging(verbose)
     try:
         bus = get_bus()
         substrate = Substrate()
 
         async def _run() -> None:
             await substrate.initialize()
-            supervisor = Supervisor(bus=bus, substrate=substrate, config_path=Path("config.toml"))
+            supervisor = Supervisor(
+                bus=bus, substrate=substrate, config_path=Path("config.toml")
+            )
             relay_task = asyncio.create_task(_inbox_relay_loop())
             try:
                 await supervisor.start(_genome_paths())
@@ -68,16 +84,15 @@ def start() -> None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await relay_task
 
-        import contextlib
-
         asyncio.run(_run())
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=1)
+        log.error("Engine failed: %s", exc)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()
 def submit(observation_text: str) -> None:
+    """Submit an observation to the engine for claim extraction."""
     envelope = Envelope(
         topic="observations.structured",
         source_service_id="cli",
@@ -99,7 +114,10 @@ def submit(observation_text: str) -> None:
 
 
 @claims_app.command("list")
-def claims_list(subject: str | None = typer.Option(None, "--subject")) -> None:
+def claims_list(
+    subject: str | None = typer.Option(None, "--subject"),
+) -> None:
+    """List all claims in the belief ledger."""
     async def _run() -> None:
         substrate = Substrate()
         await substrate.initialize()
@@ -131,6 +149,7 @@ def claims_list(subject: str | None = typer.Option(None, "--subject")) -> None:
 
 @claims_app.command("get")
 def claims_get(claim_id: str) -> None:
+    """Get a specific claim by ID."""
     async def _run() -> None:
         substrate = Substrate()
         await substrate.initialize()
@@ -139,7 +158,7 @@ def claims_get(claim_id: str) -> None:
             if claim.claim_id == claim_id:
                 console.print_json(data=claim.model_dump(mode="json"))
                 return
-        print(f"Claim not found: {claim_id}", file=sys.stderr)
+        log.error("Claim not found: %s", claim_id)
         raise typer.Exit(code=1)
 
     asyncio.run(_run())
@@ -147,6 +166,7 @@ def claims_get(claim_id: str) -> None:
 
 @hil_app.command("list")
 def hil_list() -> None:
+    """List pending HIL approval requests."""
     pending_dir = Path("data/hil_queue/pending")
     pending_dir.mkdir(parents=True, exist_ok=True)
 
@@ -157,25 +177,37 @@ def hil_list() -> None:
 
     for file in files:
         payload = json.loads(file.read_text(encoding="utf-8"))
-        console.print(
-            f"{payload.get('envelope_id')} | reason={payload.get('reason')} | expires_at={payload.get('expires_at')}"
-        )
+        eid = payload.get("envelope_id")
+        reason = payload.get("reason")
+        expires = payload.get("expires_at")
+        console.print(f"{eid} | reason={reason} | expires_at={expires}")
 
 
 @hil_app.command("approve")
 def hil_approve(envelope_id: str) -> None:
+    """Approve a pending HIL request."""
     completed_dir = Path("data/hil_queue/completed")
     completed_dir.mkdir(parents=True, exist_ok=True)
     decision_file = completed_dir / f"{envelope_id}.json"
     decision_file.write_text(
-        json.dumps({"decision": "approved", "decided_at": datetime.utcnow().isoformat()}, indent=2),
+        json.dumps(
+            {
+                "decision": "approved",
+                "decided_at": datetime.now(UTC).isoformat(),
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     console.print(f"Approved {envelope_id}")
 
 
 @hil_app.command("reject")
-def hil_reject(envelope_id: str, reason: str = typer.Option(..., "--reason")) -> None:
+def hil_reject(
+    envelope_id: str,
+    reason: str = typer.Option(..., "--reason"),
+) -> None:
+    """Reject a pending HIL request."""
     completed_dir = Path("data/hil_queue/completed")
     completed_dir.mkdir(parents=True, exist_ok=True)
     decision_file = completed_dir / f"{envelope_id}.json"
@@ -184,13 +216,27 @@ def hil_reject(envelope_id: str, reason: str = typer.Option(..., "--reason")) ->
             {
                 "decision": "rejected",
                 "reason": reason,
-                "decided_at": datetime.utcnow().isoformat(),
+                "decided_at": datetime.now(UTC).isoformat(),
             },
             indent=2,
         ),
         encoding="utf-8",
     )
     console.print(f"Rejected {envelope_id}")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host"),
+    port: int = typer.Option(8000, "--port"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Start the QE API server (FastAPI + WebSocket)."""
+    _configure_logging(verbose)
+    import uvicorn
+
+    console.print(f"Starting QE API server on {host}:{port}")
+    uvicorn.run("qe.api.app:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

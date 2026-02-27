@@ -4,6 +4,8 @@ import pytest
 
 from qe.kernel.blueprint import load_blueprint
 from qe.kernel.registry import ServiceRegistry
+from qe.kernel.supervisor import Supervisor
+from qe.models.envelope import Envelope
 
 
 def test_load_blueprint_valid(tmp_path: Path):
@@ -70,3 +72,66 @@ def test_service_registry_all_services_returns_registered():
     assert registry.get("svc_1") is svc
     assert registry.all_services() == [svc]
     assert registry.all_blueprints() == [bp]
+
+
+def test_supervisor_loop_detection():
+    """Supervisor detects repeated identical publications and triggers circuit break."""
+    from qe.bus import get_bus
+
+    bus = get_bus()
+    supervisor = Supervisor(bus=bus)
+
+    # Simulate repeated identical publications
+    envelope = Envelope(
+        topic="claims.proposed",
+        source_service_id="researcher_alpha",
+        payload={"subject": "test", "predicate": "is", "object": "looping"},
+    )
+
+    # Publish enough times to trigger loop detection
+    for _ in range(6):
+        supervisor._check_loop("researcher_alpha", envelope)
+
+    assert "researcher_alpha" in supervisor._circuit_broken
+
+
+def test_supervisor_no_false_positive_loop():
+    """Different payloads should not trigger loop detection."""
+    from qe.bus import get_bus
+
+    bus = get_bus()
+    supervisor = Supervisor(bus=bus)
+
+    for i in range(10):
+        envelope = Envelope(
+            topic="claims.proposed",
+            source_service_id="researcher_alpha",
+            payload={"subject": "test", "counter": i},
+        )
+        supervisor._check_loop("researcher_alpha", envelope)
+
+    assert "researcher_alpha" not in supervisor._circuit_broken
+
+
+def test_load_blueprint_with_constitution(tmp_path: Path):
+    """Blueprint loads constitution field from genome TOML."""
+    toml_path = tmp_path / "with_constitution.toml"
+    toml_path.write_text(
+        """
+service_id = "researcher_alpha"
+display_name = "Researcher Alpha"
+version = "1.0"
+system_prompt = "Extract claims"
+constitution = "Never fabricate evidence."
+
+[model_preference]
+tier = "balanced"
+
+[capabilities]
+bus_topics_subscribe = ["observations.structured"]
+bus_topics_publish = ["claims.proposed"]
+""".strip()
+    )
+
+    bp = load_blueprint(toml_path)
+    assert bp.constitution == "Never fabricate evidence."

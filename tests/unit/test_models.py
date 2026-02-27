@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from qe.models.envelope import Envelope
 from qe.models.claim import Claim
+from qe.models.envelope import Envelope
 from qe.models.genome import Blueprint
 
 
@@ -33,7 +33,7 @@ def test_claim_id_starts_with_clm():
 
 def test_blueprint_default_reinforcement_interval():
     """Test that Blueprint's reinforcement_interval_turns defaults to 10."""
-    from qe.models.genome import ModelPreference, CapabilityDeclaration
+    from qe.models.genome import CapabilityDeclaration, ModelPreference
 
     blueprint = Blueprint(
         service_id="test-service",

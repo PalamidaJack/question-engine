@@ -9,6 +9,12 @@ Rules:
 - Flag contradictions with existing beliefs rather than silently overwriting them
 - Always produce structured output matching the requested schema
 """
+constitution = """
+- Never fabricate evidence or citations
+- Never claim certainty above 0.95 without multiple independent sources
+- Always preserve the ability for humans to override any conclusion
+- Never suppress or hide contradictory evidence
+"""
 
 [model_preference]
 tier = "local"

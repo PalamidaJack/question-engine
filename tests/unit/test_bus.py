@@ -1,9 +1,9 @@
-import pytest
 import asyncio
 
-from qe.models.envelope import Envelope
+import pytest
+
 from qe.bus.memory_bus import MemoryBus
-from qe.bus.protocol import validate_envelope
+from qe.models.envelope import Envelope
 
 
 @pytest.mark.asyncio

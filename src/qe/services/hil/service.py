@@ -1,7 +1,7 @@
 # TODO: integration test
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +20,21 @@ class HILService(BaseService):
         self._running = True
         self.pending_dir.mkdir(parents=True, exist_ok=True)
         self.completed_dir.mkdir(parents=True, exist_ok=True)
-        await self._maybe_await(self.bus.subscribe("hil.approval_required", self._handle_hil_request))
+        await self._maybe_await(
+            self.bus.subscribe("hil.approval_required", self._handle_hil_request)
+        )
 
     async def stop(self) -> None:
         self._running = False
-        await self._maybe_await(self.bus.unsubscribe("hil.approval_required", self._handle_hil_request))
+        await self._maybe_await(
+            self.bus.unsubscribe("hil.approval_required", self._handle_hil_request)
+        )
         for task in self._poll_tasks.values():
             task.cancel()
 
     async def _handle_hil_request(self, envelope: Envelope) -> None:
         timeout_seconds = int(envelope.payload.get("timeout_seconds", 3600))
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=timeout_seconds)
 
         proposal = {
@@ -83,14 +87,16 @@ class HILService(BaseService):
                     )
                 return
 
-            if datetime.utcnow() > expires_at:
+            if datetime.now(UTC) > expires_at:
                 timeout_payload = {
                     "decision": "rejected",
                     "reason": "timeout",
-                    "decided_at": datetime.utcnow().isoformat(),
+                    "decided_at": datetime.now(UTC).isoformat(),
                 }
                 if pending_file.exists():
-                    completed_file.write_text(json.dumps(timeout_payload, indent=2), encoding="utf-8")
+                    completed_file.write_text(
+                        json.dumps(timeout_payload, indent=2), encoding="utf-8"
+                    )
                     pending_file.unlink(missing_ok=True)
                 self.bus.publish(
                     Envelope(

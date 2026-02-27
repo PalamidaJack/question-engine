@@ -1,7 +1,8 @@
-from pydantic import BaseModel, Field
-from datetime import datetime
-from typing import Literal
 import uuid
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class Claim(BaseModel):
@@ -13,7 +14,7 @@ class Claim(BaseModel):
     confidence: float
     source_service_id: str
     source_envelope_ids: list[str]
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     valid_until: datetime | None = None
     superseded_by: str | None = None
     tags: list[str] = Field(default_factory=list)
@@ -28,7 +29,7 @@ class Prediction(BaseModel):
     resolution_criteria: str
     resolution_deadline: datetime | None = None
     source_service_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     resolved_at: datetime | None = None
     resolution: Literal["confirmed", "denied", "unresolved"] = "unresolved"
     resolution_evidence_ids: list[str] = Field(default_factory=list)
@@ -40,6 +41,6 @@ class NullResult(BaseModel):
     query: str
     search_scope: str
     source_service_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     significance: Literal["low", "medium", "high"] = "low"
     notes: str = ""

@@ -1,7 +1,8 @@
-from pydantic import BaseModel, Field
-from datetime import datetime
-from typing import Any
 import uuid
+from datetime import UTC, datetime
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class Envelope(BaseModel):
@@ -11,6 +12,6 @@ class Envelope(BaseModel):
     source_service_id: str
     correlation_id: str | None = None
     causation_id: str | None = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     payload: dict[str, Any]
     ttl_seconds: int | None = None

@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field
 from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class ModelPreference(BaseModel):
@@ -23,6 +24,7 @@ class Blueprint(BaseModel):
     display_name: str
     version: str
     system_prompt: str
+    constitution: str = ""
     model_preference: ModelPreference
     capabilities: CapabilityDeclaration
     max_context_tokens: int = 8000
