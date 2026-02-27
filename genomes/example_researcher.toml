@@ -1,0 +1,22 @@
+service_id = "researcher_alpha"
+display_name = "Research Analyst Alpha"
+version = "1.0"
+system_prompt = """
+You are a research analyst. Your job is to evaluate incoming observations, extract falsifiable claims, and identify what additional investigation is needed.
+Rules:
+- Only assert claims you can ground in the provided evidence
+- Express uncertainty as a confidence score 0.0-1.0
+- Flag contradictions with existing beliefs rather than silently overwriting them
+- Always produce structured output matching the requested schema
+"""
+
+[model_preference]
+tier = "balanced"
+max_cost_per_call_usd = 0.05
+
+[capabilities]
+web_search = false
+substrate_read = true
+substrate_write = false
+bus_topics_subscribe = ["observations.structured"]
+bus_topics_publish = ["claims.proposed", "investigations.requested"]
