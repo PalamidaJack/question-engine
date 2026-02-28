@@ -15,7 +15,7 @@ Multi-agent orchestration system with a bus-driven architecture. Services commun
 
 - `src/qe/api/app.py` — Main FastAPI app, lifespan, channel wiring, all endpoints
 - `src/qe/channels/` — Channel adapters (telegram, slack, email, webhook) + notifications router
-- `src/qe/services/` — Planner, Dispatcher, Executor, Validator, Researcher, Doctor, Chat
+- `src/qe/services/` — Planner, Dispatcher, Executor, VerificationGate, Recovery, Checkpoint, Doctor, Chat
 - `src/qe/bus/` — MemoryBus, event log, bus metrics
 - `src/qe/substrate/` — Belief ledger (SQLite), cold storage, goal store, embeddings
 - `src/qe/models/` — Pydantic models (Envelope, Claim, GoalState, Genome Blueprint)
@@ -27,15 +27,19 @@ Multi-agent orchestration system with a bus-driven architecture. Services commun
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ --timeout=60 -q    # 1014 tests, all passing
+.venv/bin/pytest tests/ --timeout=60 -q    # 1038 tests, all passing
 .venv/bin/ruff check src/ tests/            # all clean
 ```
 
 ## Current State (2026-02-28)
 
-1014 tests pass, ruff clean.
+1038 tests pass, ruff clean.
 
 ### Recently Completed
+- Phase 4: VerificationGate wired between Executor and Dispatcher — completed tasks pass structural/contract/anomaly verification before acceptance
+- Phase 4: RecoveryOrchestrator now executes strategies (retry with backoff, model escalation, simplified prompt, HIL) not just suggests them
+- Phase 4: CheckpointManager with graph-aware rollback over GoalStore checkpoints
+- Phase 4: 24 new tests in `tests/unit/test_verification_gate.py`
 - Phase 3 bug fixes: subtask_results deserialization, goal route registration order, drift_detected handler
 - Phase 3 tests: subtask_results round-trip, DAG validation (10 structures), diamond deps, crash recovery, schema enforcement, e2e lifecycle
 - Multi-agent orchestration (planner, dispatcher, executor)
