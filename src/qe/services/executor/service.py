@@ -146,13 +146,72 @@ class ExecutorService:
             )
         )
 
+    async def _try_deterministic(
+        self,
+        task_type: str,
+        description: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Attempt to resolve a task without an LLM call.
+
+        Returns a result dict on success, or ``None`` to fall through to LLM.
+        """
+        if self.substrate is None:
+            return None
+
+        if task_type == "fact_check":
+            return await self._fact_check_from_ledger(description)
+
+        return None
+
+    async def _fact_check_from_ledger(
+        self, description: str
+    ) -> dict[str, Any] | None:
+        """Return a compiled verdict from the belief ledger if high-confidence claims exist."""
+        try:
+            claims = await self.substrate.search_full_text(description, limit=10)
+            high_conf = [c for c in claims if c.confidence >= 0.8]
+            if not high_conf:
+                return None
+
+            lines = []
+            for c in high_conf:
+                lines.append(
+                    f"- {c.subject_entity_id} {c.predicate} {c.object_value} "
+                    f"(confidence: {c.confidence:.0%})"
+                )
+            content = (
+                f"Based on {len(high_conf)} existing verified claim(s):\n"
+                + "\n".join(lines)
+            )
+            log.info(
+                "executor.bypass task_type=fact_check claims=%d",
+                len(high_conf),
+            )
+            return {
+                "content": content,
+                "task_type": "fact_check",
+                "bypassed_llm": True,
+            }
+        except Exception:
+            log.debug("executor.bypass_failed task_type=fact_check", exc_info=True)
+            return None
+
     async def _execute_task(
         self,
         task_type: str,
         description: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Dispatch to LLM call based on task_type."""
+        """Dispatch to LLM call based on task_type.
+
+        Tries a deterministic shortcut first; falls through to LLM on miss.
+        """
+        # Fast path: try to resolve without an LLM call
+        deterministic = await self._try_deterministic(task_type, description, payload)
+        if deterministic is not None:
+            return deterministic
+
         system_prompt = _TASK_PROMPTS.get(task_type, _TASK_PROMPTS["research"])
         messages = [
             {"role": "system", "content": system_prompt},

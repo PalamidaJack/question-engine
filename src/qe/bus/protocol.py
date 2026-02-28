@@ -18,6 +18,7 @@ TOPICS = {
     "goals.enriched",
     "goals.completed",
     "goals.failed",
+    "goals.drift_detected",
     # Task decomposition
     "tasks.planned",
     "tasks.dispatched",

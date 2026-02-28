@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from typing import Any
@@ -57,10 +58,58 @@ class PlannerService:
         self.budget_tracker = budget_tracker
         self._model = model
 
+    # ── Pattern memory helpers ─────────────────────────────────────────────
+
+    _PATTERN_PREFIX = "goal_pattern:"
+    _PATTERN_MIN_SIMILARITY = 0.85
+
+    async def _find_cached_pattern(
+        self, goal_description: str
+    ) -> DecompositionOutput | None:
+        """Search for a similar past decomposition in the embedding store."""
+        if self.substrate is None:
+            return None
+        try:
+            results = await self.substrate.embeddings.search(
+                goal_description,
+                top_k=5,
+                min_similarity=self._PATTERN_MIN_SIMILARITY,
+            )
+            for r in results:
+                if not r.id.startswith(self._PATTERN_PREFIX):
+                    continue
+                raw = r.metadata.get("decomposition")
+                if raw:
+                    return DecompositionOutput.model_validate_json(raw)
+        except Exception:
+            log.debug("planner.pattern_search_failed", exc_info=True)
+        return None
+
+    async def _store_pattern(
+        self, goal_description: str, output: DecompositionOutput
+    ) -> None:
+        """Persist a successful decomposition so future similar goals can reuse it."""
+        if self.substrate is None:
+            return
+        try:
+            key = hashlib.sha256(goal_description.encode()).hexdigest()[:16]
+            pattern_id = f"{self._PATTERN_PREFIX}{key}"
+            await self.substrate.embeddings.store(
+                id=pattern_id,
+                text=goal_description,
+                metadata={"decomposition": output.model_dump_json()},
+            )
+            log.debug("planner.pattern_stored id=%s", pattern_id)
+        except Exception:
+            log.debug("planner.pattern_store_failed", exc_info=True)
+
+    # ── Core decomposition ─────────────────────────────────────────────────
+
     async def decompose(self, goal_description: str) -> GoalState:
         """Decompose a goal into a subtask DAG.
 
         Returns a GoalState with status='executing' and a filled decomposition.
+        Checks pattern memory first; falls through to LLM on cache miss.
         """
         goal_id = f"goal_{uuid.uuid4().hex[:12]}"
 
@@ -70,28 +119,39 @@ class PlannerService:
             goal_description[:100],
         )
 
-        # Call LLM for decomposition
-        client = instructor.from_litellm(litellm.acompletion)
-        output: DecompositionOutput = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": goal_description},
-            ],
-            response_model=DecompositionOutput,
-        )
-
-        # Record cost
-        if self.budget_tracker:
-            cost = litellm.completion_cost(
+        # Try pattern memory first
+        cached = await self._find_cached_pattern(goal_description)
+        if cached is not None:
+            output = cached
+            log.info("planner.pattern_hit goal_id=%s", goal_id)
+        else:
+            # Call LLM for decomposition
+            client = instructor.from_litellm(litellm.acompletion)
+            output = await client.chat.completions.create(
                 model=self._model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": goal_description},
                 ],
-                completion="",
+                response_model=DecompositionOutput,
             )
-            self.budget_tracker.record_cost(self._model, cost, service_id="planner")
+
+            # Record cost
+            if self.budget_tracker:
+                cost = litellm.completion_cost(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": goal_description},
+                    ],
+                    completion="",
+                )
+                self.budget_tracker.record_cost(
+                    self._model, cost, service_id="planner"
+                )
+
+            # Store pattern for future reuse
+            await self._store_pattern(goal_description, output)
 
         # Convert LLM output to internal models
         subtasks = []

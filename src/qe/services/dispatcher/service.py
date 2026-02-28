@@ -12,6 +12,15 @@ from qe.substrate.goal_store import GoalStore
 log = logging.getLogger(__name__)
 
 
+def _text_similarity(a: str, b: str) -> float:
+    """Word-level Jaccard similarity between two texts (0.0–1.0)."""
+    words_a = set(a.lower().split())
+    words_b = set(b.lower().split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
 class Dispatcher:
     """Deterministic orchestration engine for goal execution.
 
@@ -22,9 +31,11 @@ class Dispatcher:
         self,
         bus: Any,
         goal_store: GoalStore,
+        drift_threshold: float = 0.05,
     ) -> None:
         self.bus = bus
         self.goal_store = goal_store
+        self._drift_threshold = drift_threshold
         self._active_goals: dict[str, GoalState] = {}
 
     async def reconcile(self) -> dict[str, int]:
@@ -105,6 +116,9 @@ class Dispatcher:
 
         state.subtask_states[result.subtask_id] = result.status
         state.subtask_results[result.subtask_id] = result
+
+        if result.status == "completed":
+            self._check_drift(state, result)
 
         log.info(
             "dispatcher.subtask_done goal_id=%s subtask_id=%s status=%s",
@@ -211,6 +225,36 @@ class Dispatcher:
     def get_goal_state(self, goal_id: str) -> GoalState | None:
         """Get the current state of a goal."""
         return self._active_goals.get(goal_id)
+
+    def _check_drift(self, state: GoalState, result: SubtaskResult) -> None:
+        """Publish a drift event if the subtask output diverges from the goal."""
+        output_text = result.output.get("content", "")
+        if not output_text:
+            return
+
+        sim = _text_similarity(state.description, output_text)
+        if sim < self._drift_threshold:
+            log.warning(
+                "dispatcher.drift_detected goal_id=%s subtask_id=%s "
+                "similarity=%.3f threshold=%.3f",
+                state.goal_id,
+                result.subtask_id,
+                sim,
+                self._drift_threshold,
+            )
+            self.bus.publish(
+                Envelope(
+                    topic="goals.drift_detected",
+                    source_service_id="dispatcher",
+                    correlation_id=state.goal_id,
+                    payload={
+                        "goal_id": state.goal_id,
+                        "subtask_id": result.subtask_id,
+                        "similarity": sim,
+                        "threshold": self._drift_threshold,
+                    },
+                )
+            )
 
     async def _dispatch_ready(self, state: GoalState) -> None:
         """Find and dispatch subtasks whose dependencies are met."""

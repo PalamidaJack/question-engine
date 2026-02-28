@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,9 +14,31 @@ log = logging.getLogger(__name__)
 
 
 class BeliefLedger:
-    def __init__(self, db_path: str, migrations_dir: Path) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        migrations_dir: Path,
+        decay_half_life_hours: float = 720.0,
+    ) -> None:
         self._db_path = db_path
         self._migrations_dir = migrations_dir
+        self._decay_half_life_hours = decay_half_life_hours
+
+    def _apply_decay(self, claim: Claim, now: datetime) -> Claim:
+        """Return a copy of *claim* with confidence adjusted for age.
+
+        Uses exponential decay: ``confidence × 0.5^(age_hours / half_life)``.
+        Claims past their ``valid_until`` are set to ``confidence = 0.0``.
+        """
+        if claim.valid_until is not None and now > claim.valid_until:
+            return claim.model_copy(update={"confidence": 0.0})
+
+        age_hours = (now - claim.created_at).total_seconds() / 3600
+        if age_hours <= 0 or self._decay_half_life_hours <= 0:
+            return claim
+
+        factor = math.pow(0.5, age_hours / self._decay_half_life_hours)
+        return claim.model_copy(update={"confidence": claim.confidence * factor})
 
     async def initialize(self) -> None:
         """Initialize the database connection and apply migrations."""
@@ -118,9 +141,12 @@ class BeliefLedger:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
 
+        now = datetime.now(UTC)
         claims = []
         for row in rows:
-            claims.append(self._row_to_claim(row))
+            claim = self._apply_decay(self._row_to_claim(row), now)
+            if claim.confidence >= min_confidence:
+                claims.append(claim)
 
         return claims
 
@@ -277,7 +303,9 @@ class BeliefLedger:
         async with aiosqlite.connect(self._db_path) as db:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
-        return [self._row_to_claim(row) for row in rows]
+
+        now = datetime.now(UTC)
+        return [self._apply_decay(self._row_to_claim(row), now) for row in rows]
 
     async def retract_claim(self, claim_id: str) -> bool:
         """Soft-retract a claim by marking it as superseded by 'retracted'."""
@@ -319,7 +347,8 @@ class BeliefLedger:
             )
             rows = await cursor.fetchall()
 
-        return [self._row_to_claim(row) for row in rows]
+        now = datetime.now(UTC)
+        return [self._apply_decay(self._row_to_claim(row), now) for row in rows]
 
     def _row_to_claim(self, row: tuple) -> Claim:
         """Convert a database row to a Claim object."""
