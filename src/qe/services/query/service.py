@@ -9,8 +9,8 @@ import instructor
 import litellm
 from dotenv import load_dotenv
 
-from qe.services.query.schemas import AnswerResponse
 from qe.runtime.metrics import get_metrics
+from qe.services.query.schemas import AnswerResponse
 from qe.substrate import Substrate
 
 load_dotenv()

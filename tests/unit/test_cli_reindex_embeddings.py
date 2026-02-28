@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import aiosqlite
 import pytest
-from unittest.mock import AsyncMock
 
 from qe.cli.main import _reindex_claim_embeddings
 from qe.models.claim import Claim

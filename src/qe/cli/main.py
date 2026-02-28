@@ -852,7 +852,8 @@ def db_reindex_embeddings(
         if dry_run:
             console.print(
                 "[yellow]Dry run complete.[/yellow] "
-                f"would_delete={stats['deleted']} would_index={stats['indexed']} total={stats['total']}"
+                f"would_delete={stats['deleted']} "
+                f"would_index={stats['indexed']} total={stats['total']}"
             )
         else:
             console.print(
