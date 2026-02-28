@@ -19,9 +19,12 @@ from qe.bus import get_bus
 from qe.kernel.blueprint import load_blueprint
 from qe.kernel.registry import ServiceRegistry
 from qe.models.envelope import Envelope
+from qe.runtime.agent_pool import AgentPerformanceTracker, AgentPool
 from qe.runtime.budget import BudgetTracker
+from qe.runtime.coordination import CoordinationProtocol
 from qe.runtime.service import BaseService
 from qe.runtime.tool_bootstrap import create_default_gate, create_default_registry
+from qe.runtime.working_memory import WorkingMemory
 from qe.services.hil import HILService
 from qe.services.researcher import ResearcherService
 from qe.services.validator import ClaimValidatorService
@@ -86,6 +89,13 @@ class Supervisor:
         self.tool_gate = create_default_gate()
         BaseService.set_tool_registry(self.tool_registry)
         BaseService.set_tool_gate(self.tool_gate)
+        # Multi-agent orchestration
+        db_path_str = str(db_path) if db_path else None
+        self.agent_performance_tracker = AgentPerformanceTracker(db_path=db_path_str)
+        self.agent_pool = AgentPool()
+        self.agent_pool.set_tracker(self.agent_performance_tracker)
+        self.working_memory = WorkingMemory()
+        self.coordination = CoordinationProtocol(self.bus)
         # Loop detection: service_id -> deque of (timestamp, payload_hash)
         self._pub_history: dict[str, deque] = {}
         # Circuit-broken services (half-open circuit breaker)
@@ -126,6 +136,9 @@ class Supervisor:
         # Load persisted budget state
         await self.budget_tracker.load()
 
+        # Start multi-agent coordination
+        await self.coordination.start()
+
         self._start_watchdog(asyncio.get_running_loop())
         self._start_daemons()
         # Subscribe to heartbeats for monitoring
@@ -154,6 +167,9 @@ class Supervisor:
             await service.stop()
         # Flush budget state before shutdown
         await self.budget_tracker.save()
+        # Stop multi-agent coordination and flush agent metrics
+        await self.coordination.stop()
+        await self.agent_performance_tracker.flush()
         if self._observer:
             self._observer.stop()
             self._observer.join(timeout=2)
@@ -323,6 +339,9 @@ class Supervisor:
         self._daemon_tasks.append(
             asyncio.create_task(self._budget_flush_loop())
         )
+        self._daemon_tasks.append(
+            asyncio.create_task(self._agent_metrics_flush_loop())
+        )
 
     async def _on_heartbeat(self, envelope: Envelope) -> None:
         """Record heartbeat timestamp for a service."""
@@ -393,3 +412,12 @@ class Supervisor:
                 await self.budget_tracker.save()
             except Exception:
                 log.exception("Failed to flush budget records")
+
+    async def _agent_metrics_flush_loop(self) -> None:
+        """Periodically flush agent performance metrics to SQLite."""
+        while self._running:
+            await asyncio.sleep(30)
+            try:
+                await self.agent_performance_tracker.flush()
+            except Exception:
+                log.exception("Failed to flush agent metrics")

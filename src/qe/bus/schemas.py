@@ -116,6 +116,53 @@ class GateDeniedPayload(BaseModel):
     patterns: list[str] = Field(default_factory=list)
 
 
+# ── Multi-agent coordination payloads ──────────────────────────────────────
+
+
+class AgentRegisteredPayload(BaseModel):
+    """Payload for agents.registered topic."""
+
+    agent_id: str
+    service_id: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    task_types: list[str] = Field(default_factory=list)
+    model_tier: str = "balanced"
+    max_concurrency: int = 5
+
+
+class VoteRequestPayload(BaseModel):
+    """Payload for coordination.vote_request topic."""
+
+    vote_id: str
+    question: str
+    options: list[str]
+    goal_id: str = ""
+    timeout_seconds: float = 10.0
+    min_voters: int = 1
+
+
+class VoteResponsePayload(BaseModel):
+    """Payload for coordination.vote_response topic."""
+
+    vote_id: str
+    agent_id: str
+    choice: str
+    confidence: float = Field(ge=0.0, le=1.0, default=1.0)
+    reasoning: str = ""
+
+
+class TaskDelegatedPayload(BaseModel):
+    """Payload for tasks.delegated topic."""
+
+    goal_id: str
+    subtask_id: str
+    description: str = ""
+    task_type: str = ""
+    assigned_agent_id: str = ""
+    tools_required: list[str] = Field(default_factory=list)
+    dependency_context: dict[str, Any] = Field(default_factory=dict)
+
+
 # ── Schema Registry ────────────────────────────────────────────────────────
 
 # Maps topic -> payload model for validation
@@ -131,6 +178,10 @@ TOPIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "system.heartbeat": HeartbeatPayload,
     "system.dlq": DLQPayload,
     "system.gate_denied": GateDeniedPayload,
+    "agents.registered": AgentRegisteredPayload,
+    "coordination.vote_request": VoteRequestPayload,
+    "coordination.vote_response": VoteResponsePayload,
+    "tasks.delegated": TaskDelegatedPayload,
 }
 
 
