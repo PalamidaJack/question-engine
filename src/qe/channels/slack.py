@@ -24,8 +24,13 @@ class SlackAdapter(ChannelAdapter):
         app_token: str = "",
         default_channel: str = "",
         sanitizer: Any | None = None,
+        message_callback: Any | None = None,
     ) -> None:
-        super().__init__(channel_name="slack", sanitizer=sanitizer)
+        super().__init__(
+            channel_name="slack",
+            sanitizer=sanitizer,
+            message_callback=message_callback,
+        )
         self._bot_token = bot_token or os.environ.get("SLACK_BOT_TOKEN", "")
         self._app_token = app_token or os.environ.get("SLACK_APP_TOKEN", "")
         self._default_channel = default_channel or os.environ.get(
@@ -129,6 +134,9 @@ class SlackAdapter(ChannelAdapter):
                 text[:80],
             )
 
+        result["command"] = "goal"
+        self._forward_message(result)
+
         if say is not None:
             await say(f"Received: {text[:200]}")
 
@@ -151,6 +159,9 @@ class SlackAdapter(ChannelAdapter):
                 result["user_id"],
                 text[:80],
             )
+
+        result["command"] = "goal"
+        self._forward_message(result)
 
         if say is not None:
             await say(f"Got it: {text[:200]}")

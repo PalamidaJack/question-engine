@@ -22,8 +22,13 @@ class TelegramAdapter(ChannelAdapter):
         self,
         bot_token: str = "",
         sanitizer: Any | None = None,
+        message_callback: Any | None = None,
     ) -> None:
-        super().__init__(channel_name="telegram", sanitizer=sanitizer)
+        super().__init__(
+            channel_name="telegram",
+            sanitizer=sanitizer,
+            message_callback=message_callback,
+        )
         self._bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self._application: Any = None
 
@@ -158,6 +163,9 @@ class TelegramAdapter(ChannelAdapter):
                 text[:80],
             )
 
+        result["command"] = "goal"
+        self._forward_message(result)
+
         if hasattr(update, "message") and update.message:
             await update.message.reply_text(f"Received: {text[:200]}")
 
@@ -172,6 +180,21 @@ class TelegramAdapter(ChannelAdapter):
         args_text = parts[1] if len(parts) > 1 else ""
 
         user_id = self._get_user_id(update)
+
+        # Classify the command and forward to the bus
+        result = await self.receive(update)
+        if result is None:
+            return
+
+        result["text"] = args_text
+        result["sanitized_text"] = args_text
+
+        if command in ("goal", "ask", "status"):
+            result["command"] = command
+        else:
+            result["command"] = "goal"
+
+        self._forward_message(result)
 
         if command == "goal":
             log.info(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -35,9 +36,11 @@ class ChannelAdapter(ABC):
         self,
         channel_name: str,
         sanitizer: Any | None = None,
+        message_callback: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         self._channel_name = channel_name
         self._sanitizer = sanitizer
+        self._message_callback = message_callback
         self._running = False
 
     @property
@@ -49,6 +52,11 @@ class ChannelAdapter(ABC):
     def is_running(self) -> bool:
         """Return whether the adapter is actively processing messages."""
         return self._running
+
+    def _forward_message(self, result: dict[str, Any]) -> None:
+        """Forward a received message through the message callback, if set."""
+        if self._message_callback is not None:
+            self._message_callback(result)
 
     @abstractmethod
     async def start(self) -> None:

@@ -101,6 +101,7 @@ class GoalState(BaseModel):
     due_at: datetime | None = None
     project_id: str | None = None
     tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     def transition_to(self, new_status: str) -> None:
         """Validated state transition. Raises InvalidTransition if illegal."""

@@ -130,11 +130,35 @@ async def _init_channels() -> None:
 
     _notification_router = NotificationRouter()
     activated: list[str] = []
+    bus = get_bus()
+
+    def _publish_channel_message(msg: dict) -> None:
+        """Route an adapter message to the correct bus topic based on command."""
+        command = msg.get("command", "goal")
+        topic_map = {
+            "ask": "queries.asked",
+            "status": "system.health.check",
+        }
+        topic = topic_map.get(command, "channel.message_received")
+        bus.publish(
+            Envelope(
+                topic=topic,
+                source_service_id=f"channel_{msg.get('channel', 'unknown')}",
+                payload={
+                    "channel": msg.get("channel", "unknown"),
+                    "user_id": msg.get("user_id", ""),
+                    "text": msg.get("sanitized_text", msg.get("text", "")),
+                    "command": command,
+                },
+            )
+        )
 
     # Telegram
     tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if tg_token:
-        adapter = TelegramAdapter(bot_token=tg_token)
+        adapter = TelegramAdapter(
+            bot_token=tg_token, message_callback=_publish_channel_message
+        )
         try:
             await adapter.start()
             _notification_router.register_channel("telegram", adapter)
@@ -147,7 +171,11 @@ async def _init_channels() -> None:
     slack_bot = os.environ.get("SLACK_BOT_TOKEN", "")
     slack_app = os.environ.get("SLACK_APP_TOKEN", "")
     if slack_bot and slack_app:
-        adapter = SlackAdapter(bot_token=slack_bot, app_token=slack_app)
+        adapter = SlackAdapter(
+            bot_token=slack_bot,
+            app_token=slack_app,
+            message_callback=_publish_channel_message,
+        )
         try:
             await adapter.start()
             _notification_router.register_channel("slack", adapter)
@@ -181,7 +209,6 @@ async def _init_channels() -> None:
     activated.append("webhook")
 
     # ── Bus subscriptions: channel → goals, goals → notifications ──
-    bus = get_bus()
 
     async def _on_channel_message(envelope: Envelope) -> None:
         """Forward inbound channel messages to the planner as goals."""
@@ -205,6 +232,8 @@ async def _init_channels() -> None:
 
         try:
             state = await _planner.decompose(text)
+            state.metadata["origin_user_id"] = user_id
+            state.metadata["origin_channel"] = channel
             await _dispatcher.submit_goal(state)
 
             bus.publish(
@@ -240,20 +269,22 @@ async def _init_channels() -> None:
 
         # Build a summary from the goal's subtask results
         summary = f"Goal completed with {envelope.payload.get('subtask_count', 0)} subtasks."
+        target_user = "broadcast"
         if _goal_store:
             state = await _goal_store.load_goal(goal_id)
-            if state and state.subtask_results:
-                parts = []
-                for _st_id, res in state.subtask_results.items():
-                    output_text = res.output.get("result", "")
-                    if output_text:
-                        parts.append(str(output_text)[:500])
-                if parts:
-                    summary = "\n---\n".join(parts)
+            if state:
+                target_user = state.metadata.get("origin_user_id", "broadcast") or "broadcast"
+                if state.subtask_results:
+                    parts = []
+                    for _st_id, res in state.subtask_results.items():
+                        output_text = res.output.get("result", "")
+                        if output_text:
+                            parts.append(str(output_text)[:500])
+                    if parts:
+                        summary = "\n---\n".join(parts)
 
-        # Notify all registered channels (no user targeting yet)
         await _notification_router.notify(
-            user_id="broadcast",
+            user_id=target_user,
             event_type="goal_result",
             message=f"Goal {goal_id} completed:\n{summary}",
             urgency="high",
@@ -267,8 +298,14 @@ async def _init_channels() -> None:
         goal_id = envelope.payload.get("goal_id", "")
         reason = envelope.payload.get("reason", "unknown")
 
+        target_user = "broadcast"
+        if _goal_store:
+            state = await _goal_store.load_goal(goal_id)
+            if state:
+                target_user = state.metadata.get("origin_user_id", "broadcast") or "broadcast"
+
         await _notification_router.notify(
-            user_id="broadcast",
+            user_id=target_user,
             event_type="goal_failed",
             message=f"Goal {goal_id} failed: {reason}",
             urgency="high",
@@ -276,6 +313,59 @@ async def _init_channels() -> None:
 
     bus.subscribe("goals.completed", _on_goal_completed)
     bus.subscribe("goals.failed", _on_goal_failed)
+
+    async def _on_query_asked(envelope: Envelope) -> None:
+        """Handle /ask command: answer from belief ledger and notify the user."""
+        if not _substrate or not _notification_router:
+            return
+
+        text = envelope.payload.get("text", "").strip()
+        user_id = envelope.payload.get("user_id", "broadcast")
+        if not text:
+            return
+
+        try:
+            result = await answer_question(text, _substrate)
+            answer = result.get("answer", "No answer found.")
+            await _notification_router.notify(
+                user_id=user_id or "broadcast",
+                event_type="query_answer",
+                message=f"Q: {text}\n\nA: {answer}",
+                urgency="normal",
+            )
+        except Exception:
+            log.exception("query.answer_failed question=%s", text[:80])
+            await _notification_router.notify(
+                user_id=user_id or "broadcast",
+                event_type="query_error",
+                message=f"Failed to answer: {text[:200]}",
+                urgency="normal",
+            )
+
+    async def _on_health_check(envelope: Envelope) -> None:
+        """Handle /status command: return system status to the user."""
+        if not _notification_router:
+            return
+
+        user_id = envelope.payload.get("user_id", "broadcast")
+
+        parts = ["System Status:"]
+        parts.append(f"  Supervisor: {'running' if _supervisor else 'stopped'}")
+        parts.append(f"  Substrate: {'ready' if _substrate else 'not ready'}")
+        parts.append(f"  Channels: {len(_active_adapters)} active")
+
+        if _doctor and _doctor.last_report:
+            parts.append(f"  Health: {_doctor.last_report.get('status', 'unknown')}")
+
+        await _notification_router.notify(
+            user_id=user_id or "broadcast",
+            event_type="system_status",
+            message="\n".join(parts),
+            urgency="normal",
+        )
+
+    bus.subscribe("queries.asked", _on_query_asked)
+    bus.subscribe("system.health.check", _on_health_check)
 
     log.info("channels.initialized active=%s", activated)
 
