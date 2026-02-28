@@ -92,6 +92,15 @@ TOPICS = {
     "system.health.report",
     # Dead Letter Queue
     "system.dlq",
+    # Multi-agent coordination
+    "agents.registered",
+    "agents.deregistered",
+    "agents.heartbeat",
+    "coordination.vote_request",
+    "coordination.vote_response",
+    "coordination.consensus",
+    "tasks.delegated",
+    "tasks.delegation_result",
 }
 
 

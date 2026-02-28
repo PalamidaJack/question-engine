@@ -68,11 +68,13 @@ class ExecutorService:
         budget_tracker: BudgetTracker | None = None,
         model: str = "gpt-4o-mini",
         max_concurrency: int = 5,
+        agent_id: str = "executor_default",
     ) -> None:
         self.bus = bus
         self.substrate = substrate
         self.budget_tracker = budget_tracker
         self.model = model
+        self.agent_id = agent_id
         self._semaphore = asyncio.Semaphore(max_concurrency)
 
     async def start(self) -> None:
@@ -88,6 +90,10 @@ class ExecutorService:
         log.info("executor.stopped")
 
     async def _handle_dispatched(self, envelope: Envelope) -> None:
+        # Agent routing filter: skip if assigned to a different agent
+        assigned = envelope.payload.get("assigned_agent_id")
+        if assigned is not None and assigned != self.agent_id:
+            return
         async with self._semaphore:
             await self._run_task(envelope)
 
@@ -97,10 +103,14 @@ class ExecutorService:
         subtask_id = payload["subtask_id"]
         task_type = payload["task_type"]
         description = payload["description"]
+        dependency_context = payload.get("dependency_context")
 
         start = time.monotonic()
         try:
-            output = await self._execute_task(task_type, description, payload)
+            output = await self._execute_task(
+                task_type, description, payload, dependency_context=dependency_context
+            )
+            output["_agent_id"] = self.agent_id
             latency_ms = int((time.monotonic() - start) * 1000)
             result = SubtaskResult(
                 subtask_id=subtask_id,
@@ -202,6 +212,7 @@ class ExecutorService:
         task_type: str,
         description: str,
         payload: dict[str, Any],
+        dependency_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Dispatch to LLM call based on task_type.
 
@@ -212,10 +223,18 @@ class ExecutorService:
         if deterministic is not None:
             return deterministic
 
+        # Append dependency context to the user prompt if available
+        user_content = description
+        if dependency_context:
+            context_lines = ["\n\n--- Prior subtask results ---"]
+            for dep_id, content in dependency_context.items():
+                context_lines.append(f"[{dep_id}]: {content}")
+            user_content += "\n".join(context_lines)
+
         system_prompt = _TASK_PROMPTS.get(task_type, _TASK_PROMPTS["research"])
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": description},
+            {"role": "user", "content": user_content},
         ]
 
         limiter = get_rate_limiter()

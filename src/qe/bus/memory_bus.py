@@ -195,6 +195,33 @@ class MemoryBus:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return list(results)
 
+    async def request(
+        self,
+        envelope: Envelope,
+        reply_topic: str,
+        timeout_seconds: float = 10.0,
+    ) -> Envelope | None:
+        """Publish an envelope and wait for a correlated reply.
+
+        Subscribes a one-shot handler on ``reply_topic`` that matches
+        ``correlation_id == envelope.envelope_id``. Returns the reply
+        ``Envelope`` or ``None`` on timeout.
+        """
+        result_future: asyncio.Future[Envelope] = asyncio.get_running_loop().create_future()
+
+        async def _one_shot(reply: Envelope) -> None:
+            if reply.correlation_id == envelope.envelope_id and not result_future.done():
+                result_future.set_result(reply)
+
+        self.subscribe(reply_topic, _one_shot)
+        try:
+            self.publish(envelope)
+            return await asyncio.wait_for(result_future, timeout=timeout_seconds)
+        except TimeoutError:
+            return None
+        finally:
+            self.unsubscribe(reply_topic, _one_shot)
+
     async def publish_and_wait_first(self, envelope: Envelope) -> Any:
         """Publish and return the result of the first handler to complete."""
         tasks = self.publish(envelope)

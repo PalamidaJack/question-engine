@@ -595,6 +595,9 @@ class TestEventVersioning:
             "tasks.dispatched",
             "system.error", "system.circuit_break", "system.heartbeat",
             "system.dlq", "system.gate_denied",
+            "agents.registered",
+            "coordination.vote_request", "coordination.vote_response",
+            "tasks.delegated",
         }
         assert set(TOPIC_SCHEMAS.keys()) == expected
 

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from qe.models.envelope import Envelope
 from qe.models.goal import GoalState, SubtaskResult
 from qe.substrate.goal_store import GoalStore
+
+if TYPE_CHECKING:
+    from qe.runtime.agent_pool import AgentPool
+    from qe.runtime.working_memory import WorkingMemory
 
 log = logging.getLogger(__name__)
 
@@ -32,11 +36,15 @@ class Dispatcher:
         bus: Any,
         goal_store: GoalStore,
         drift_threshold: float = 0.05,
+        agent_pool: AgentPool | None = None,
+        working_memory: WorkingMemory | None = None,
     ) -> None:
         self.bus = bus
         self.goal_store = goal_store
         self._drift_threshold = drift_threshold
         self._active_goals: dict[str, GoalState] = {}
+        self.agent_pool = agent_pool
+        self.working_memory = working_memory
 
     async def reconcile(self) -> dict[str, int]:
         """Load in-flight goals from store on startup and resume or fail them.
@@ -127,6 +135,24 @@ class Dispatcher:
             result.status,
         )
 
+        # Store result in working memory
+        if self.working_memory is not None:
+            self.working_memory.store_subtask_result(
+                goal_id, result.subtask_id, result.output
+            )
+
+        # Release agent and record completion
+        if self.agent_pool is not None:
+            agent_id = result.output.get("_agent_id")
+            if agent_id:
+                self.agent_pool.release(agent_id)
+                self.agent_pool.record_completion(
+                    agent_id,
+                    latency_ms=float(result.latency_ms),
+                    cost_usd=result.cost_usd,
+                    success=result.status == "completed",
+                )
+
         # Create checkpoint
         ckpt_id = await self.goal_store.save_checkpoint(goal_id, state)
         state.checkpoints.append(ckpt_id)
@@ -136,6 +162,9 @@ class Dispatcher:
             state.transition_to("completed")
             await self.goal_store.save_goal(state)
             del self._active_goals[goal_id]
+
+            if self.working_memory is not None:
+                self.working_memory.clear_goal(goal_id)
 
             log.info("dispatcher.goal_completed goal_id=%s", goal_id)
 
@@ -163,6 +192,9 @@ class Dispatcher:
                 state.transition_to("failed")
                 await self.goal_store.save_goal(state)
                 del self._active_goals[goal_id]
+
+                if self.working_memory is not None:
+                    self.working_memory.clear_goal(goal_id)
 
                 log.error(
                     "dispatcher.goal_failed goal_id=%s failures=%d",
@@ -273,27 +305,52 @@ class Dispatcher:
                 continue
 
             state.subtask_states[subtask.subtask_id] = "dispatched"
+
+            # Agent routing
+            assigned_agent_id: str | None = None
+            if self.agent_pool is not None:
+                agent = self.agent_pool.select_agent(subtask)
+                if agent is not None:
+                    subtask.assigned_service_id = agent.service_id
+                    assigned_agent_id = agent.agent_id
+                    self.agent_pool.acquire(agent.agent_id)
+
+            # Build dependency context from working memory
+            dependency_context: dict[str, Any] = {}
+            if self.working_memory is not None and subtask.depends_on:
+                dependency_context = self.working_memory.build_context_for_subtask(
+                    state.goal_id, subtask.subtask_id, subtask.depends_on
+                )
+
             log.info(
-                "dispatcher.dispatch goal_id=%s subtask_id=%s type=%s",
+                "dispatcher.dispatch goal_id=%s subtask_id=%s type=%s agent=%s",
                 state.goal_id,
                 subtask.subtask_id,
                 subtask.task_type,
+                assigned_agent_id or "unassigned",
             )
+
+            payload: dict[str, Any] = {
+                "goal_id": state.goal_id,
+                "subtask_id": subtask.subtask_id,
+                "description": subtask.description,
+                "task_type": subtask.task_type,
+                "model_tier": subtask.model_tier,
+                "depends_on": subtask.depends_on,
+                "contract": subtask.contract.model_dump(),
+            }
+            if assigned_agent_id is not None:
+                payload["assigned_agent_id"] = assigned_agent_id
+                payload["tools_required"] = subtask.tools_required
+            if dependency_context:
+                payload["dependency_context"] = dependency_context
 
             self.bus.publish(
                 Envelope(
                     topic="tasks.dispatched",
                     source_service_id="dispatcher",
                     correlation_id=state.goal_id,
-                    payload={
-                        "goal_id": state.goal_id,
-                        "subtask_id": subtask.subtask_id,
-                        "description": subtask.description,
-                        "task_type": subtask.task_type,
-                        "model_tier": subtask.model_tier,
-                        "depends_on": subtask.depends_on,
-                        "contract": subtask.contract.model_dump(),
-                    },
+                    payload=payload,
                 )
             )
 
