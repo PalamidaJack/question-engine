@@ -77,7 +77,7 @@ PROVIDERS: list[dict] = [
     {
         "name": "Kilo Code",
         "env_var": "KILOCODE_API_KEY",
-        "api_base": "https://kilocode.ai/api/openrouter/v1",
+        "api_base": "https://kilo.ai/api/openrouter",
         "example_models": [
             "openai/anthropic/claude-sonnet-4",
             "openai/google/gemini-2.0-flash",

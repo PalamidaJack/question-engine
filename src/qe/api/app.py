@@ -77,17 +77,42 @@ INBOX_DIR = Path("data/runtime_inbox")
 
 def _configure_kilocode() -> None:
     """If KILOCODE_API_KEY is set, configure litellm env vars for openai/ prefix routing."""
+    import litellm
+
     kilo_key = os.environ.get("KILOCODE_API_KEY", "")
     if not kilo_key:
         return
     kilo_base = os.environ.get(
-        "KILOCODE_API_BASE", "https://kilocode.ai/api/openrouter/v1"
+        "KILOCODE_API_BASE", "https://kilo.ai/api/openrouter"
     )
     # litellm uses OPENAI_API_KEY / OPENAI_API_BASE for the "openai/" prefix
     os.environ.setdefault("OPENAI_API_KEY", kilo_key)
     os.environ.setdefault("OPENAI_API_BASE", kilo_base)
+
+    # Register Kilo Code models so litellm recognises them
+    _kilo_models = {
+        "openai/anthropic/claude-sonnet-4": {
+            "max_tokens": 8192,
+            "max_input_tokens": 200000,
+            "max_output_tokens": 8192,
+            "input_cost_per_token": 0.000003,
+            "output_cost_per_token": 0.000015,
+            "litellm_provider": "openai",
+        },
+        "openai/google/gemini-2.0-flash": {
+            "max_tokens": 8192,
+            "max_input_tokens": 1048576,
+            "max_output_tokens": 8192,
+            "input_cost_per_token": 0.0000001,
+            "output_cost_per_token": 0.0000004,
+            "litellm_provider": "openai",
+        },
+    }
+    litellm.register_model(_kilo_models)
     log.info(
-        "kilocode.configured base=%s", kilo_base
+        "kilocode.configured base=%s models=%s",
+        kilo_base,
+        list(_kilo_models.keys()),
     )
 
 
