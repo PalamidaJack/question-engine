@@ -54,11 +54,34 @@ TOPICS = {
     # Synthesis
     "synthesis.requested",
     "synthesis.completed",
+    # Monitoring
+    "monitor.scheduled",
+    "monitor.triggered",
+    "monitor.alert",
+    # Voice & Multimodal
+    "voice.ingested",
+    "voice.transcribed",
+    "document.ingested",
+    "document.parsed",
+    # Channels & Notifications
+    "channel.message_received",
+    "channel.message_sent",
+    "notification.queued",
+    "notification.delivered",
+    # Inference
+    "inference.claim_inferred",
+    "inference.inconsistency_detected",
+    # Predictions
+    "predictions.resolved",
+    # Security
+    "system.gate_denied",
+    "system.integrity_violation",
     # System
     "system.heartbeat",
     "system.error",
     "system.circuit_break",
     "system.service_stalled",
+    "system.service_restarted",
     "system.budget_alert",
     "system.resource_alert",
     "system.security_alert",
