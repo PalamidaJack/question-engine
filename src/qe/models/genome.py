@@ -25,6 +25,7 @@ class Blueprint(BaseModel):
     version: str
     system_prompt: str
     constitution: str = ""
+    service_class: str | None = None  # e.g. "qe.services.validator:ClaimValidatorService"
     model_preference: ModelPreference
     capabilities: CapabilityDeclaration
     max_context_tokens: int = 8000

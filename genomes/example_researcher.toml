@@ -25,4 +25,4 @@ web_search = false
 substrate_read = true
 substrate_write = false
 bus_topics_subscribe = ["observations.structured"]
-bus_topics_publish = ["claims.proposed", "investigations.requested"]
+bus_topics_publish = ["claims.proposed"]

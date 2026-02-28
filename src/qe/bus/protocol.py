@@ -7,16 +7,27 @@ TOPICS = {
     # Belief Ledger
     "claims.proposed",
     "claims.committed",
+    "claims.contradiction_detected",
     "predictions.proposed",
     "predictions.committed",
     "null_results.committed",
     # Orchestration
     "investigations.requested",
     "investigations.completed",
+    # Query
+    "queries.asked",
+    "queries.answered",
+    # Entity
+    "entities.resolved",
+    # Ingestion (lifecycle)
+    "ingestion.item_received",
     # HIL
     "hil.approval_required",
     "hil.approved",
     "hil.rejected",
+    # Chat
+    "chat.message_received",
+    "chat.response_sent",
     # System
     "system.heartbeat",
     "system.error",

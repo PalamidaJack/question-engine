@@ -24,8 +24,10 @@ log = logging.getLogger(__name__)
 app = typer.Typer(help="Question Engine CLI")
 claims_app = typer.Typer(help="Claim inspection commands")
 hil_app = typer.Typer(help="Human-in-the-loop commands")
+ingest_app = typer.Typer(help="Ingestion commands")
 app.add_typer(claims_app, name="claims")
 app.add_typer(hil_app, name="hil")
+app.add_typer(ingest_app, name="ingest")
 
 console = Console()
 INBOX_DIR = Path("data/runtime_inbox")
@@ -111,6 +113,30 @@ def submit(observation_text: str) -> None:
     inbox_file.write_text(envelope.model_dump_json(), encoding="utf-8")
 
     console.print(f"Submitted observation envelope {envelope.envelope_id}")
+
+
+@app.command()
+def ask(question: str) -> None:
+    """Ask a question against the belief ledger."""
+    from qe.services.query import answer_question
+
+    async def _run() -> None:
+        substrate = Substrate()
+        await substrate.initialize()
+        result = await answer_question(question, substrate)
+
+        console.print(f"\n[bold]Answer:[/bold] {result['answer']}")
+        console.print(f"[bold]Confidence:[/bold] {result['confidence']:.0%}")
+        console.print(f"[bold]Reasoning:[/bold] {result['reasoning']}")
+        if result["supporting_claims"]:
+            console.print(f"\n[bold]Supporting claims:[/bold] ({len(result['supporting_claims'])})")
+            for c in result["supporting_claims"]:
+                console.print(
+                    f"  - [{c['confidence']:.0%}] {c['subject_entity_id']} "
+                    f"{c['predicate']} {c['object_value']}"
+                )
+
+    asyncio.run(_run())
 
 
 @claims_app.command("list")
@@ -223,6 +249,47 @@ def hil_reject(
         encoding="utf-8",
     )
     console.print(f"Rejected {envelope_id}")
+
+
+@ingest_app.command("text")
+def ingest_text(text: str) -> None:
+    """Ingest a single text observation."""
+    envelope = Envelope(
+        topic="observations.structured",
+        source_service_id="cli-ingest",
+        payload={"text": text},
+    )
+
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    inbox_file = INBOX_DIR / f"{envelope.envelope_id}.json"
+    inbox_file.write_text(envelope.model_dump_json(), encoding="utf-8")
+
+    console.print(f"Ingested: {envelope.envelope_id}")
+
+
+@ingest_app.command("file")
+def ingest_file(file_path: Path) -> None:
+    """Ingest observations from a text file (one per line)."""
+    if not file_path.exists():
+        console.print(f"[red]File not found: {file_path}[/red]")
+        raise typer.Exit(code=1)
+
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        envelope = Envelope(
+            topic="observations.structured",
+            source_service_id="cli-ingest",
+            payload={"text": line},
+        )
+        inbox_file = INBOX_DIR / f"{envelope.envelope_id}.json"
+        inbox_file.write_text(envelope.model_dump_json(), encoding="utf-8")
+        count += 1
+
+    console.print(f"Ingested {count} observations from {file_path}")
 
 
 @app.command()

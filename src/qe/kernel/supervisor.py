@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import logging
 import traceback
@@ -21,6 +22,7 @@ from qe.runtime.budget import BudgetTracker
 from qe.runtime.service import BaseService
 from qe.services.hil import HILService
 from qe.services.researcher import ResearcherService
+from qe.services.validator import ClaimValidatorService
 
 log = logging.getLogger(__name__)
 
@@ -129,8 +131,18 @@ class Supervisor:
         self._observer = observer
 
     def _instantiate_service(self, blueprint: Any) -> Any:
+        # Dynamic import via service_class entrypoint
+        if blueprint.service_class:
+            module_path, class_name = blueprint.service_class.rsplit(":", 1)
+            module = importlib.import_module(module_path)
+            cls = getattr(module, class_name)
+            return cls(blueprint, self.bus, self.substrate)
+
+        # Backwards-compatible prefix matching
         if blueprint.service_id.startswith("researcher"):
             return ResearcherService(blueprint, self.bus, self.substrate)
+        if blueprint.service_id.startswith("validator"):
+            return ClaimValidatorService(blueprint, self.bus, self.substrate)
         if blueprint.service_id.startswith("hil"):
             return HILService(blueprint, self.bus, self.substrate)
         raise ValueError(f"No service class dispatch for service_id={blueprint.service_id}")

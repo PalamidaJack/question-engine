@@ -56,6 +56,7 @@
       ask: "M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3 M12 17h.01 M12 2a10 10 0 100 20 10 10 0 000-20z",
       entities: "M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2 M9 7a4 4 0 100-8 4 4 0 000 8z M23 21v-2a4 4 0 00-3-3.87 M16 3.13a4 4 0 010 7.75",
       hil: "M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2 M8.5 7a4 4 0 100-8 4 4 0 000 8z M20 8v6 M23 11h-6",
+      chat: "M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z",
       bus: "M22 12h-4l-3 9L9 3l-3 9H2",
       check: "M20 6L9 17l-5-5",
       x: "M18 6L6 18 M6 6l12 12",
@@ -117,6 +118,119 @@
             <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 2 }} />
           </div>
           <span style={{ fontSize: 11, fontFamily: FONT_MONO, color }}>{pct}%</span>
+        </div>
+      );
+    }
+
+    // ── Chat Sub-Components ────────────────────────────────────────────────
+
+    function InlineClaimCard({ claim }) {
+      return (
+        <div style={{
+          padding: "8px 12px", borderLeft: `3px solid ${palette.blue}`,
+          marginTop: 6, background: palette.bg, borderRadius: "0 4px 4px 0",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Badge color={palette.blue}>{claim.subject_entity_id}</Badge>
+            <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>{claim.predicate}</span>
+            <span style={{ fontSize: 12, color: palette.text, flex: 1 }}>{claim.object_value}</span>
+            {claim.confidence != null && <ConfidenceBar value={claim.confidence} />}
+          </div>
+        </div>
+      );
+    }
+
+    function PipelineProgress({ events, complete }) {
+      const stages = [
+        { label: "Submitted", done: true },
+        { label: "Extracting", done: events.some(e => e.topic === "claims.proposed") },
+        { label: "Committed", done: events.some(e => e.topic === "claims.committed") },
+      ];
+      return (
+        <div style={{
+          marginTop: 8, padding: "8px 12px", background: palette.bg,
+          borderRadius: 6, border: `1px solid ${palette.border}`,
+        }}>
+          <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 6, textTransform: "uppercase" }}>
+            Pipeline {complete ? "Complete" : "Processing..."}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            {stages.map((s, i) => (
+              <React.Fragment key={i}>
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 4,
+                  color: s.done ? palette.green : palette.textDim,
+                  fontSize: 11, fontFamily: FONT_MONO,
+                }}>
+                  {s.done
+                    ? <Icon d={Icons.check} size={12} color={palette.green} />
+                    : <span style={{ animation: "pulse 1.5s infinite" }}>...</span>
+                  }
+                  {s.label}
+                </div>
+                {i < stages.length - 1 && <span style={{ color: palette.textDim }}>{"\u2192"}</span>}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function ChatMessage({ msg, pipelineEvents }) {
+      const isUser = msg.role === "user";
+      const isSystem = msg.role === "system";
+      return (
+        <div style={{
+          display: "flex", justifyContent: isUser ? "flex-end" : "flex-start",
+          marginBottom: 12, animation: "fadeIn 0.3s ease",
+        }}>
+          <div style={{
+            maxWidth: "75%", padding: "12px 16px",
+            borderRadius: isUser ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
+            background: isUser ? palette.accentDim : isSystem ? palette.redDim : palette.surface,
+            border: `1px solid ${isUser ? palette.accent + "40" : isSystem ? palette.red + "40" : palette.border}`,
+          }}>
+            {!isUser && (
+              <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 4, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 6 }}>
+                {isSystem ? "System" : "QE Assistant"}
+                {msg.intent && <Badge color={palette.blue}>{msg.intent}</Badge>}
+              </div>
+            )}
+            <div style={{
+              fontSize: 13, color: isUser ? palette.accent : palette.textBright,
+              lineHeight: 1.6, whiteSpace: "pre-wrap",
+            }}>{msg.content}</div>
+            {msg.claims && msg.claims.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 4 }}>
+                  SUPPORTING CLAIMS ({msg.claims.length})
+                </div>
+                {msg.claims.map((c, i) => <InlineClaimCard key={c.claim_id || i} claim={c} />)}
+              </div>
+            )}
+            {msg.confidence != null && (
+              <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>Confidence:</span>
+                <ConfidenceBar value={msg.confidence} />
+              </div>
+            )}
+            {msg.entities && msg.entities.length > 0 && (
+              <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                {msg.entities.map(e => (
+                  <Badge key={e.canonical_name} color={palette.green}>{e.canonical_name} ({e.claim_count || 0})</Badge>
+                ))}
+              </div>
+            )}
+            {msg.tracking_envelope_id && (
+              <PipelineProgress
+                events={pipelineEvents[msg.tracking_envelope_id] || []}
+                complete={msg.pipeline_complete}
+              />
+            )}
+            <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginTop: 6, textAlign: isUser ? "right" : "left" }}>
+              {new Date(msg.timestamp).toLocaleTimeString()}
+            </div>
+          </div>
         </div>
       );
     }
@@ -417,6 +531,15 @@
       const [contradictions, setContradictions] = useState([]);
       const wsRef = useRef(null);
 
+      // Chat state
+      const [chatMessages, setChatMessages] = useState([]);
+      const [chatInput, setChatInput] = useState("");
+      const [chatTyping, setChatTyping] = useState(false);
+      const [chatSessionId, setChatSessionId] = useState(null);
+      const [chatPipelineEvents, setChatPipelineEvents] = useState({});
+      const chatWsRef = useRef(null);
+      const chatEndRef = useRef(null);
+
       // Connect WebSocket
       useEffect(() => {
         const connect = () => {
@@ -490,6 +613,73 @@
 
       useEffect(() => { fetchClaims(); fetchHil(); fetchEntities(); }, []);
 
+      // Chat WebSocket
+      useEffect(() => {
+        if (activeTab !== "chat") return;
+        if (chatWsRef.current) return;
+
+        const chatWs = new WebSocket(`ws://${window.location.host}/ws/chat`);
+        chatWs.onopen = () => console.log("Chat WS connected");
+        chatWs.onmessage = (msg) => {
+          try {
+            const data = JSON.parse(msg.data);
+            if (data.type === "session_init") setChatSessionId(data.session_id);
+            if (data.type === "typing") setChatTyping(data.active);
+            if (data.type === "chat_response") {
+              setChatMessages(prev => [...prev, {
+                id: data.message_id, role: "assistant", content: data.reply_text,
+                intent: data.intent, claims: data.claims || [], entities: data.entities || [],
+                confidence: data.confidence, reasoning: data.reasoning,
+                pipeline_complete: data.pipeline_complete,
+                tracking_envelope_id: data.tracking_envelope_id,
+                timestamp: new Date().toISOString(),
+              }]);
+              setChatTyping(false);
+              if (data.tracking_envelope_id) {
+                chatWs.send(JSON.stringify({ type: "track_envelope", envelope_id: data.tracking_envelope_id }));
+              }
+            }
+            if (data.type === "pipeline_event") {
+              setChatPipelineEvents(prev => {
+                const key = data.correlation_id;
+                const events = prev[key] || [];
+                return { ...prev, [key]: [...events, data] };
+              });
+              if (data.topic === "claims.committed") {
+                setChatMessages(prev => prev.map(m =>
+                  m.tracking_envelope_id === data.correlation_id ? { ...m, pipeline_complete: true } : m
+                ));
+              }
+            }
+            if (data.type === "error") {
+              setChatMessages(prev => [...prev, {
+                id: `err_${Date.now()}`, role: "system", content: data.error,
+                timestamp: new Date().toISOString(),
+              }]);
+            }
+          } catch {}
+        };
+        chatWs.onclose = () => { chatWsRef.current = null; };
+        chatWsRef.current = chatWs;
+        return () => { if (chatWsRef.current) { chatWsRef.current.close(); chatWsRef.current = null; } };
+      }, [activeTab]);
+
+      // Auto-scroll chat
+      useEffect(() => {
+        if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+      }, [chatMessages, chatTyping]);
+
+      const handleChatSend = () => {
+        if (!chatInput.trim() || !chatWsRef.current) return;
+        const text = chatInput.trim();
+        setChatMessages(prev => [...prev, {
+          id: `user_${Date.now()}`, role: "user", content: text,
+          timestamp: new Date().toISOString(),
+        }]);
+        setChatInput("");
+        chatWsRef.current.send(JSON.stringify({ type: "message", content: text }));
+      };
+
       const handleSubmit = async () => {
         if (!observationText.trim()) return;
         setSubmitting(true);
@@ -547,6 +737,7 @@
 
       const navItems = [
         { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
+        { id: "chat", label: "Chat", icon: Icons.chat },
         { id: "ask", label: "Ask", icon: Icons.ask },
         { id: "submit", label: "Submit", icon: Icons.submit },
         { id: "claims", label: "Claims", icon: Icons.claims, count: claims.length },
@@ -993,6 +1184,79 @@
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* CHAT */}
+            {activeTab === "chat" && (
+              <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 48px)" }}>
+                <div style={{ marginBottom: 16, flexShrink: 0 }}>
+                  <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Chat</h1>
+                  <p style={{ fontSize: 13, color: palette.textDim, fontFamily: FONT_MONO }}>
+                    Talk to the Question Engine — ask questions, submit observations, or run commands
+                  </p>
+                </div>
+                <div style={{ flex: 1, overflow: "auto", padding: "16px 0", display: "flex", flexDirection: "column" }}>
+                  {chatMessages.length === 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flex: 1, gap: 16, opacity: 0.6 }}>
+                      <Icon d={Icons.chat} size={48} color={palette.textDim} />
+                      <span style={{ fontSize: 14, color: palette.textDim, fontFamily: FONT_MONO }}>Start a conversation</span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12, width: "100%", maxWidth: 480 }}>
+                        <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", marginBottom: 4 }}>Try saying:</div>
+                        {[
+                          "What do we know about exoplanets?",
+                          "NASA announced water on Europa's surface",
+                          "Show all claims",
+                          "Help",
+                        ].map((suggestion, i) => (
+                          <button key={i} onClick={() => setChatInput(suggestion)} style={{
+                            display: "block", width: "100%", textAlign: "left", padding: "10px 14px",
+                            background: palette.surface, border: `1px solid ${palette.border}`,
+                            borderRadius: 6, color: palette.text, fontSize: 12, fontFamily: FONT_MONO, cursor: "pointer",
+                          }}>{suggestion}</button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {chatMessages.map(msg => (
+                    <ChatMessage key={msg.id} msg={msg} pipelineEvents={chatPipelineEvents} />
+                  ))}
+                  {chatTyping && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 16px", marginBottom: 12 }}>
+                      <div style={{ padding: "8px 16px", borderRadius: 12, background: palette.surface, border: `1px solid ${palette.border}` }}>
+                        <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.accent, animation: "pulse 1.5s infinite" }}>Thinking...</span>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+                <div style={{ flexShrink: 0, padding: "16px 0 0", borderTop: `1px solid ${palette.border}` }}>
+                  <div style={{ display: "flex", gap: 10, alignItems: "flex-end", background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 10, padding: "10px 14px" }}>
+                    <textarea
+                      value={chatInput}
+                      onChange={e => setChatInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChatSend(); } }}
+                      placeholder="Ask a question, share an observation, or type a command..."
+                      rows={1}
+                      style={{
+                        flex: 1, resize: "none", border: "none", outline: "none",
+                        background: "transparent", color: palette.text,
+                        fontFamily: FONT_MONO, fontSize: 13, lineHeight: 1.5, maxHeight: 120, overflow: "auto",
+                      }}
+                    />
+                    <button
+                      onClick={handleChatSend}
+                      disabled={!chatInput.trim() || chatTyping}
+                      style={{
+                        padding: "8px 20px", borderRadius: 6, border: "none",
+                        cursor: chatInput.trim() && !chatTyping ? "pointer" : "not-allowed",
+                        fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600,
+                        background: palette.accent, color: palette.bg,
+                        opacity: !chatInput.trim() || chatTyping ? 0.5 : 1, flexShrink: 0,
+                      }}
+                    >Send</button>
+                  </div>
+                </div>
               </div>
             )}
 

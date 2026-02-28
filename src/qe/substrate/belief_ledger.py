@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -240,12 +241,47 @@ class BeliefLedger:
 
         return null_result
 
+    async def retract_claim(self, claim_id: str) -> bool:
+        """Soft-retract a claim by marking it as superseded by 'retracted'."""
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "SELECT claim_id FROM claims WHERE claim_id = ?",
+                (claim_id,),
+            )
+            if not await cursor.fetchone():
+                return False
+
+            await db.execute(
+                "UPDATE claims SET superseded_by = ? WHERE claim_id = ?",
+                ("retracted", claim_id),
+            )
+            await db.commit()
+        return True
+
     async def search_full_text(self, query: str, limit: int = 20) -> list[Claim]:
-        """
-        SQLite FTS5 search across claim fields.
-        Phase 0 stub - NotImplementedError
-        """
-        raise NotImplementedError("Full-text search not implemented in Phase 0")
+        """SQLite FTS5 search across claim fields."""
+        # Sanitize: strip FTS5 special characters, keep only words
+        words = re.findall(r"\w+", query)
+        if not words:
+            return []
+        # Join with OR for broader matching
+        fts_query = " OR ".join(f'"{w}"' for w in words)
+
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                """
+                SELECT c.*
+                FROM claims c
+                JOIN claims_fts ON c.rowid = claims_fts.rowid
+                WHERE claims_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (fts_query, limit),
+            )
+            rows = await cursor.fetchall()
+
+        return [self._row_to_claim(row) for row in rows]
 
     def _row_to_claim(self, row: tuple) -> Claim:
         """Convert a database row to a Claim object."""

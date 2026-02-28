@@ -113,6 +113,57 @@ def test_supervisor_no_false_positive_loop():
     assert "researcher_alpha" not in supervisor._circuit_broken
 
 
+def test_supervisor_dynamic_import():
+    """service_class entrypoint in genome dynamically loads the service class."""
+    from qe.bus.memory_bus import MemoryBus
+    from qe.models.genome import Blueprint
+
+    bus = MemoryBus()
+    supervisor = Supervisor(bus=bus)
+
+    bp = Blueprint.model_validate({
+        "service_id": "custom_svc",
+        "display_name": "Custom",
+        "version": "1.0",
+        "system_prompt": "test",
+        "service_class": "qe.services.validator:ClaimValidatorService",
+        "model_preference": {"tier": "balanced"},
+        "capabilities": {
+            "bus_topics_subscribe": ["claims.proposed"],
+            "bus_topics_publish": ["claims.committed"],
+        },
+    })
+
+    svc = supervisor._instantiate_service(bp)
+    from qe.services.validator import ClaimValidatorService
+    assert isinstance(svc, ClaimValidatorService)
+
+
+def test_supervisor_prefix_fallback():
+    """Without service_class, prefix matching still works."""
+    from qe.bus.memory_bus import MemoryBus
+    from qe.models.genome import Blueprint
+
+    bus = MemoryBus()
+    supervisor = Supervisor(bus=bus)
+
+    bp = Blueprint.model_validate({
+        "service_id": "researcher_beta",
+        "display_name": "Researcher Beta",
+        "version": "1.0",
+        "system_prompt": "test",
+        "model_preference": {"tier": "balanced"},
+        "capabilities": {
+            "bus_topics_subscribe": ["observations.structured"],
+            "bus_topics_publish": ["claims.proposed"],
+        },
+    })
+
+    svc = supervisor._instantiate_service(bp)
+    from qe.services.researcher import ResearcherService
+    assert isinstance(svc, ResearcherService)
+
+
 def test_load_blueprint_with_constitution(tmp_path: Path):
     """Blueprint loads constitution field from genome TOML."""
     toml_path = tmp_path / "with_constitution.toml"

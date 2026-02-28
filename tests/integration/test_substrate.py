@@ -168,23 +168,25 @@ async def test_alternative_claim_lower_confidence(ledger):
 
 
 @pytest.mark.asyncio
-async def test_search_full_text_not_implemented(ledger):
-    """
-    search_full_text on a term present in a committed claim raises NotImplementedError.
-    """
+async def test_search_full_text(ledger):
+    """FTS5 search finds claims matching query terms."""
     claim = Claim(
-        subject_entity_id="entity-789",
-        predicate="contains-term",
-        object_value="special-term-value",
+        subject_entity_id="spacex",
+        predicate="launched",
+        object_value="Falcon 9 rocket successfully launched from Cape Canaveral",
         confidence=0.95,
         source_service_id="test-service",
-        source_envelope_ids=["env-123"]
+        source_envelope_ids=["env-123"],
     )
-
     await ledger.commit_claim(claim)
 
-    with pytest.raises(NotImplementedError):
-        await ledger.search_full_text("special-term")
+    results = await ledger.search_full_text("Falcon")
+    assert len(results) == 1
+    assert results[0].claim_id == claim.claim_id
+
+    # No results for unrelated term
+    results = await ledger.search_full_text("quantum")
+    assert len(results) == 0
 
 
 def test_cold_storage_append_and_read(cold_storage):

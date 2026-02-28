@@ -22,5 +22,10 @@ balanced = "gpt-4o"
 powerful = "o1-preview"
 # local = "ollama/llama3.2"
 
+[ingestion]
+# Future: RSS feeds, webhooks, scheduled scrapes
+# rss_feeds = []
+# webhook_port = 9090
+
 [api_keys]
 # Do NOT put keys here. Set as environment variables: OPENAI_API_KEY, ANTHROPIC_API_KEY

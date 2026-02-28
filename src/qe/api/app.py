@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from qe.bus import get_bus
 from qe.bus.event_log import EventLog
 from qe.kernel.supervisor import Supervisor
 from qe.models.envelope import Envelope
+from qe.services.chat import ChatService
 from qe.services.query import answer_question
 from qe.substrate import Substrate
 
@@ -42,6 +44,7 @@ _supervisor: Supervisor | None = None
 _substrate: Substrate | None = None
 _supervisor_task: asyncio.Task | None = None
 _event_log: EventLog | None = None
+_chat_service: ChatService | None = None
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -93,7 +96,7 @@ def _bus_to_ws_bridge() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
-    global _supervisor, _substrate, _supervisor_task, _event_log
+    global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
 
     logging.basicConfig(
         level=logging.INFO,
@@ -123,6 +126,12 @@ async def lifespan(app: FastAPI):
         relay_task = asyncio.create_task(_inbox_relay_loop())
         _supervisor_task = asyncio.create_task(
             _supervisor.start(_genome_paths())
+        )
+        _chat_service = ChatService(
+            substrate=_substrate,
+            bus=bus,
+            budget_tracker=_supervisor.budget_tracker,
+            model=get_current_tiers().get("balanced", "gpt-4o"),
         )
         log.info("QE API server started (engine running)")
     else:
@@ -448,6 +457,31 @@ async def hil_reject(envelope_id: str, body: dict[str, Any] | None = None):
     return {"status": "rejected", "envelope_id": envelope_id}
 
 
+# ── Chat ────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/chat")
+async def chat_rest(body: dict[str, Any]):
+    """REST endpoint for chat (non-streaming fallback)."""
+    if not _chat_service:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    message = body.get("message", "").strip()
+    session_id = body.get("session_id")
+
+    if not message:
+        return JSONResponse({"error": "message is required"}, status_code=400)
+
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
+    response = await _chat_service.handle_message(session_id, message)
+    return {
+        "session_id": session_id,
+        **response.model_dump(mode="json"),
+    }
+
+
 # ── WebSocket ───────────────────────────────────────────────────────────────
 
 
@@ -457,7 +491,90 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            # Client can send commands via WebSocket (future extension)
             log.debug("WS received: %s", data)
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
+
+
+@app.websocket("/ws/chat")
+async def chat_websocket(websocket: WebSocket):
+    """Per-session chat WebSocket with pipeline progress events."""
+    await websocket.accept()
+    session_id = str(uuid.uuid4())
+
+    if not _chat_service:
+        await websocket.send_json({
+            "type": "error",
+            "error": "Engine not started. Please complete setup first.",
+        })
+        await websocket.close()
+        return
+
+    await websocket.send_json({
+        "type": "session_init",
+        "session_id": session_id,
+    })
+
+    # Track envelopes for pipeline progress forwarding
+    tracked_envelopes: set[str] = set()
+
+    async def _pipeline_forwarder(envelope: Envelope) -> None:
+        """Forward pipeline events for envelopes this session is tracking."""
+        correlation = envelope.correlation_id or envelope.causation_id
+        if correlation in tracked_envelopes:
+            try:
+                await websocket.send_json({
+                    "type": "pipeline_event",
+                    "topic": envelope.topic,
+                    "envelope_id": envelope.envelope_id,
+                    "correlation_id": correlation,
+                    "payload": envelope.payload,
+                    "timestamp": envelope.timestamp.isoformat(),
+                })
+            except Exception:
+                pass
+
+    pipeline_topics = [
+        "claims.proposed",
+        "claims.committed",
+        "claims.contradiction_detected",
+    ]
+    bus = get_bus()
+    for topic in pipeline_topics:
+        bus.subscribe(topic, _pipeline_forwarder)
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type", "message")
+
+            if msg_type == "message":
+                user_text = data.get("content", "").strip()
+                if not user_text:
+                    continue
+
+                await websocket.send_json({"type": "typing", "active": True})
+
+                response = await _chat_service.handle_message(
+                    session_id, user_text
+                )
+
+                if response.tracking_envelope_id:
+                    tracked_envelopes.add(response.tracking_envelope_id)
+
+                await websocket.send_json({"type": "typing", "active": False})
+                await websocket.send_json({
+                    "type": "chat_response",
+                    **response.model_dump(mode="json"),
+                })
+
+            elif msg_type == "track_envelope":
+                envelope_id = data.get("envelope_id")
+                if envelope_id:
+                    tracked_envelopes.add(envelope_id)
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        for topic in pipeline_topics:
+            bus.unsubscribe(topic, _pipeline_forwarder)

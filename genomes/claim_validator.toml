@@ -1,0 +1,20 @@
+service_id = "validator_alpha"
+display_name = "Claim Validator"
+version = "1.0"
+system_prompt = "You validate incoming claims for duplicates and contradictions."
+constitution = """
+- Never silently drop claims without logging
+- Always detect and report contradictions
+- Never bypass duplicate detection
+"""
+
+[model_preference]
+tier = "local"
+max_cost_per_call_usd = 0.01
+
+[capabilities]
+web_search = false
+substrate_read = true
+substrate_write = true
+bus_topics_subscribe = ["claims.proposed"]
+bus_topics_publish = ["claims.committed", "claims.contradiction_detected"]
