@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
-from qe.models.goal import GoalState, Project
+from qe.models.goal import GoalState, Project, SubtaskResult
 
 log = logging.getLogger(__name__)
 
@@ -337,6 +337,16 @@ class GoalStore:
 
     # ── Row Converters ───────────────────────────────────────────────
 
+    @staticmethod
+    def _deserialize_subtask_results(raw: str | None) -> dict[str, SubtaskResult]:
+        """Parse serialized subtask results JSON back into SubtaskResult models."""
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {}
+        return {k: SubtaskResult.model_validate(v) for k, v in data.items()}
+
     def _row_to_state(self, row: tuple) -> GoalState:
         """Convert a database row to a GoalState."""
         from qe.models.goal import GoalDecomposition
@@ -362,7 +372,7 @@ class GoalStore:
             status=row[2],
             decomposition=decomp,
             subtask_states=json.loads(row[4]) if row[4] else {},
-            subtask_results={},
+            subtask_results=self._deserialize_subtask_results(row[5]),
             created_at=datetime.fromisoformat(row[6]),
             completed_at=(
                 datetime.fromisoformat(row[7]) if row[7] else None

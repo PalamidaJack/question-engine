@@ -317,6 +317,33 @@ async def _init_channels() -> None:
     bus.subscribe("goals.completed", _on_goal_completed)
     bus.subscribe("goals.failed", _on_goal_failed)
 
+    async def _on_drift_detected(envelope: Envelope) -> None:
+        """Notify the user when a subtask output drifts from the goal."""
+        if _notification_router is None:
+            return
+
+        goal_id = envelope.payload.get("goal_id", "")
+        subtask_id = envelope.payload.get("subtask_id", "")
+        similarity = envelope.payload.get("similarity", 0.0)
+
+        target_user = "broadcast"
+        if _goal_store:
+            state = await _goal_store.load_goal(goal_id)
+            if state:
+                target_user = state.metadata.get("origin_user_id", "broadcast") or "broadcast"
+
+        await _notification_router.notify(
+            user_id=target_user,
+            event_type="goal_drift",
+            message=(
+                f"Drift detected on goal {goal_id}: "
+                f"subtask {subtask_id} similarity={similarity:.3f}"
+            ),
+            urgency="normal",
+        )
+
+    bus.subscribe("goals.drift_detected", _on_drift_detected)
+
     async def _on_query_asked(envelope: Envelope) -> None:
         """Handle /ask command: answer from belief ledger and notify the user."""
         if not _substrate or not _notification_router:
@@ -442,17 +469,10 @@ async def lifespan(app: FastAPI):
     _substrate.set_memory_store(_memory_store)
 
     if not _extra_routes_registered:
-        register_goal_routes(
-            app=app,
-            planner=_planner,
-            dispatcher=_dispatcher,
-            goal_store=_goal_store,
-        )
         register_memory_routes(
             app=app,
             memory_store=_memory_store,
         )
-        _extra_routes_registered = True
 
     readiness.mark_ready("substrate_ready")
 
@@ -491,6 +511,15 @@ async def lifespan(app: FastAPI):
             agent_pool=_supervisor.agent_pool,
             working_memory=_supervisor.working_memory,
         )
+
+        if not _extra_routes_registered:
+            register_goal_routes(
+                app=app,
+                planner=_planner,
+                dispatcher=_dispatcher,
+                goal_store=_goal_store,
+            )
+            _extra_routes_registered = True
 
         # Wire dispatcher to receive subtask completion/failure events
         async def _on_task_result(envelope: Envelope) -> None:
