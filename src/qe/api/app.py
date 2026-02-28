@@ -183,7 +183,12 @@ async def lifespan(app: FastAPI):
             budget_tracker=_supervisor.budget_tracker,
             model=balanced_model,
         )
-        _dispatcher = Dispatcher(bus=bus, goal_store=_goal_store)
+        _dispatcher = Dispatcher(
+            bus=bus,
+            goal_store=_goal_store,
+            agent_pool=_supervisor.agent_pool,
+            working_memory=_supervisor.working_memory,
+        )
 
         # Wire dispatcher to receive subtask completion/failure events
         async def _on_task_result(envelope: Envelope) -> None:
@@ -201,8 +206,31 @@ async def lifespan(app: FastAPI):
             substrate=_substrate,
             budget_tracker=_supervisor.budget_tracker,
             model=balanced_model,
+            agent_id="executor_default",
         )
         await _executor.start()
+
+        # Register the default executor as an agent in the pool
+        from qe.runtime.agent_pool import AgentRecord
+
+        _supervisor.agent_pool.register(
+            AgentRecord(
+                agent_id="executor_default",
+                service_id="executor",
+                capabilities={"web_search", "code_exec"},
+                task_types={
+                    "research",
+                    "analysis",
+                    "fact_check",
+                    "synthesis",
+                    "document_generation",
+                    "web_search",
+                    "code_execution",
+                },
+                model_tier="balanced",
+                max_concurrency=5,
+            )
+        )
 
         # Wire event log into substrate for MAGMA temporal/causal queries
         _substrate.set_event_log(_event_log)
