@@ -120,6 +120,7 @@ class DoctorService:
         check_coros = [
             self._check_bus(),
             self._check_substrate(),
+            self._check_vectors(),
             self._check_event_log(),
             self._check_budget(),
             self._check_services(),
@@ -249,6 +250,78 @@ class DoctorService:
                 duration_ms=(time.monotonic() - start) * 1000,
                 checked_at=datetime.now(UTC).isoformat(),
                 fix_hint="Check event_log.db path and initialization",
+            )
+
+    async def _check_vectors(self) -> HealthCheck:
+        """Verify vector index availability and probe semantic search latency."""
+        start = time.monotonic()
+        if not self._substrate or not hasattr(self._substrate, "embeddings"):
+            return HealthCheck(
+                name="vectors",
+                status=CheckStatus.SKIP,
+                message="Vector store not configured",
+                checked_at=datetime.now(UTC).isoformat(),
+            )
+
+        try:
+            from qe.runtime.metrics import get_metrics
+
+            metrics = get_metrics()
+            embeddings = self._substrate.embeddings
+            count = await embeddings.count()
+            claim_count = await self._substrate.count_claims()
+            metrics.gauge("vector_index_size").set(float(count))
+            metrics.gauge("vector_hnsw_enabled").set(
+                1.0 if getattr(embeddings, "_hnsw_index", None) is not None else 0.0
+            )
+
+            # Probe semantic retrieval only when vectors exist.
+            probe_ms = 0.0
+            if count > 0:
+                probe_start = time.monotonic()
+                await embeddings.search("health probe", top_k=1, min_similarity=0.0)
+                probe_ms = (time.monotonic() - probe_start) * 1000
+                metrics.histogram("vector_query_latency_ms").observe(probe_ms)
+
+            # If we have claims but no vectors, this indicates indexing drift.
+            if claim_count > 0 and count == 0:
+                return HealthCheck(
+                    name="vectors",
+                    status=CheckStatus.WARN,
+                    message=(
+                        f"Vector index empty while ledger has {claim_count} claims"
+                    ),
+                    duration_ms=(time.monotonic() - start) * 1000,
+                    checked_at=datetime.now(UTC).isoformat(),
+                    fix_hint="Run embedding reindex to restore semantic retrieval",
+                )
+
+            # Latency guardrail for semantic probe.
+            if probe_ms > 500.0:
+                return HealthCheck(
+                    name="vectors",
+                    status=CheckStatus.WARN,
+                    message=f"Vector probe slow ({probe_ms:.1f}ms, size={count})",
+                    duration_ms=(time.monotonic() - start) * 1000,
+                    checked_at=datetime.now(UTC).isoformat(),
+                    fix_hint="Check HNSW index health and embedding table size",
+                )
+
+            return HealthCheck(
+                name="vectors",
+                status=CheckStatus.PASS,
+                message=f"Vector store healthy (size={count})",
+                duration_ms=(time.monotonic() - start) * 1000,
+                checked_at=datetime.now(UTC).isoformat(),
+            )
+        except Exception as e:
+            return HealthCheck(
+                name="vectors",
+                status=CheckStatus.FAIL,
+                message=f"Vector check failed: {e}",
+                duration_ms=(time.monotonic() - start) * 1000,
+                checked_at=datetime.now(UTC).isoformat(),
+                fix_hint="Check embeddings table and vector backend configuration",
             )
 
     async def _check_budget(self) -> HealthCheck:

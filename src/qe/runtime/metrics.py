@@ -173,11 +173,16 @@ class MetricsCollector:
         self.counter("goals_submitted_total")
         self.counter("goals_completed_total")
         self.counter("goals_failed_total")
+        self.counter("retrieval_queries_total")
+        self.counter("retrieval_hybrid_calls_total")
+        self.counter("retrieval_hybrid_semantic_nonempty_total")
+        self.counter("retrieval_hybrid_fts_nonempty_total")
 
         # Histograms
         self.histogram("llm_latency_ms")
         self.histogram("handler_latency_ms")
         self.histogram("api_latency_ms")
+        self.histogram("vector_query_latency_ms")
 
         # Gauges
         self.gauge("active_services")
@@ -186,6 +191,8 @@ class MetricsCollector:
         self.gauge("dlq_size")
         self.gauge("budget_remaining_pct")
         self.gauge("bus_in_flight")
+        self.gauge("vector_index_size")
+        self.gauge("vector_hnsw_enabled")
 
     def counter(self, name: str) -> Counter:
         with self._lock:

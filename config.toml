@@ -22,6 +22,14 @@ balanced = "gpt-4o"
 powerful = "o1-preview"
 # local = "ollama/llama3.2"
 
+[retrieval]
+fts_top_k = 20
+semantic_top_k = 20
+semantic_min_similarity = 0.3
+fts_weight = 0.6
+semantic_weight = 0.4
+rrf_k = 60
+
 [ingestion]
 # Future: RSS feeds, webhooks, scheduled scrapes
 # rss_feeds = []

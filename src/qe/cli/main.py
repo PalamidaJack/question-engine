@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,76 @@ app.add_typer(db_app, name="db")
 
 console = Console()
 INBOX_DIR = Path("data/runtime_inbox")
+
+
+async def _reindex_claim_embeddings(
+    substrate: Substrate,
+    *,
+    include_superseded: bool = False,
+    dry_run: bool = False,
+    batch_size: int = 500,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, int]:
+    """Rebuild claim embeddings from the belief ledger.
+
+    Returns stats: {"deleted": int, "indexed": int, "total": int}.
+    """
+    import aiosqlite
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+
+    claims = await substrate.get_claims(include_superseded=include_superseded)
+    total = len(claims)
+
+    db_path = substrate.belief_ledger._db_path
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE id LIKE 'claim:%'"
+        )
+        row = await cursor.fetchone()
+        existing_claim_vectors = int(row[0]) if row else 0
+
+    if dry_run:
+        return {
+            "deleted": existing_claim_vectors,
+            "indexed": total,
+            "total": total,
+            "dry_run": 1,
+        }
+
+    # Remove existing claim vectors, keep non-claim embeddings (e.g. goal patterns).
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("DELETE FROM embeddings WHERE id LIKE 'claim:%'")
+        await db.commit()
+        deleted = max(cursor.rowcount, 0)
+
+    # Invalidate HNSW index so it rebuilds on next query.
+    substrate.embeddings._hnsw_dirty = True
+
+    indexed = 0
+    for offset in range(0, total, batch_size):
+        batch = claims[offset : offset + batch_size]
+        for claim in batch:
+            await substrate.embeddings.store(
+                id=f"claim:{claim.claim_id}",
+                text=(
+                    f"{claim.subject_entity_id} "
+                    f"{claim.predicate} "
+                    f"{claim.object_value}"
+                ),
+                metadata={
+                    "kind": "claim",
+                    "claim_id": claim.claim_id,
+                    "subject_entity_id": claim.subject_entity_id,
+                    "predicate": claim.predicate,
+                },
+            )
+            indexed += 1
+            if progress_callback is not None:
+                progress_callback(indexed, total)
+
+    return {"deleted": deleted, "indexed": indexed, "total": total, "dry_run": 0}
 
 
 def _genome_paths() -> list[Path]:
@@ -738,6 +809,62 @@ def db_list_backups(
             f"{size_kb:.1f} KB",
         )
     console.print(table)
+
+
+@db_app.command("reindex-embeddings")
+def db_reindex_embeddings(
+    include_superseded: bool = typer.Option(
+        False,
+        "--include-superseded",
+        help="Reindex superseded claims too.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would be reindexed without modifying embeddings.",
+    ),
+    batch_size: int = typer.Option(
+        500,
+        "--batch-size",
+        min=1,
+        help="Number of claims to process per batch.",
+    ),
+) -> None:
+    """Rebuild claim embeddings from the current belief ledger."""
+
+    async def _run() -> None:
+        substrate = Substrate()
+        await substrate.initialize()
+
+        def _progress(indexed: int, total: int) -> None:
+            if total == 0:
+                return
+            if indexed % 100 == 0 or indexed == total:
+                console.print(f"Indexed {indexed}/{total} claims...")
+
+        stats = await _reindex_claim_embeddings(
+            substrate,
+            include_superseded=include_superseded,
+            dry_run=dry_run,
+            batch_size=batch_size,
+            progress_callback=_progress,
+        )
+        if dry_run:
+            console.print(
+                "[yellow]Dry run complete.[/yellow] "
+                f"would_delete={stats['deleted']} would_index={stats['indexed']} total={stats['total']}"
+            )
+        else:
+            console.print(
+                "[green]Embedding reindex complete.[/green] "
+                f"deleted={stats['deleted']} indexed={stats['indexed']} total={stats['total']}"
+            )
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        log.error("Embedding reindex failed: %s", exc)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()

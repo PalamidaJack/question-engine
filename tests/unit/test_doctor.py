@@ -20,6 +20,9 @@ class TestDoctorChecks:
     def mock_substrate(self):
         sub = AsyncMock()
         sub.count_claims = AsyncMock(return_value=42)
+        sub.embeddings = AsyncMock()
+        sub.embeddings.count = AsyncMock(return_value=42)
+        sub.embeddings.search = AsyncMock(return_value=[])
         return sub
 
     @pytest.fixture
@@ -72,6 +75,25 @@ class TestDoctorChecks:
         assert check.status == CheckStatus.PASS
 
     @pytest.mark.asyncio
+    async def test_vector_check_passes(self, mock_bus, mock_substrate):
+        doc = DoctorService(bus=mock_bus, substrate=mock_substrate)
+        check = await doc._check_vectors()
+        assert check.status == CheckStatus.PASS
+        assert "healthy" in check.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_vector_check_warns_on_empty_index_with_claims(self, mock_bus):
+        sub = AsyncMock()
+        sub.count_claims = AsyncMock(return_value=5)
+        sub.embeddings = AsyncMock()
+        sub.embeddings.count = AsyncMock(return_value=0)
+        sub.embeddings.search = AsyncMock(return_value=[])
+        doc = DoctorService(bus=mock_bus, substrate=sub)
+        check = await doc._check_vectors()
+        assert check.status == CheckStatus.WARN
+        assert "empty" in check.message.lower()
+
+    @pytest.mark.asyncio
     async def test_budget_check_healthy(self, mock_bus, mock_budget):
         doc = DoctorService(bus=mock_bus, budget_tracker=mock_budget)
         check = await doc._check_budget()
@@ -107,6 +129,9 @@ class TestDoctorReport:
         bus.publish = MagicMock()
         sub = AsyncMock()
         sub.count_claims = AsyncMock(return_value=10)
+        sub.embeddings = AsyncMock()
+        sub.embeddings.count = AsyncMock(return_value=10)
+        sub.embeddings.search = AsyncMock(return_value=[])
         elog = AsyncMock()
         elog.replay = AsyncMock(return_value=[])
         bt = MagicMock()

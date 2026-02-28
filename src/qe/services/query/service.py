@@ -10,6 +10,7 @@ import litellm
 from dotenv import load_dotenv
 
 from qe.services.query.schemas import AnswerResponse
+from qe.runtime.metrics import get_metrics
 from qe.substrate import Substrate
 
 load_dotenv()
@@ -17,6 +18,31 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 _MAX_CONTEXT_CLAIMS = 20
+
+
+def _get_retrieval_settings() -> dict[str, float | int]:
+    """Load retrieval settings from config.toml with safe defaults."""
+    defaults: dict[str, float | int] = {
+        "fts_top_k": _MAX_CONTEXT_CLAIMS,
+        "semantic_top_k": _MAX_CONTEXT_CLAIMS,
+        "semantic_min_similarity": 0.3,
+        "fts_weight": 0.6,
+        "semantic_weight": 0.4,
+        "rrf_k": 60,
+    }
+    try:
+        from qe.api.setup import get_settings
+
+        retrieval = get_settings().get("retrieval", {})
+        if isinstance(retrieval, dict):
+            merged = defaults.copy()
+            merged.update({
+                k: retrieval.get(k, defaults[k]) for k in defaults
+            })
+            return merged
+    except Exception:
+        log.debug("query.retrieval_settings_defaulted", exc_info=True)
+    return defaults
 
 
 async def answer_question(
@@ -28,10 +54,20 @@ async def answer_question(
 
     Returns dict with answer, confidence, reasoning, and supporting_claims.
     """
-    # 1. Search via FTS5
-    claims = await substrate.search_full_text(question, limit=_MAX_CONTEXT_CLAIMS)
+    # 1. Hybrid retrieval (FTS + semantic)
+    get_metrics().counter("retrieval_queries_total").inc()
+    retrieval = _get_retrieval_settings()
+    claims = await substrate.hybrid_search(
+        question,
+        fts_top_k=int(retrieval["fts_top_k"]),
+        semantic_top_k=int(retrieval["semantic_top_k"]),
+        semantic_min_similarity=float(retrieval["semantic_min_similarity"]),
+        fts_weight=float(retrieval["fts_weight"]),
+        semantic_weight=float(retrieval["semantic_weight"]),
+        rrf_k=int(retrieval["rrf_k"]),
+    )
 
-    # 2. If FTS5 returns nothing, try keyword-based entity search
+    # 2. If retrieval returns nothing, try keyword-based entity scan
     if not claims:
         all_claims = await substrate.get_claims()
         q_lower = question.lower()

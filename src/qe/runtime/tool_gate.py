@@ -87,8 +87,9 @@ class ToolGate:
             # Check domain blocking for web tools
             if policy.blocked_domains and tool_name in ("web_fetch", "web_search"):
                 url = params.get("url", "")
+                query = params.get("query", "")
                 for domain in policy.blocked_domains:
-                    if domain in url:
+                    if domain in url or domain in query:
                         return GateResult(
                             decision=GateDecision.DENY,
                             reason=f"Domain blocked: {domain}",

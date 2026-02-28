@@ -1,6 +1,7 @@
 import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -8,6 +9,8 @@ from qe.models.claim import Claim
 from qe.models.envelope import Envelope
 from qe.substrate.belief_ledger import BeliefLedger
 from qe.substrate.cold_storage import ColdStorage
+from qe.substrate.embeddings import SearchResult
+from qe.substrate import Substrate
 
 
 @pytest.fixture
@@ -220,3 +223,43 @@ def test_cold_storage_read_nonexistent(cold_storage):
     """ColdStorage: reading a nonexistent envelope returns None."""
     retrieved = cold_storage.read("nonexistent-id", 2026, 2)
     assert retrieved is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_uses_semantic_when_fts_empty(tmp_path: Path):
+    """Hybrid retrieval returns semantic hit even when lexical search is empty."""
+    substrate = Substrate(
+        db_path=str(tmp_path / "hybrid.db"),
+        cold_path=str(tmp_path / "cold"),
+    )
+    await substrate.initialize()
+
+    claim = await substrate.commit_claim(
+        Claim(
+            subject_entity_id="acme",
+            predicate="acquired",
+            object_value="Beta LLC",
+            confidence=0.9,
+            source_service_id="test",
+            source_envelope_ids=["env-1"],
+        )
+    )
+
+    lexical = await substrate.search_full_text("merger transaction", limit=10)
+    assert lexical == []
+
+    substrate.embeddings.count = AsyncMock(return_value=1)
+    substrate.embeddings.search = AsyncMock(
+        return_value=[
+            SearchResult(
+                id=f"claim:{claim.claim_id}",
+                text="acme acquired Beta LLC",
+                similarity=0.95,
+                metadata={"claim_id": claim.claim_id},
+            )
+        ]
+    )
+
+    merged = await substrate.hybrid_search("merger transaction", fts_top_k=10, semantic_top_k=10)
+    assert merged, "Expected hybrid search to return semantic result"
+    assert merged[0].claim_id == claim.claim_id

@@ -63,7 +63,7 @@ def register_memory_routes(
             raise HTTPException(404, "Memory not found")
         return {"deleted": True}
 
-    @app.get("/api/projects")
+    @app.get("/api/memory/projects")
     async def list_projects():
         if not memory_store:
             raise HTTPException(
@@ -72,7 +72,7 @@ def register_memory_routes(
         projects = await memory_store.list_projects()
         return {"projects": projects}
 
-    @app.post("/api/projects")
+    @app.post("/api/memory/projects")
     async def create_project(body: dict):
         if not memory_store:
             raise HTTPException(

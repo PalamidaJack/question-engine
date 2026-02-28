@@ -22,6 +22,9 @@ class TestGetSettings:
         assert result["budget"]["alert_at_pct"] == 0.80
         assert result["runtime"]["log_level"] == "INFO"
         assert result["runtime"]["hil_timeout_seconds"] == 3600
+        assert result["retrieval"]["fts_top_k"] == 20
+        assert result["retrieval"]["semantic_top_k"] == 20
+        assert result["retrieval"]["semantic_min_similarity"] == 0.3
 
     def test_reads_existing_values(self, tmp_path):
         """Reads values from an existing config.toml."""
@@ -41,6 +44,7 @@ class TestGetSettings:
         assert result["budget"]["alert_at_pct"] == 0.90
         assert result["runtime"]["log_level"] == "DEBUG"
         assert result["runtime"]["hil_timeout_seconds"] == 7200
+        assert result["retrieval"]["fts_top_k"] == 20  # default
 
     def test_fills_defaults_for_missing_keys(self, tmp_path):
         """When config has partial sections, missing keys get defaults."""
@@ -51,6 +55,7 @@ class TestGetSettings:
         assert result["budget"]["monthly_limit_usd"] == 25.0
         assert result["budget"]["alert_at_pct"] == 0.80  # default
         assert result["runtime"]["log_level"] == "INFO"  # default
+        assert result["retrieval"]["rrf_k"] == 60  # default
 
 
 class TestSaveSettings:
@@ -62,11 +67,13 @@ class TestSaveSettings:
             save_settings({
                 "budget": {"monthly_limit_usd": 75.0, "alert_at_pct": 0.85},
                 "runtime": {"log_level": "WARNING"},
+                "retrieval": {"semantic_top_k": 12},
             })
             result = get_settings()
         assert result["budget"]["monthly_limit_usd"] == 75.0
         assert result["budget"]["alert_at_pct"] == 0.85
         assert result["runtime"]["log_level"] == "WARNING"
+        assert result["retrieval"]["semantic_top_k"] == 12
 
     def test_preserves_existing_sections(self, tmp_path):
         """Existing sections like [models] survive a save_settings call."""

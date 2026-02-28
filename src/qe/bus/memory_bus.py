@@ -127,6 +127,7 @@ class MemoryBus:
 
         # ── Idempotency check ──
         now = time.time()
+        self._evict_stale_ids(now)
         if envelope.envelope_id in self._seen_ids:
             log.debug(
                 "bus.dedup_dropped envelope_id=%s topic=%s",
@@ -135,7 +136,6 @@ class MemoryBus:
             )
             return []
         self._seen_ids[envelope.envelope_id] = now
-        self._evict_stale_ids(now)
 
         log.debug(
             "bus.publish topic=%s envelope_id=%s source=%s correlation_id=%s",
@@ -412,12 +412,17 @@ class MemoryBus:
 
     def _evict_stale_ids(self, now: float) -> None:
         """Remove expired entries from the dedup cache."""
-        if len(self._seen_ids) < self._dedup_max_size:
-            return
         cutoff = now - self._dedup_ttl
         stale = [eid for eid, ts in self._seen_ids.items() if ts < cutoff]
         for eid in stale:
             del self._seen_ids[eid]
+
+        # If still oversized, evict oldest entries to cap memory use.
+        overflow = len(self._seen_ids) - self._dedup_max_size
+        if overflow > 0:
+            oldest = sorted(self._seen_ids.items(), key=lambda item: item[1])[:overflow]
+            for eid, _ in oldest:
+                del self._seen_ids[eid]
 
     # ── Backpressure helpers ───────────────────────────────────────────────
 

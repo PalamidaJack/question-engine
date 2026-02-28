@@ -159,7 +159,7 @@ class BeliefLedger:
                     prediction_id, schema_version, statement, confidence,
                     resolution_criteria, resolution_deadline, source_service_id,
                     created_at, resolved_at, resolution, resolution_evidence_ids
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     prediction.prediction_id,

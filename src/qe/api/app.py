@@ -19,6 +19,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTimingMiddleware
+from qe.api.endpoints.goals import register_goal_routes
+from qe.api.endpoints.memory import register_memory_routes
 from qe.api.setup import (
     PROVIDERS,
     get_configured_providers,
@@ -46,6 +48,7 @@ from qe.services.planner import PlannerService
 from qe.services.query import answer_question
 from qe.substrate import Substrate
 from qe.substrate.goal_store import GoalStore
+from qe.substrate.memory_store import MemoryStore
 
 load_dotenv()
 
@@ -64,6 +67,8 @@ _dispatcher: Dispatcher | None = None
 _executor: ExecutorService | None = None
 _goal_store: GoalStore | None = None
 _doctor: DoctorService | None = None
+_memory_store: MemoryStore | None = None
+_extra_routes_registered = False
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -117,6 +122,7 @@ async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
     global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
     global _planner, _dispatcher, _executor, _goal_store, _doctor
+    global _memory_store, _extra_routes_registered
 
     configure_from_config(get_settings())
 
@@ -132,6 +138,22 @@ async def lifespan(app: FastAPI):
 
     _substrate = Substrate()
     await _substrate.initialize()
+    _memory_store = MemoryStore(_substrate.belief_ledger._db_path)
+    _substrate.set_memory_store(_memory_store)
+
+    if not _extra_routes_registered:
+        register_goal_routes(
+            app=app,
+            planner=_planner,
+            dispatcher=_dispatcher,
+            goal_store=_goal_store,
+        )
+        register_memory_routes(
+            app=app,
+            memory_store=_memory_store,
+        )
+        _extra_routes_registered = True
+
     readiness.mark_ready("substrate_ready")
 
     relay_task: asyncio.Task | None = None
@@ -195,6 +217,7 @@ async def lifespan(app: FastAPI):
         await _doctor.start()
         # Reconcile in-flight goals from previous run
         await _dispatcher.reconcile()
+
         readiness.mark_ready("services_subscribed")
         readiness.mark_ready("supervisor_ready")
         log.info("QE API server started (engine running)")
@@ -239,6 +262,13 @@ app.add_middleware(
 app.add_middleware(RequestTimingMiddleware)
 app.add_middleware(RateLimitMiddleware, rpm=120, burst=20)
 app.add_middleware(AuthMiddleware)
+try:
+    from qe.api.endpoints.ingest import router as ingest_router
+
+    app.include_router(ingest_router)
+except RuntimeError as exc:
+    # FastAPI raises RuntimeError when python-multipart is missing.
+    log.warning("Ingest routes disabled: %s", exc)
 
 # Serve dashboard
 _static_dir = Path(__file__).parent / "static"
@@ -527,9 +557,15 @@ async def replay_events(body: dict[str, Any]):
     replayed = 0
     for event in events:
         env = Envelope(
+            envelope_id=event["envelope_id"],
+            schema_version=event.get("schema_version") or "1.0",
             topic=event["topic"],
             source_service_id=event["source_service_id"],
+            correlation_id=event.get("correlation_id"),
+            causation_id=event.get("causation_id"),
+            timestamp=datetime.fromisoformat(event["timestamp"]),
             payload=event["payload"],
+            ttl_seconds=event.get("ttl_seconds"),
         )
         bus.publish(env)
         replayed += 1

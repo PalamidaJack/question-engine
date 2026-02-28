@@ -85,6 +85,7 @@ class HILService(BaseService):
                             },
                         )
                     )
+                pending_file.unlink(missing_ok=True)
                 return
 
             if datetime.now(UTC) > expires_at:
