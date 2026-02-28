@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -66,21 +67,31 @@ class ExecutorService:
         substrate: Any,
         budget_tracker: BudgetTracker | None = None,
         model: str = "gpt-4o-mini",
+        max_concurrency: int = 5,
     ) -> None:
         self.bus = bus
         self.substrate = substrate
         self.budget_tracker = budget_tracker
         self.model = model
+        self._semaphore = asyncio.Semaphore(max_concurrency)
 
     async def start(self) -> None:
         self.bus.subscribe("tasks.dispatched", self._handle_dispatched)
-        log.info("executor.started model=%s", self.model)
+        log.info(
+            "executor.started model=%s concurrency=%d",
+            self.model,
+            self._semaphore._value,
+        )
 
     async def stop(self) -> None:
         self.bus.unsubscribe("tasks.dispatched", self._handle_dispatched)
         log.info("executor.stopped")
 
     async def _handle_dispatched(self, envelope: Envelope) -> None:
+        async with self._semaphore:
+            await self._run_task(envelope)
+
+    async def _run_task(self, envelope: Envelope) -> None:
         payload = envelope.payload
         goal_id = payload["goal_id"]
         subtask_id = payload["subtask_id"]
