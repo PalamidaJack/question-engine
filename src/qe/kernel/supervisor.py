@@ -81,7 +81,18 @@ class Supervisor:
         self._running = True
         for genome_path in genome_paths:
             blueprint = load_blueprint(genome_path)
-            service = self._instantiate_service(blueprint)
+            try:
+                service = self._instantiate_service(blueprint)
+            except Exception:
+                log.warning("Skipping genome %s: instantiation failed", genome_path.name)
+                continue
+            if not isinstance(service, BaseService):
+                log.warning(
+                    "Skipping genome %s: %s does not extend BaseService",
+                    genome_path.name,
+                    type(service).__name__,
+                )
+                continue
             service._handle_envelope = self._wrap_service_handler(service._handle_envelope, service)  # type: ignore[method-assign]
             self.registry.register(blueprint, service)
             await service.start()
@@ -98,6 +109,8 @@ class Supervisor:
         self._start_daemons()
         # Subscribe to heartbeats for monitoring
         self.bus.subscribe("system.heartbeat", self._on_heartbeat)
+        # Observe outbound publications for loop detection
+        self.bus.add_publish_listener(self._on_publish)
         log.info("[READY]")
 
         shutdown_event = asyncio.Event()
@@ -197,10 +210,13 @@ class Supervisor:
                     )
                 )
 
-            # Loop detection: check publications from this service
-            self._check_loop(sid, envelope)
-
         return wrapped
+
+    def _on_publish(self, envelope: Envelope) -> None:
+        """Observe every outbound publication for loop detection."""
+        sid = envelope.source_service_id
+        if sid and sid != "supervisor":
+            self._check_loop(sid, envelope)
 
     # ------------------------------------------------------------------
     # Loop Detection

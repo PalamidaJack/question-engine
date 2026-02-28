@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -17,20 +18,30 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from qe.api.middleware import RequestTimingMiddleware
 from qe.api.setup import (
     PROVIDERS,
     get_configured_providers,
     get_current_tiers,
+    get_settings,
     is_setup_complete,
+    save_settings,
     save_setup,
 )
 from qe.api.ws import ConnectionManager
+from qe.audit import get_audit_log
 from qe.bus import get_bus
+from qe.bus.bus_metrics import get_bus_metrics
 from qe.bus.event_log import EventLog
 from qe.kernel.supervisor import Supervisor
 from qe.models.envelope import Envelope
+from qe.runtime.logging_config import configure_from_config, update_log_level
+from qe.runtime.metrics import get_metrics
+from qe.runtime.readiness import get_readiness
 from qe.services.chat import ChatService
 from qe.services.dispatcher import Dispatcher
+from qe.services.doctor import DoctorService
+from qe.services.executor import ExecutorService
 from qe.services.planner import PlannerService
 from qe.services.query import answer_question
 from qe.substrate import Substrate
@@ -50,7 +61,9 @@ _event_log: EventLog | None = None
 _chat_service: ChatService | None = None
 _planner: PlannerService | None = None
 _dispatcher: Dispatcher | None = None
+_executor: ExecutorService | None = None
 _goal_store: GoalStore | None = None
+_doctor: DoctorService | None = None
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -103,23 +116,23 @@ def _bus_to_ws_bridge() -> None:
 async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
     global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
-    global _planner, _dispatcher, _goal_store
+    global _planner, _dispatcher, _executor, _goal_store, _doctor
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    configure_from_config(get_settings())
 
     bus = get_bus()
 
     # Initialize durable event log
+    readiness = get_readiness()
+
     _event_log = EventLog()
     await _event_log.initialize()
     bus.set_event_log(_event_log)
+    readiness.mark_ready("event_log_ready")
 
     _substrate = Substrate()
     await _substrate.initialize()
+    readiness.mark_ready("substrate_ready")
 
     relay_task: asyncio.Task | None = None
 
@@ -149,6 +162,41 @@ async def lifespan(app: FastAPI):
             model=balanced_model,
         )
         _dispatcher = Dispatcher(bus=bus, goal_store=_goal_store)
+
+        # Wire dispatcher to receive subtask completion/failure events
+        async def _on_task_result(envelope: Envelope) -> None:
+            from qe.models.goal import SubtaskResult as _SR
+
+            result = _SR.model_validate(envelope.payload)
+            await _dispatcher.handle_subtask_completed(result.goal_id, result)
+
+        bus.subscribe("tasks.completed", _on_task_result)
+        bus.subscribe("tasks.failed", _on_task_result)
+
+        # Start the executor service that processes dispatched tasks
+        _executor = ExecutorService(
+            bus=bus,
+            substrate=_substrate,
+            budget_tracker=_supervisor.budget_tracker,
+            model=balanced_model,
+        )
+        await _executor.start()
+
+        # Wire event log into substrate for MAGMA temporal/causal queries
+        _substrate.set_event_log(_event_log)
+        # Start Doctor health monitoring service
+        _doctor = DoctorService(
+            bus=bus,
+            substrate=_substrate,
+            supervisor=_supervisor,
+            event_log=_event_log,
+            budget_tracker=_supervisor.budget_tracker,
+        )
+        await _doctor.start()
+        # Reconcile in-flight goals from previous run
+        await _dispatcher.reconcile()
+        readiness.mark_ready("services_subscribed")
+        readiness.mark_ready("supervisor_ready")
         log.info("QE API server started (engine running)")
     else:
         log.info("QE API server started (setup required — no API keys configured)")
@@ -156,6 +204,10 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _executor:
+        await _executor.stop()
+    if _doctor:
+        await _doctor.stop()
     if _supervisor:
         await _supervisor.stop()
     if relay_task:
@@ -171,13 +223,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origins = (
+    [o.strip() for o in os.environ["QE_CORS_ORIGINS"].split(",")]
+    if os.environ.get("QE_CORS_ORIGINS")
+    else ["http://localhost:8000", "http://127.0.0.1:8000"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestTimingMiddleware)
 
 # Serve dashboard
 _static_dir = Path(__file__).parent / "static"
@@ -249,12 +308,267 @@ async def setup_save(body: dict[str, Any]):
     return {"status": "saved", "complete": is_setup_complete()}
 
 
+# ── Settings ─────────────────────────────────────────────────────────────
+
+
+@app.get("/api/settings")
+async def get_settings_endpoint():
+    """Return runtime settings from config.toml."""
+    return get_settings()
+
+
+@app.post("/api/settings")
+async def save_settings_endpoint(body: dict[str, Any]):
+    """Save runtime settings and apply budget changes at runtime."""
+    save_settings(body)
+
+    # Apply budget limits at runtime if supervisor is running
+    budget_vals = body.get("budget")
+    if budget_vals and isinstance(budget_vals, dict) and _supervisor:
+        _supervisor.budget_tracker.update_limits(
+            monthly_limit_usd=budget_vals.get("monthly_limit_usd"),
+            alert_at_pct=budget_vals.get("alert_at_pct"),
+        )
+
+    # Apply log level at runtime without restart
+    runtime_vals = body.get("runtime")
+    if runtime_vals and isinstance(runtime_vals, dict):
+        if "log_level" in runtime_vals:
+            update_log_level(runtime_vals["log_level"])
+
+    get_audit_log().record("settings.update", resource="config", detail=body)
+    return {"status": "saved"}
+
+
+@app.post("/api/optimize/{genome_id}")
+async def optimize_genome(genome_id: str):
+    """Run DSPy prompt optimization on a genome using calibration data."""
+    if not _supervisor:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    # Find the genome path
+    genome_path = None
+    for p in _genome_paths():
+        import tomllib
+        with p.open("rb") as f:
+            g = tomllib.load(f)
+        if g.get("service_id") == genome_id:
+            genome_path = p
+            break
+
+    if not genome_path:
+        return JSONResponse(
+            {"error": f"Genome '{genome_id}' not found"}, status_code=404
+        )
+
+    from qe.optimization.prompt_tuner import PromptTuner
+    from qe.runtime.calibration import CalibrationTracker
+
+    # Get or create calibration tracker
+    cal = CalibrationTracker(
+        db_path=_substrate.belief_ledger._db_path if _substrate else None
+    )
+
+    tuner = PromptTuner(cal, _substrate)
+    result = await tuner.optimize_genome(genome_id, genome_path)
+    return result.to_dict()
+
+
+@app.post("/api/services/{service_id}/reset-circuit")
+async def reset_circuit_breaker(service_id: str):
+    """Reset a circuit-broken service so it can resume processing."""
+    if not _supervisor:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    # Check service exists
+    found = any(
+        s.blueprint.service_id == service_id
+        for s in _supervisor.registry.all_services()
+    )
+    if not found:
+        return JSONResponse(
+            {"error": f"Service '{service_id}' not found"}, status_code=404
+        )
+
+    _supervisor._circuit_broken.discard(service_id)
+    _supervisor._pub_history.pop(service_id, None)
+    get_audit_log().record(
+        "circuit.reset", resource=f"service/{service_id}"
+    )
+    return {"status": "reset", "service_id": service_id}
+
+
+# ── Dead Letter Queue ──────────────────────────────────────────────────────
+
+
+@app.get("/api/dlq")
+async def list_dlq(limit: int = 100):
+    """List dead-letter queue entries."""
+    bus = get_bus()
+    return {
+        "entries": bus.dlq_list(limit=limit),
+        "count": bus.dlq_size(),
+    }
+
+
+@app.post("/api/dlq/{envelope_id}/replay")
+async def replay_dlq(envelope_id: str):
+    """Replay a dead-lettered envelope back into the bus."""
+    bus = get_bus()
+    ok = await bus.dlq_replay(envelope_id)
+    if not ok:
+        return JSONResponse(
+            {"error": f"Envelope '{envelope_id}' not found in DLQ"},
+            status_code=404,
+        )
+    return {"status": "replayed", "envelope_id": envelope_id}
+
+
+@app.delete("/api/dlq")
+async def purge_dlq():
+    """Purge all entries from the dead-letter queue."""
+    bus = get_bus()
+    count = await bus.dlq_purge()
+    return {"status": "purged", "count": count}
+
+
+# ── Audit Trail ────────────────────────────────────────────────────────────
+
+
+@app.get("/api/audit")
+async def list_audit(
+    action: str | None = None,
+    actor: str | None = None,
+    limit: int = 100,
+):
+    """Query the admin audit trail."""
+    entries = get_audit_log().query(action=action, actor=actor, limit=limit)
+    return {"entries": entries, "count": len(entries)}
+
+
+# ── Metrics ───────────────────────────────────────────────────────────────
+
+
+@app.get("/api/metrics")
+async def metrics_snapshot():
+    """Return full metrics snapshot: counters, histograms, gauges, SLOs."""
+    return get_metrics().snapshot()
+
+
+# ── Bus Stats ─────────────────────────────────────────────────────────────
+
+
+@app.get("/api/bus/stats")
+async def bus_stats():
+    """Return per-topic bus metrics: publish counts, latency, errors."""
+    return get_bus_metrics().snapshot()
+
+
+# ── Topology ──────────────────────────────────────────────────────────────
+
+
+@app.get("/api/topology")
+async def topology():
+    """Return service dependency graph from blueprint declarations."""
+    if not _supervisor:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    services = []
+    all_topics: set[str] = set()
+
+    for svc in _supervisor.registry.all_services():
+        bp = svc.blueprint
+        subs = bp.capabilities.bus_topics_subscribe
+        pubs = bp.capabilities.bus_topics_publish
+        all_topics.update(subs)
+        all_topics.update(pubs)
+        services.append({
+            "service_id": bp.service_id,
+            "display_name": bp.display_name,
+            "subscribes": subs,
+            "publishes": pubs,
+        })
+
+    return {
+        "services": services,
+        "topics": sorted(all_topics),
+        "service_count": len(services),
+        "topic_count": len(all_topics),
+    }
+
+
+# ── Event Replay ──────────────────────────────────────────────────────────
+
+
+@app.post("/api/events/replay")
+async def replay_events(body: dict[str, Any]):
+    """Bulk replay historical events from the event log back into the bus.
+
+    Accepts: {"topic": "...", "since": "ISO8601", "limit": 100}
+    """
+    if not _event_log:
+        return JSONResponse(
+            {"error": "Event log not ready"}, status_code=503
+        )
+
+    topic = body.get("topic")
+    since_str = body.get("since")
+    limit = body.get("limit", 100)
+
+    since = None
+    if since_str:
+        since = datetime.fromisoformat(since_str)
+
+    events = await _event_log.replay(since=since, topic=topic, limit=limit)
+
+    bus = get_bus()
+    replayed = 0
+    for event in events:
+        env = Envelope(
+            topic=event["topic"],
+            source_service_id=event["source_service_id"],
+            payload=event["payload"],
+        )
+        bus.publish(env)
+        replayed += 1
+
+    get_audit_log().record(
+        "events.replayed",
+        detail={"topic": topic, "since": since_str, "count": replayed},
+    )
+    return {"status": "replayed", "count": replayed}
+
+
 # ── REST Endpoints ──────────────────────────────────────────────────────────
 
 
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
+
+
+@app.get("/api/health/ready")
+async def health_ready():
+    """Readiness probe: returns 200 when fully initialized, 503 during startup."""
+    readiness = get_readiness()
+    status_data = readiness.to_dict()
+    if readiness.is_ready:
+        return status_data
+    return JSONResponse(status_data, status_code=503)
+
+
+@app.get("/api/health/live")
+async def health_live():
+    """Live health report from the Doctor service."""
+    if not _doctor:
+        return JSONResponse({"error": "Doctor service not running"}, status_code=503)
+
+    report = _doctor.last_report
+    if report is None:
+        # First check hasn't run yet — run on demand
+        report = await _doctor.run_all_checks()
+
+    return report.model_dump(mode="json")
 
 
 @app.get("/api/status")
@@ -451,6 +765,9 @@ async def hil_approve(envelope_id: str):
         }, indent=2),
         encoding="utf-8",
     )
+    get_audit_log().record(
+        "hil.approve", resource=f"envelope/{envelope_id}"
+    )
     return {"status": "approved", "envelope_id": envelope_id}
 
 
@@ -468,6 +785,11 @@ async def hil_reject(envelope_id: str, body: dict[str, Any] | None = None):
             "decided_at": datetime.now(UTC).isoformat(),
         }, indent=2),
         encoding="utf-8",
+    )
+    get_audit_log().record(
+        "hil.reject",
+        resource=f"envelope/{envelope_id}",
+        detail={"reason": reason},
     )
     return {"status": "rejected", "envelope_id": envelope_id}
 
@@ -597,6 +919,27 @@ async def resume_goal(goal_id: str):
     return {"status": "resumed", "goal_id": goal_id}
 
 
+@app.post("/api/goals/{goal_id}/assign")
+async def assign_goal_to_project(goal_id: str, body: dict[str, Any]):
+    """Assign a goal to a project."""
+    if not _goal_store:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    project_id = body.get("project_id")
+    if not project_id:
+        return JSONResponse(
+            {"error": "project_id is required"}, status_code=400
+        )
+
+    state = await _goal_store.load_goal(goal_id)
+    if not state:
+        return JSONResponse({"error": "Goal not found"}, status_code=404)
+
+    state.project_id = project_id
+    await _goal_store.save_goal(state)
+    return {"status": "assigned", "goal_id": goal_id, "project_id": project_id}
+
+
 @app.post("/api/goals/{goal_id}/cancel")
 async def cancel_goal(goal_id: str):
     """Cancel a running goal."""
@@ -608,6 +951,108 @@ async def cancel_goal(goal_id: str):
             {"error": "Goal not found"}, status_code=404
         )
     return {"status": "cancelled", "goal_id": goal_id}
+
+
+# ── Projects ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/projects")
+async def list_projects(status: str | None = None):
+    """List all projects with goal counts."""
+    if not _goal_store:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    projects = await _goal_store.list_projects(status=status)
+    result = []
+    for p in projects:
+        goals = await _goal_store.get_project_goals(p.project_id)
+        result.append({
+            **p.model_dump(mode="json"),
+            "goal_count": len(goals),
+            "completed_goals": sum(1 for g in goals if g.status == "completed"),
+        })
+    return {"projects": result, "count": len(result)}
+
+
+@app.post("/api/projects")
+async def create_project(body: dict[str, Any]):
+    """Create a new project."""
+    if not _goal_store:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    from qe.models.goal import Project
+
+    name = body.get("name", "").strip()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+
+    project = Project(
+        name=name,
+        description=body.get("description", ""),
+        owner=body.get("owner", ""),
+        tags=body.get("tags", []),
+    )
+    await _goal_store.save_project(project)
+    return project.model_dump(mode="json")
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project(project_id: str):
+    """Get project detail with goals and metrics."""
+    if not _goal_store:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    project = await _goal_store.get_project(project_id)
+    if not project:
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+
+    goals = await _goal_store.get_project_goals(project_id)
+    metrics = await _goal_store.get_project_metrics(project_id)
+
+    return {
+        **project.model_dump(mode="json"),
+        "goals": [
+            {
+                "goal_id": g.goal_id,
+                "description": g.description,
+                "status": g.status,
+                "created_at": g.created_at.isoformat(),
+                "completed_at": (
+                    g.completed_at.isoformat() if g.completed_at else None
+                ),
+            }
+            for g in goals
+        ],
+        "metrics": metrics,
+    }
+
+
+@app.put("/api/projects/{project_id}")
+async def update_project(project_id: str, body: dict[str, Any]):
+    """Update a project's fields."""
+    if not _goal_store:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    project = await _goal_store.get_project(project_id)
+    if not project:
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+
+    from datetime import UTC, datetime
+
+    if "name" in body:
+        project.name = body["name"]
+    if "description" in body:
+        project.description = body["description"]
+    if "owner" in body:
+        project.owner = body["owner"]
+    if "status" in body:
+        project.status = body["status"]
+    if "tags" in body:
+        project.tags = body["tags"]
+    project.updated_at = datetime.now(UTC)
+
+    await _goal_store.save_project(project)
+    return project.model_dump(mode="json")
 
 
 # ── Chat ────────────────────────────────────────────────────────────────────
