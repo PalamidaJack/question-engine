@@ -16,11 +16,9 @@ type = "memory"
 # redis_url = "redis://localhost:6379"
 
 [models]
-# Override tier defaults here
-fast = "gpt-4o-mini"
-balanced = "gpt-4o"
-powerful = "o1-preview"
-# local = "ollama/llama3.2"
+fast = "openai/google/gemini-2.0-flash"
+balanced = "openai/anthropic/claude-sonnet-4"
+powerful = "openai/anthropic/claude-sonnet-4"
 
 [retrieval]
 fts_top_k = 20

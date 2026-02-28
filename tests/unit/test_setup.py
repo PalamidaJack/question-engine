@@ -186,10 +186,11 @@ def test_setup_providers_endpoint(client):
     data = resp.json()
     assert "providers" in data
     providers = data["providers"]
-    assert len(providers) == 8
+    assert len(providers) == 9
     names = [p["name"] for p in providers]
     assert "OpenAI" in names
     assert "Anthropic" in names
+    assert "Kilo Code" in names
     assert "Ollama (local)" in names
     # Each provider has tier_defaults
     for p in providers:

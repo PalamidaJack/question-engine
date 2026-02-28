@@ -75,6 +75,20 @@ PROVIDERS: list[dict] = [
         },
     },
     {
+        "name": "Kilo Code",
+        "env_var": "KILOCODE_API_KEY",
+        "api_base": "https://kilocode.ai/api/openrouter/v1",
+        "example_models": [
+            "openai/anthropic/claude-sonnet-4",
+            "openai/google/gemini-2.0-flash",
+        ],
+        "tier_defaults": {
+            "fast": "openai/google/gemini-2.0-flash",
+            "balanced": "openai/anthropic/claude-sonnet-4",
+            "powerful": "openai/anthropic/claude-sonnet-4",
+        },
+    },
+    {
         "name": "Ollama (local)",
         "env_var": None,
         "example_models": ["ollama/llama3.2", "ollama/qwen3"],
@@ -235,6 +249,15 @@ def save_setup(
     # ── Write .env ──────────────────────────────────────────────────────
     existing = _parse_env(env_file)
     existing.update({k: v for k, v in providers.items() if v})
+
+    # Write api_base for providers that need it (e.g. Kilo Code)
+    for provider in PROVIDERS:
+        env_var = provider.get("env_var")
+        api_base = provider.get("api_base")
+        if env_var and api_base and env_var in providers and providers[env_var]:
+            base_key = env_var.replace("_API_KEY", "_API_BASE")
+            existing[base_key] = api_base
+
     lines = [f"{k}={v}" for k, v in sorted(existing.items()) if v]
     env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -68,9 +68,94 @@ _executor: ExecutorService | None = None
 _goal_store: GoalStore | None = None
 _doctor: DoctorService | None = None
 _memory_store: MemoryStore | None = None
+_notification_router = None
+_active_adapters: list = []
 _extra_routes_registered = False
 
 INBOX_DIR = Path("data/runtime_inbox")
+
+
+def _configure_kilocode() -> None:
+    """If KILOCODE_API_KEY is set, configure litellm env vars for openai/ prefix routing."""
+    kilo_key = os.environ.get("KILOCODE_API_KEY", "")
+    if not kilo_key:
+        return
+    kilo_base = os.environ.get(
+        "KILOCODE_API_BASE", "https://kilocode.ai/api/openrouter/v1"
+    )
+    # litellm uses OPENAI_API_KEY / OPENAI_API_BASE for the "openai/" prefix
+    os.environ.setdefault("OPENAI_API_KEY", kilo_key)
+    os.environ.setdefault("OPENAI_API_BASE", kilo_base)
+    log.info(
+        "kilocode.configured base=%s", kilo_base
+    )
+
+
+async def _init_channels() -> None:
+    """Conditionally start channel adapters based on env vars."""
+    global _notification_router, _active_adapters
+
+    from qe.channels import (
+        EmailAdapter,
+        NotificationRouter,
+        SlackAdapter,
+        TelegramAdapter,
+        WebhookAdapter,
+    )
+
+    _notification_router = NotificationRouter()
+    activated: list[str] = []
+
+    # Telegram
+    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if tg_token:
+        adapter = TelegramAdapter(bot_token=tg_token)
+        try:
+            await adapter.start()
+            _notification_router.register_channel("telegram", adapter)
+            _active_adapters.append(adapter)
+            activated.append("telegram")
+        except Exception:
+            log.exception("channel.telegram_start_failed")
+
+    # Slack
+    slack_bot = os.environ.get("SLACK_BOT_TOKEN", "")
+    slack_app = os.environ.get("SLACK_APP_TOKEN", "")
+    if slack_bot and slack_app:
+        adapter = SlackAdapter(bot_token=slack_bot, app_token=slack_app)
+        try:
+            await adapter.start()
+            _notification_router.register_channel("slack", adapter)
+            _active_adapters.append(adapter)
+            activated.append("slack")
+        except Exception:
+            log.exception("channel.slack_start_failed")
+
+    # Email
+    email_host = os.environ.get("EMAIL_IMAP_HOST", "")
+    email_user = os.environ.get("EMAIL_USERNAME", "")
+    email_pass = os.environ.get("EMAIL_PASSWORD", "")
+    if email_host and email_user and email_pass:
+        adapter = EmailAdapter(
+            imap_host=email_host, username=email_user, password=email_pass
+        )
+        try:
+            await adapter.start()
+            _notification_router.register_channel("email", adapter)
+            _active_adapters.append(adapter)
+            activated.append("email")
+        except Exception:
+            log.exception("channel.email_start_failed")
+
+    # Webhook (no start needed — driven by HTTP endpoint)
+    webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
+    webhook_adapter = WebhookAdapter(secret=webhook_secret)
+    await webhook_adapter.start()
+    _notification_router.register_channel("webhook", webhook_adapter)
+    _active_adapters.append(webhook_adapter)
+    activated.append("webhook")
+
+    log.info("channels.initialized active=%s", activated)
 
 
 def _genome_paths() -> list[Path]:
@@ -159,6 +244,8 @@ async def lifespan(app: FastAPI):
     relay_task: asyncio.Task | None = None
 
     if is_setup_complete():
+        _configure_kilocode()
+
         _supervisor = Supervisor(
             bus=bus, substrate=_substrate, config_path=Path("config.toml")
         )
@@ -247,6 +334,11 @@ async def lifespan(app: FastAPI):
         await _dispatcher.reconcile()
 
         readiness.mark_ready("services_subscribed")
+
+        # Start channel adapters (Telegram, Slack, Email, Webhook)
+        await _init_channels()
+        readiness.mark_ready("channels_ready")
+
         readiness.mark_ready("supervisor_ready")
         log.info("QE API server started (engine running)")
     else:
@@ -255,6 +347,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    for adapter in _active_adapters:
+        try:
+            await adapter.stop()
+        except Exception:
+            log.exception("channel.stop_failed adapter=%s", adapter.channel_name)
     if _executor:
         await _executor.stop()
     if _doctor:
@@ -366,6 +463,50 @@ async def setup_save(body: dict[str, Any]):
 
     save_setup(providers=providers, tier_config=tiers)
     return {"status": "saved", "complete": is_setup_complete()}
+
+
+# ── Webhooks ─────────────────────────────────────────────────────────────
+
+
+@app.post("/api/webhooks/inbound")
+async def inbound_webhook(request: Request):
+    """Receive inbound webhook payloads from external systems."""
+    if _notification_router is None:
+        return JSONResponse({"error": "Channels not initialized"}, status_code=503)
+
+    body = await request.json()
+    headers = dict(request.headers)
+
+    # Find the webhook adapter from active adapters
+    from qe.channels.webhook import WebhookAdapter
+
+    webhook = None
+    for adapter in _active_adapters:
+        if isinstance(adapter, WebhookAdapter):
+            webhook = adapter
+            break
+
+    if webhook is None:
+        return JSONResponse({"error": "Webhook adapter not available"}, status_code=503)
+
+    result = await webhook.process_webhook(body, headers)
+    if result is None:
+        return JSONResponse({"error": "Invalid signature or rejected"}, status_code=403)
+
+    # Publish the received message onto the bus
+    get_bus().publish(
+        Envelope(
+            topic="channel.message_received",
+            source_service_id="webhook",
+            payload={
+                "channel": "webhook",
+                "user_id": result.get("user_id", ""),
+                "text": result.get("sanitized_text", ""),
+            },
+        )
+    )
+
+    return {"status": "received", "user_id": result.get("user_id", "")}
 
 
 # ── Settings ─────────────────────────────────────────────────────────────
