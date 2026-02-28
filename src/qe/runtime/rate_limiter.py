@@ -36,12 +36,18 @@ class TokenBucket:
 
     provider: str
     rpm: int  # requests per minute
+    burst: int = 0
     tokens: float = 0.0
     last_refill: float = field(default_factory=time.monotonic)
 
     def __post_init__(self) -> None:
-        self.tokens = float(self.rpm)
+        self.tokens = float(self.capacity)
         self._lock = asyncio.Lock()
+
+    @property
+    def capacity(self) -> int:
+        """Maximum tokens: rpm + burst allowance."""
+        return self.rpm + self.burst
 
     @property
     def refill_rate(self) -> float:
@@ -52,7 +58,7 @@ class TokenBucket:
         """Add tokens based on elapsed time since last refill."""
         now = time.monotonic()
         elapsed = now - self.last_refill
-        self.tokens = min(self.rpm, self.tokens + elapsed * self.refill_rate)
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
         self.last_refill = now
 
     async def acquire(self, max_wait: float = 30.0) -> bool:
@@ -118,10 +124,12 @@ class RateLimiter:
         self,
         custom_limits: dict[str, int] | None = None,
         enabled: bool = True,
+        burst_allowance: int = 0,
     ) -> None:
         self._buckets: dict[str, TokenBucket] = {}
         self._custom_limits = custom_limits or {}
         self._enabled = enabled
+        self._burst_allowance = burst_allowance
         self._total_waits = 0
         self._total_requests = 0
 
@@ -151,7 +159,9 @@ class RateLimiter:
         provider = self._get_provider(model)
         if provider not in self._buckets:
             rpm = self._get_rpm(provider)
-            self._buckets[provider] = TokenBucket(provider=provider, rpm=rpm)
+            self._buckets[provider] = TokenBucket(
+                provider=provider, rpm=rpm, burst=self._burst_allowance
+            )
             log.debug(
                 "rate_limiter.new_bucket provider=%s rpm=%d",
                 provider,

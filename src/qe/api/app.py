@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from qe.api.middleware import RequestTimingMiddleware
+from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTimingMiddleware
 from qe.api.setup import (
     PROVIDERS,
     get_configured_providers,
@@ -237,6 +237,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(RequestTimingMiddleware)
+app.add_middleware(RateLimitMiddleware, rpm=120, burst=20)
+app.add_middleware(AuthMiddleware)
 
 # Serve dashboard
 _static_dir = Path(__file__).parent / "static"
@@ -390,7 +392,7 @@ async def reset_circuit_breaker(service_id: str):
             {"error": f"Service '{service_id}' not found"}, status_code=404
         )
 
-    _supervisor._circuit_broken.discard(service_id)
+    _supervisor._circuits.pop(service_id, None)
     _supervisor._pub_history.pop(service_id, None)
     get_audit_log().record(
         "circuit.reset", resource=f"service/{service_id}"
@@ -585,7 +587,7 @@ async def status():
             "display_name": svc.blueprint.display_name,
             "status": "alive" if svc._running else "stopped",
             "turn_count": svc._turn_count,
-            "circuit_broken": sid in _supervisor._circuit_broken,
+            "circuit_broken": sid in _supervisor._circuits,
         })
 
     return {

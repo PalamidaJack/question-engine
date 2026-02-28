@@ -7,6 +7,7 @@ import json
 import logging
 import traceback
 from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,21 @@ log = logging.getLogger(__name__)
 # Loop detection defaults
 _LOOP_WINDOW_SECONDS = 60
 _LOOP_THRESHOLD = 5  # identical publications within window triggers circuit break
+_CIRCUIT_COOLDOWN_SECONDS = 60
+
+
+@dataclass
+class CircuitState:
+    status: str  # "closed" | "open" | "half_open"
+    opened_at: datetime | None = None
+    probe_envelope_id: str | None = None
+
+    def should_probe(self, now: datetime) -> bool:
+        return (
+            self.status == "open"
+            and self.opened_at is not None
+            and (now - self.opened_at).total_seconds() >= _CIRCUIT_COOLDOWN_SECONDS
+        )
 
 
 class _ConfigWatcher(FileSystemEventHandler):
@@ -72,10 +88,15 @@ class Supervisor:
         BaseService.set_tool_gate(self.tool_gate)
         # Loop detection: service_id -> deque of (timestamp, payload_hash)
         self._pub_history: dict[str, deque] = {}
-        # Circuit-broken services
-        self._circuit_broken: set[str] = set()
+        # Circuit-broken services (half-open circuit breaker)
+        self._circuits: dict[str, CircuitState] = {}
         # Last heartbeat per service
         self._last_heartbeat: dict[str, datetime] = {}
+
+    @property
+    def _circuit_broken(self) -> set[str]:
+        """Backward-compatible view of circuit-broken service IDs."""
+        return set(self._circuits.keys())
 
     async def start(self, genome_paths: list[Path]) -> None:
         self._running = True
@@ -178,16 +199,39 @@ class Supervisor:
         sid = service.blueprint.service_id
 
         async def wrapped(envelope: Envelope) -> None:
-            # Circuit breaker check
-            if sid in self._circuit_broken:
-                log.warning(
-                    "Dropping envelope for circuit-broken service %s", sid
-                )
-                return
+            circuit = self._circuits.get(sid)
+
+            if circuit is not None:
+                now = datetime.now(UTC)
+                if circuit.should_probe(now):
+                    # Transition to half-open — allow one probe envelope
+                    circuit.status = "half_open"
+                    circuit.probe_envelope_id = envelope.envelope_id
+                    log.info(
+                        "circuit.half_open service=%s probe=%s",
+                        sid,
+                        envelope.envelope_id,
+                    )
+                elif circuit.status != "half_open":
+                    log.warning(
+                        "Dropping envelope for circuit-broken service %s", sid
+                    )
+                    return
 
             try:
                 await handler(envelope)
+                # If we were probing and succeeded, close the circuit
+                if circuit is not None and circuit.status == "half_open":
+                    log.info("circuit.closed service=%s (probe succeeded)", sid)
+                    del self._circuits[sid]
             except Exception:
+                # If probe failed, reopen the circuit
+                if circuit is not None and circuit.status == "half_open":
+                    circuit.status = "open"
+                    circuit.opened_at = datetime.now(UTC)
+                    circuit.probe_envelope_id = None
+                    log.warning("circuit.reopened service=%s (probe failed)", sid)
+
                 tb = traceback.format_exc()
                 log.error(
                     "Unhandled service exception service=%s "
@@ -248,7 +292,9 @@ class Supervisor:
                 len(recent),
                 _LOOP_WINDOW_SECONDS,
             )
-            self._circuit_broken.add(service_id)
+            self._circuits[service_id] = CircuitState(
+                status="open", opened_at=datetime.now(UTC)
+            )
             self.bus.publish(
                 Envelope(
                     topic="system.circuit_break",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import random
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,12 @@ _DEFAULT_DEDUP_TTL = 300  # seconds to remember seen envelope IDs
 _DEFAULT_DEDUP_MAX_SIZE = 50_000  # max entries in dedup cache
 _DEFAULT_TOPIC_CONCURRENCY = 50  # max concurrent handlers per topic
 _DLQ_TOPIC = "system.dlq"
+
+_NON_RETRYABLE = (ValueError, TypeError, KeyError, AttributeError, NotImplementedError)
+
+
+def is_retryable(exc: Exception) -> bool:
+    return not isinstance(exc, _NON_RETRYABLE)
 
 
 class DeadLetterEntry:
@@ -262,8 +269,17 @@ class MemoryBus:
             except Exception as exc:
                 last_error = exc
                 elapsed_ms = (time.monotonic() - start) * 1000
+                if not is_retryable(exc):
+                    get_bus_metrics().record_handler_error(envelope.topic)
+                    log.warning(
+                        "bus.non_retryable handler=%s error=%s",
+                        handler_name,
+                        str(exc),
+                    )
+                    break  # fall through to DLQ
                 if attempt < self._max_retries:
-                    delay = _DEFAULT_RETRY_BASE_DELAY * (2**attempt)
+                    jitter = random.uniform(0, _DEFAULT_RETRY_BASE_DELAY)
+                    delay = _DEFAULT_RETRY_BASE_DELAY * (2**attempt) + jitter
                     log.warning(
                         "bus.handler_retry handler=%s envelope_id=%s "
                         "topic=%s attempt=%d/%d error=%s delay=%.2fs",
