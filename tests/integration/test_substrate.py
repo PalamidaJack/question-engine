@@ -7,10 +7,10 @@ import pytest
 
 from qe.models.claim import Claim
 from qe.models.envelope import Envelope
+from qe.substrate import Substrate
 from qe.substrate.belief_ledger import BeliefLedger
 from qe.substrate.cold_storage import ColdStorage
 from qe.substrate.embeddings import SearchResult
-from qe.substrate import Substrate
 
 
 @pytest.fixture
