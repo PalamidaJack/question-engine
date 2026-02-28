@@ -131,6 +131,7 @@ class ToolGate:
             "file_read": "file_read",
             "file_write": "file_write",
             "code_execute": "code_execute",
+            "browser_navigate": "browser_control",
         }
         return capability_map.get(tool_name)
 

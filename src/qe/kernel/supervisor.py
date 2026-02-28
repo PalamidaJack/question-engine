@@ -20,6 +20,7 @@ from qe.kernel.registry import ServiceRegistry
 from qe.models.envelope import Envelope
 from qe.runtime.budget import BudgetTracker
 from qe.runtime.service import BaseService
+from qe.runtime.tool_bootstrap import create_default_gate, create_default_registry
 from qe.services.hil import HILService
 from qe.services.researcher import ResearcherService
 from qe.services.validator import ClaimValidatorService
@@ -64,6 +65,11 @@ class Supervisor:
             db_path = self.substrate.belief_ledger._db_path
         self.budget_tracker = BudgetTracker(db_path=db_path)
         BaseService.set_budget_tracker(self.budget_tracker)
+        # Tool registry and security gate
+        self.tool_registry = create_default_registry()
+        self.tool_gate = create_default_gate()
+        BaseService.set_tool_registry(self.tool_registry)
+        BaseService.set_tool_gate(self.tool_gate)
         # Loop detection: service_id -> deque of (timestamp, payload_hash)
         self._pub_history: dict[str, deque] = {}
         # Circuit-broken services

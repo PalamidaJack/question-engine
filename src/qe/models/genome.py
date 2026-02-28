@@ -13,10 +13,26 @@ class CapabilityDeclaration(BaseModel):
     web_search: bool = False
     file_read: bool = False
     file_write: bool = False
+    code_execute: bool = False
+    browser_control: bool = False
     bus_topics_subscribe: list[str] = Field(default_factory=list)
     bus_topics_publish: list[str] = Field(default_factory=list)
     substrate_read: bool = False
     substrate_write: bool = False
+
+    def to_capability_set(self) -> set[str]:
+        """Convert boolean capability flags to a set of capability strings."""
+        caps: set[str] = set()
+        for field_name in (
+            "web_search",
+            "file_read",
+            "file_write",
+            "code_execute",
+            "browser_control",
+        ):
+            if getattr(self, field_name):
+                caps.add(field_name)
+        return caps
 
 
 class Blueprint(BaseModel):
