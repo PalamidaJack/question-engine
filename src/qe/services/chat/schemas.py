@@ -59,9 +59,14 @@ class ChatResponsePayload(BaseModel):
     pipeline_complete: bool = True
     tracking_envelope_id: str | None = None
     error: str | None = None
+    suggestions: list[str] = Field(default_factory=list)
 
 
 class ConversationalResponse(BaseModel):
     """LLM-generated conversational reply."""
 
     reply: str = Field(description="The conversational response to the user")
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="2-3 short follow-up prompts the user might want to ask next",
+    )

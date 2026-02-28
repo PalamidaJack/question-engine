@@ -189,6 +189,15 @@ class ChatService:
         if result.get("reasoning"):
             reply_parts.append(f"\n\n**Reasoning:** {result['reasoning']}")
 
+        suggestions: list[str] = []
+        for claim in result.get("supporting_claims", [])[:2]:
+            entity = claim.get("subject_entity_id")
+            if entity:
+                suggestions.append(f"Tell me more about {entity}")
+        if not suggestions:
+            suggestions.append("What else do we know?")
+        suggestions.append("Submit a new observation")
+
         return ChatResponsePayload(
             message_id=message_id,
             reply_text="\n".join(reply_parts),
@@ -196,6 +205,7 @@ class ChatService:
             claims=result.get("supporting_claims", []),
             confidence=result.get("confidence"),
             reasoning=result.get("reasoning"),
+            suggestions=suggestions[:3],
         )
 
     # ── Observation Handler ─────────────────────────────────────────────
@@ -223,6 +233,11 @@ class ChatService:
             intent=ChatIntent.OBSERVATION,
             pipeline_complete=False,
             tracking_envelope_id=envelope.envelope_id,
+            suggestions=[
+                "What do we know so far?",
+                "Submit another observation",
+                "Show all claims",
+            ],
         )
 
     # ── Command Handler ─────────────────────────────────────────────────
@@ -249,15 +264,25 @@ class ChatService:
                 reply_text=f"Found {count} claim{'s' if count != 1 else ''}{about}.",
                 intent=ChatIntent.COMMAND,
                 claims=claim_dicts,
+                suggestions=["Show entities", "Ask a question about these claims"],
             )
 
         if cmd.action == CommandAction.LIST_ENTITIES:
             entities = await self.substrate.entity_resolver.list_entities()
+            first_entity = (
+                entities[0].get("canonical_name", entities[0])
+                if entities
+                else None
+            )
+            entity_suggestions = ["Show claims"]
+            if first_entity:
+                entity_suggestions.append(f"Tell me about {first_entity}")
             return ChatResponsePayload(
                 message_id=message_id,
                 reply_text=f"Found {len(entities)} entities in the knowledge base.",
                 intent=ChatIntent.COMMAND,
                 entities=entities[:30],
+                suggestions=entity_suggestions,
             )
 
         if cmd.action == CommandAction.SHOW_ENTITY:
@@ -277,6 +302,10 @@ class ChatService:
                 reply_text=f"Entity **{canonical}** has {len(claims)} claims.",
                 intent=ChatIntent.COMMAND,
                 claims=[c.model_dump(mode="json") for c in claims[:20]],
+                suggestions=[
+                    "Show all entities",
+                    f"What else do we know about {canonical}?",
+                ],
             )
 
         if cmd.action == CommandAction.RETRACT_CLAIM:
@@ -295,12 +324,14 @@ class ChatService:
                     message_id=message_id,
                     reply_text=f"Claim `{cmd.target}` has been retracted.",
                     intent=ChatIntent.COMMAND,
+                    suggestions=["Show all claims", "List entities"],
                 )
             return ChatResponsePayload(
                 message_id=message_id,
                 reply_text=f"Claim `{cmd.target}` not found.",
                 intent=ChatIntent.COMMAND,
                 error="claim_not_found",
+                suggestions=["Show all claims", "List entities"],
             )
 
         if cmd.action == CommandAction.SHOW_BUDGET:
@@ -315,11 +346,13 @@ class ChatService:
                         f"{self.budget_tracker.remaining_pct() * 100:.1f}%"
                     ),
                     intent=ChatIntent.COMMAND,
+                    suggestions=["Show all claims", "List entities"],
                 )
             return ChatResponsePayload(
                 message_id=message_id,
                 reply_text="Budget tracking is not active.",
                 intent=ChatIntent.COMMAND,
+                suggestions=["Show all claims", "List entities"],
             )
 
         if cmd.action == CommandAction.HELP:
@@ -340,6 +373,11 @@ class ChatService:
                     "**Check budget** \u2014 'Show budget'\n"
                 ),
                 intent=ChatIntent.COMMAND,
+                suggestions=[
+                    "What do we know about exoplanets?",
+                    "Show all claims",
+                    "Show budget",
+                ],
             )
 
         return ChatResponsePayload(
@@ -405,7 +443,8 @@ class ChatService:
                     "- Execute commands (list claims, retract, show entities, etc.)\n"
                     "- Explain how the system works\n\n"
                     "Be concise and helpful. If the user seems to want to ask a "
-                    "question or submit an observation, guide them to do so."
+                    "question or submit an observation, guide them to do so.\n\n"
+                    "Also suggest 2-3 short follow-up prompts the user might want to try next."
                 ),
             },
         ]
@@ -424,6 +463,7 @@ class ChatService:
             message_id=message_id,
             reply_text=result.reply,
             intent=ChatIntent.CONVERSATION,
+            suggestions=result.suggestions[:3],
         )
 
     # ── Helpers ─────────────────────────────────────────────────────────

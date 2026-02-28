@@ -8,6 +8,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0a0c10; overflow: hidden; }
@@ -63,6 +64,8 @@
       search: "M11 3a8 8 0 100 16 8 8 0 000-16z M21 21l-4.35-4.35",
       trash: "M3 6h18 M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2",
       alert: "M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z M12 9v4 M12 17h.01",
+      system: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5",
+      settings: "M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z M12 8a4 4 0 100 8 4 4 0 000-8z",
     };
 
     const Badge = ({ children, color = palette.accent, bg }) => (
@@ -176,7 +179,7 @@
       );
     }
 
-    function ChatMessage({ msg, pipelineEvents }) {
+    function ChatMessage({ msg, pipelineEvents, isLastMessage, onSuggestionClick }) {
       const isUser = msg.role === "user";
       const isSystem = msg.role === "system";
       return (
@@ -227,12 +230,227 @@
                 complete={msg.pipeline_complete}
               />
             )}
+            {msg.suggestions && msg.suggestions.length > 0 && isLastMessage && (
+              <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {msg.suggestions.map((s, i) => (
+                  <button key={i} onClick={() => onSuggestionClick && onSuggestionClick(s)}
+                    style={{
+                      padding: "5px 12px", borderRadius: 14, fontSize: 11,
+                      fontFamily: FONT_MONO, cursor: "pointer",
+                      border: `1px solid ${palette.accent}40`,
+                      background: palette.accentDim, color: palette.accent,
+                    }}>{s}</button>
+                ))}
+              </div>
+            )}
             <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginTop: 6, textAlign: isUser ? "right" : "left" }}>
               {new Date(msg.timestamp).toLocaleTimeString()}
             </div>
           </div>
         </div>
       );
+    }
+
+    // ── System Map Components ─────────────────────────────────────────────
+
+    function PipelineFunnel({ events }) {
+      const counts = {
+        observations: events.filter(e => e.topic && e.topic.startsWith("observations.")).length,
+        proposed: events.filter(e => e.topic === "claims.proposed").length,
+        committed: events.filter(e => e.topic === "claims.committed").length,
+      };
+      const stages = [
+        { label: "Observations", count: counts.observations, color: palette.blue },
+        { label: "Proposed", count: counts.proposed, color: palette.purple },
+        { label: "Committed", count: counts.committed, color: palette.green },
+      ];
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+          {stages.map((s, i) => {
+            const prev = i > 0 ? stages[i - 1].count : null;
+            const pct = prev > 0 ? Math.round(s.count / prev * 100) : null;
+            return (
+              <React.Fragment key={s.label}>
+                {i > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                    <span style={{ fontSize: 16, color: palette.textDim }}>{"\u2192"}</span>
+                    {pct != null && <span style={{ fontSize: 9, fontFamily: FONT_MONO, color: palette.textDim }}>{pct}%</span>}
+                  </div>
+                )}
+                <div style={{
+                  flex: 1, padding: "14px 18px",
+                  background: palette.surface, border: `1px solid ${s.color}30`, borderRadius: 8,
+                }}>
+                  <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: s.color, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>{s.label}</div>
+                  <span style={{ fontSize: 28, fontWeight: 700, fontFamily: FONT_MONO, color: s.color, lineHeight: 1 }}>{s.count}</span>
+                </div>
+              </React.Fragment>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function BudgetGauge({ budget }) {
+      if (!budget) return null;
+      const remaining = budget.remaining_pct || 0;
+      const spent = budget.total_spend || 0;
+      const limit = budget.limit_usd || 5;
+      const usedPct = Math.min(100, Math.max(0, 100 - remaining));
+      const color = remaining > 50 ? palette.green : remaining > 20 ? palette.accent : palette.red;
+      const models = budget.by_model || {};
+      return (
+        <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "16px 20px", marginTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>Budget Usage</span>
+            <span style={{ fontSize: 13, fontFamily: FONT_MONO, color }}>${spent.toFixed(4)} / ${limit.toFixed(2)}</span>
+          </div>
+          <div style={{ height: 8, background: palette.border, borderRadius: 4, overflow: "hidden", marginBottom: 12 }}>
+            <div style={{ width: `${usedPct}%`, height: "100%", background: color, borderRadius: 4, transition: "width 0.5s ease" }} />
+          </div>
+          {Object.keys(models).length > 0 && (
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+              {Object.entries(models).map(([model, spend]) => (
+                <div key={model} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: 2, background: palette.accent }} />
+                  <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>{model}</span>
+                  <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.text }}>${(typeof spend === "number" ? spend : 0).toFixed(4)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function TopicActivity({ events }) {
+      const topicCounts = {};
+      events.forEach(e => { if (e.topic) topicCounts[e.topic] = (topicCounts[e.topic] || 0) + 1; });
+      const sorted = Object.entries(topicCounts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+      if (sorted.length === 0) return null;
+      const max = sorted[0][1];
+      return (
+        <div style={{ marginTop: 16, background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "16px 20px" }}>
+          <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 12 }}>Topic Activity</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {sorted.map(([topic, count]) => (
+              <div key={topic} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ minWidth: 160 }}><TopicBadge topic={topic} /></div>
+                <div style={{ flex: 1, height: 4, background: palette.border, borderRadius: 2, overflow: "hidden" }}>
+                  <div style={{ width: `${(count / max) * 100}%`, height: "100%", background: palette.accent, borderRadius: 2, transition: "width 0.3s" }} />
+                </div>
+                <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, minWidth: 28, textAlign: "right" }}>{count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function SystemMapGraph({ services, events }) {
+      const containerRef = useRef(null);
+      const netRef = useRef(null);
+      const nodesDs = useRef(null);
+      const edgesDs = useRef(null);
+      const prevEventId = useRef(null);
+      const svcKey = services.map(s => s.service_id).sort().join(",");
+
+      useEffect(() => {
+        if (!containerRef.current) return;
+        const V = window.vis;
+        if (!V || !V.Network) return;
+
+        const nodes = new V.DataSet();
+        const edges = new V.DataSet();
+        nodesDs.current = nodes;
+        edgesDs.current = edges;
+
+        nodes.add({
+          id: "_bus", label: "Memory\nBus", shape: "diamond", size: 30,
+          color: { background: "#1a1510", border: palette.accent },
+          font: { color: palette.accent, face: "IBM Plex Mono", size: 11, multi: true },
+          fixed: { x: true, y: true }, x: 0, y: 0,
+        });
+
+        nodes.add({
+          id: "_api", label: "API", shape: "triangleDown", size: 18,
+          color: { background: "#0d1520", border: palette.blue },
+          font: { color: palette.blue, face: "IBM Plex Mono", size: 11 },
+        });
+        edges.add({ id: "e__api", from: "_api", to: "_bus", color: { color: palette.blue + "50" }, width: 2, arrows: "to" });
+
+        services.forEach(svc => {
+          const alive = svc.status === "alive";
+          const broken = svc.circuit_broken;
+          const bc = broken ? palette.red : alive ? palette.green : palette.textDim;
+          nodes.add({
+            id: svc.service_id,
+            label: (svc.display_name || svc.service_id).replace(/ /g, "\n"),
+            shape: "dot", size: 16,
+            color: { background: bc + "20", border: bc },
+            font: { color: palette.text, face: "IBM Plex Mono", size: 10, multi: true },
+            title: (svc.display_name || svc.service_id) + "\nStatus: " + svc.status + "\nTurns: " + svc.turn_count + (broken ? "\nCIRCUIT BROKEN" : ""),
+          });
+          edges.add({
+            id: "e_" + svc.service_id, from: "_bus", to: svc.service_id,
+            color: { color: palette.border }, width: 1.5, arrows: "to",
+          });
+        });
+
+        const net = new V.Network(containerRef.current, { nodes, edges }, {
+          physics: {
+            barnesHut: { gravitationalConstant: -3000, centralGravity: 0.3, springLength: 140, springConstant: 0.04 },
+            stabilization: { iterations: 80 },
+          },
+          interaction: { hover: true, tooltipDelay: 150, zoomView: true, dragView: true },
+          nodes: { borderWidth: 2, shadow: { enabled: true, color: "rgba(0,0,0,0.3)", size: 5 } },
+          edges: { smooth: { type: "continuous" } },
+        });
+        netRef.current = net;
+        return () => { net.destroy(); netRef.current = null; nodesDs.current = null; edgesDs.current = null; };
+      }, [svcKey]);
+
+      useEffect(() => {
+        const ds = nodesDs.current;
+        if (!ds) return;
+        services.forEach(svc => {
+          try {
+            const alive = svc.status === "alive";
+            const broken = svc.circuit_broken;
+            const bc = broken ? palette.red : alive ? palette.green : palette.textDim;
+            ds.update({ id: svc.service_id, color: { background: bc + "20", border: bc } });
+          } catch (e) {}
+        });
+      }, [services]);
+
+      useEffect(() => {
+        const nds = nodesDs.current;
+        const eds = edgesDs.current;
+        if (!nds || !eds || events.length === 0) return;
+        const latest = events[0];
+        if (!latest || latest.envelope_id === prevEventId.current) return;
+        prevEventId.current = latest.envelope_id;
+
+        const sid = latest.source_service_id;
+        const eid = "e_" + sid;
+        try { eds.update({ id: eid, color: { color: palette.accent }, width: 3 }); } catch (e) {}
+        try { nds.update({ id: sid, size: 22, borderWidth: 3 }); } catch (e) {}
+
+        setTimeout(() => {
+          try { eds.update({ id: eid, color: { color: palette.border }, width: 1.5 }); } catch (e) {}
+          try { nds.update({ id: sid, size: 16, borderWidth: 2 }); } catch (e) {}
+        }, 700);
+      }, [events]);
+
+      if (typeof window.vis === "undefined") {
+        return (
+          <div style={{ height: 380, display: "flex", alignItems: "center", justifyContent: "center", background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, marginBottom: 16 }}>
+            <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim }}>Loading visualization library...</span>
+          </div>
+        );
+      }
+
+      return <div ref={containerRef} style={{ height: 380, background: "#0e1018", border: `1px solid ${palette.border}`, borderRadius: 8, marginBottom: 16 }} />;
     }
 
     // ── Setup Screen ──────────────────────────────────────────────────────
@@ -540,6 +758,24 @@
       const chatWsRef = useRef(null);
       const chatEndRef = useRef(null);
 
+      // Settings state
+      const [settings, setSettings] = useState({ budget: { monthly_limit_usd: 50, alert_at_pct: 0.80 }, runtime: { log_level: "INFO", hil_timeout_seconds: 3600 } });
+      const [settingsDirty, setSettingsDirty] = useState(false);
+      const [settingsSaving, setSettingsSaving] = useState(false);
+      const [settingsError, setSettingsError] = useState(null);
+      const [settingsSuccess, setSettingsSuccess] = useState(false);
+      const [displayPrefs, setDisplayPrefs] = useState(() => {
+        try {
+          const saved = localStorage.getItem("qe_display_prefs");
+          return saved ? JSON.parse(saved) : {
+            eventFilters: ["observations", "claims", "goals", "tasks", "hil", "system", "chat", "channels", "inference", "entities", "queries", "ingestion", "analysis", "synthesis", "memory", "monitor", "notification", "voice", "document", "predictions"],
+            minConfidence: 0,
+            showSuperseded: false,
+            timeRange: "all",
+          };
+        } catch { return { eventFilters: [], minConfidence: 0, showSuperseded: false, timeRange: "all" }; }
+      });
+
       // Connect WebSocket
       useEffect(() => {
         const connect = () => {
@@ -592,7 +828,8 @@
 
       const fetchClaims = async () => {
         try {
-          const res = await fetch(`${API}/api/claims`);
+          const qs = displayPrefs.showSuperseded ? "?include_superseded=true" : "";
+          const res = await fetch(`${API}/api/claims${qs}`);
           if (res.ok) { setClaims((await res.json()).claims || []); }
         } catch {}
       };
@@ -613,6 +850,51 @@
 
       useEffect(() => { fetchClaims(); fetchHil(); fetchEntities(); }, []);
 
+      // Fetch settings on mount
+      useEffect(() => {
+        fetch(`${API}/api/settings`).then(r => r.json()).then(data => {
+          if (data.budget || data.runtime) setSettings(data);
+        }).catch(() => {});
+      }, []);
+
+      // Persist displayPrefs to localStorage
+      useEffect(() => {
+        try { localStorage.setItem("qe_display_prefs", JSON.stringify(displayPrefs)); } catch {}
+      }, [displayPrefs]);
+
+      const updateSetting = (section, key, value) => {
+        setSettings(prev => ({ ...prev, [section]: { ...prev[section], [key]: value } }));
+        setSettingsDirty(true);
+      };
+
+      const handleSettingsSave = async () => {
+        setSettingsSaving(true);
+        setSettingsError(null);
+        try {
+          const res = await fetch(`${API}/api/settings`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(settings),
+          });
+          if (!res.ok) { const d = await res.json(); setSettingsError(d.error || "Save failed"); }
+          else { setSettingsSuccess(true); setSettingsDirty(false); setTimeout(() => setSettingsSuccess(false), 3000); }
+        } catch { setSettingsError("Network error"); }
+        setSettingsSaving(false);
+      };
+
+      const handleResetCircuit = async (serviceId) => {
+        try {
+          await fetch(`${API}/api/services/${serviceId}/reset-circuit`, { method: "POST" });
+        } catch {}
+      };
+
+      const toggleEventFilter = (group) => {
+        setDisplayPrefs(prev => {
+          const filters = prev.eventFilters || [];
+          const next = filters.includes(group) ? filters.filter(f => f !== group) : [...filters, group];
+          return { ...prev, eventFilters: next };
+        });
+      };
+
       // Chat WebSocket
       useEffect(() => {
         if (activeTab !== "chat") return;
@@ -632,6 +914,7 @@
                 confidence: data.confidence, reasoning: data.reasoning,
                 pipeline_complete: data.pipeline_complete,
                 tracking_envelope_id: data.tracking_envelope_id,
+                suggestions: data.suggestions || [],
                 timestamp: new Date().toISOString(),
               }]);
               setChatTyping(false);
@@ -726,17 +1009,29 @@
       };
 
       const filteredClaims = claims.filter(c => {
-        if (!searchQuery) return true;
-        const q = searchQuery.toLowerCase();
-        return (c.subject_entity_id || "").toLowerCase().includes(q) ||
-               (c.object_value || "").toLowerCase().includes(q) ||
-               (c.claim_id || "").includes(q);
+        // Search filter
+        if (searchQuery) {
+          const q = searchQuery.toLowerCase();
+          if (!(c.subject_entity_id || "").toLowerCase().includes(q) &&
+              !(c.object_value || "").toLowerCase().includes(q) &&
+              !(c.claim_id || "").includes(q)) return false;
+        }
+        // Min confidence filter
+        if (displayPrefs.minConfidence > 0 && (c.confidence || 0) < displayPrefs.minConfidence / 100) return false;
+        // Time range filter
+        if (displayPrefs.timeRange && displayPrefs.timeRange !== "all" && c.created_at) {
+          const cutoffs = { "1h": 3600000, "24h": 86400000, "7d": 604800000 };
+          const cutoff = cutoffs[displayPrefs.timeRange];
+          if (cutoff && (Date.now() - new Date(c.created_at).getTime()) > cutoff) return false;
+        }
+        return true;
       });
 
       const pendingHil = hilQueue.filter(h => h.status === "pending").length;
 
       const navItems = [
         { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
+        { id: "system", label: "System Map", icon: Icons.system },
         { id: "chat", label: "Chat", icon: Icons.chat },
         { id: "ask", label: "Ask", icon: Icons.ask },
         { id: "submit", label: "Submit", icon: Icons.submit },
@@ -744,6 +1039,7 @@
         { id: "entities", label: "Entities", icon: Icons.entities, count: entities.length },
         { id: "hil", label: "HIL Queue", icon: Icons.hil, count: pendingHil },
         { id: "bus", label: "Event Bus", icon: Icons.bus, count: events.length },
+        { id: "settings", label: "Settings", icon: Icons.settings },
       ];
 
       return (
@@ -895,6 +1191,33 @@
                         ))}
                       </div>
                     )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SYSTEM MAP */}
+            {activeTab === "system" && (
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>System Map</h1>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 20, fontFamily: FONT_MONO }}>Live topology, pipeline metrics, and budget</p>
+
+                <PipelineFunnel events={events} />
+
+                {services.length > 0 ? (
+                  <SystemMapGraph services={services} events={events} />
+                ) : (
+                  <div style={{ height: 380, background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <EmptyState icon={Icons.system} message="No services running. Start the engine to see topology." />
+                  </div>
+                )}
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div>
+                    <BudgetGauge budget={budget} />
+                  </div>
+                  <div>
+                    <TopicActivity events={events} />
                   </div>
                 </div>
               </div>
@@ -1218,8 +1541,10 @@
                       </div>
                     </div>
                   )}
-                  {chatMessages.map(msg => (
-                    <ChatMessage key={msg.id} msg={msg} pipelineEvents={chatPipelineEvents} />
+                  {chatMessages.map((msg, i) => (
+                    <ChatMessage key={msg.id} msg={msg} pipelineEvents={chatPipelineEvents}
+                      isLastMessage={i === chatMessages.length - 1}
+                      onSuggestionClick={setChatInput} />
                   ))}
                   {chatTyping && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 16px", marginBottom: 12 }}>
@@ -1261,11 +1586,19 @@
             )}
 
             {/* EVENT BUS */}
-            {activeTab === "bus" && (
+            {activeTab === "bus" && (() => {
+              const visibleEvents = displayPrefs.eventFilters && displayPrefs.eventFilters.length > 0
+                ? events.filter(e => displayPrefs.eventFilters.includes((e.topic || "").split(".")[0]))
+                : events;
+              const isFiltered = displayPrefs.eventFilters && displayPrefs.eventFilters.length < 20;
+              return (
               <div>
-                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Event Bus</h1>
-                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 24, fontFamily: FONT_MONO }}>Real-time message flow - {events.length} events</p>
-                {events.length === 0 ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+                  <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright }}>Event Bus</h1>
+                  {isFiltered && <Badge color={palette.accent}>filtered</Badge>}
+                </div>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 24, fontFamily: FONT_MONO }}>Real-time message flow - {visibleEvents.length} events{isFiltered ? ` (${events.length} total)` : ""}</p>
+                {visibleEvents.length === 0 ? (
                   <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
                     <EmptyState icon={Icons.bus} message="No events yet." />
                   </div>
@@ -1279,7 +1612,7 @@
                       <span>Time</span><span>Topic</span><span>Source</span><span>Payload</span><span>Envelope</span>
                     </div>
                     <div style={{ maxHeight: 520, overflow: "auto" }}>
-                      {events.map((e, i) => {
+                      {visibleEvents.map((e, i) => {
                         const isContradiction = e.topic === "claims.contradiction_detected";
                         return (
                           <div key={e.envelope_id + i} style={{
@@ -1301,6 +1634,174 @@
                     </div>
                   </div>
                 )}
+              </div>
+              );
+            })()}
+
+            {/* SETTINGS */}
+            {activeTab === "settings" && (
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Settings</h1>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 24, fontFamily: FONT_MONO }}>Configure engine behavior and display preferences</p>
+
+                {settingsError && (
+                  <div style={{ background: palette.redDim, border: `1px solid ${palette.red}40`, borderRadius: 6, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: palette.red, fontFamily: FONT_MONO }}>{settingsError}</div>
+                )}
+                {settingsSuccess && (
+                  <div style={{ background: palette.greenDim, border: `1px solid ${palette.green}40`, borderRadius: 6, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: palette.green, fontFamily: FONT_MONO }}>Settings saved successfully</div>
+                )}
+
+                <div style={{ maxWidth: 640, display: "flex", flexDirection: "column", gap: 20 }}>
+
+                  {/* Budget & Spending */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 16 }}>Budget & Spending</div>
+                    <div style={{ display: "flex", gap: 20, marginBottom: 16 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Monthly Limit (USD)</label>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 14, color: palette.textDim }}>$</span>
+                          <input type="number" min="1" step="1" value={settings.budget.monthly_limit_usd} onChange={e => updateSetting("budget", "monthly_limit_usd", parseFloat(e.target.value) || 1)} style={{
+                            width: 120, padding: "8px 10px", borderRadius: 5, border: `1px solid ${palette.border}`, background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                          }} />
+                        </div>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Alert Threshold</label>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <input type="range" min="50" max="95" value={Math.round(settings.budget.alert_at_pct * 100)} onChange={e => updateSetting("budget", "alert_at_pct", parseInt(e.target.value) / 100)} style={{ flex: 1, accentColor: palette.accent }} />
+                          <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.accent, minWidth: 36 }}>{Math.round(settings.budget.alert_at_pct * 100)}%</span>
+                        </div>
+                      </div>
+                    </div>
+                    {budget && (
+                      <div style={{ padding: "10px 14px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}`, fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim }}>
+                        Current spend: <span style={{ color: palette.text }}>${budget.total_spend?.toFixed(4)}</span> / ${budget.limit_usd?.toFixed(2)} ({Math.round((budget.remaining_pct || 0) * 100)}% remaining)
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Pipeline & Runtime */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 16 }}>Pipeline & Runtime</div>
+                    <div style={{ display: "flex", gap: 20 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>HIL Timeout (seconds)</label>
+                        <input type="number" min="60" step="60" value={settings.runtime.hil_timeout_seconds} onChange={e => updateSetting("runtime", "hil_timeout_seconds", parseInt(e.target.value) || 60)} style={{
+                          width: 120, padding: "8px 10px", borderRadius: 5, border: `1px solid ${palette.border}`, background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                        }} />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Log Level</label>
+                        <select value={settings.runtime.log_level} onChange={e => updateSetting("runtime", "log_level", e.target.value)} style={{
+                          width: "100%", padding: "8px 10px", borderRadius: 5, border: `1px solid ${palette.border}`, background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                        }}>
+                          {["DEBUG", "INFO", "WARNING", "ERROR"].map(l => <option key={l} value={l}>{l}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Save Button */}
+                  <button onClick={handleSettingsSave} disabled={!settingsDirty || settingsSaving} style={{
+                    width: "100%", padding: "12px 20px", borderRadius: 8, border: "none",
+                    cursor: settingsDirty && !settingsSaving ? "pointer" : "not-allowed",
+                    background: settingsDirty && !settingsSaving ? `linear-gradient(135deg, ${palette.accent}, #c47e2a)` : palette.border,
+                    color: settingsDirty && !settingsSaving ? "#fff" : palette.textDim,
+                    fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, transition: "all 0.2s",
+                  }}>{settingsSaving ? "Saving..." : settingsDirty ? "Save Settings" : "No Changes"}</button>
+
+                  <div style={{ height: 1, background: palette.border }} />
+
+                  {/* Event Bus Filters (localStorage) */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 4 }}>Event Bus Filters</div>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 14 }}>Select which topic groups appear in the Event Bus tab</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {["observations", "claims", "goals", "tasks", "hil", "system", "chat", "channels", "inference", "entities", "queries", "ingestion"].map(group => {
+                        const active = (displayPrefs.eventFilters || []).includes(group);
+                        return (
+                          <button key={group} onClick={() => toggleEventFilter(group)} style={{
+                            padding: "6px 12px", borderRadius: 5, fontSize: 11, fontFamily: FONT_MONO, cursor: "pointer",
+                            border: `1px solid ${active ? palette.accent + "60" : palette.border}`,
+                            background: active ? palette.accentDim : "transparent",
+                            color: active ? palette.accent : palette.textDim, fontWeight: active ? 600 : 400,
+                          }}>{group}</button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Claims Display (localStorage) */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 4 }}>Claims Display</div>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 14 }}>Filter claims shown in the Belief Ledger tab</div>
+                    <div style={{ display: "flex", gap: 20, marginBottom: 16 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Min Confidence</label>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <input type="range" min="0" max="100" value={displayPrefs.minConfidence || 0} onChange={e => setDisplayPrefs(prev => ({ ...prev, minConfidence: parseInt(e.target.value) }))} style={{ flex: 1, accentColor: palette.accent }} />
+                          <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.accent, minWidth: 36 }}>{displayPrefs.minConfidence || 0}%</span>
+                        </div>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Time Range</label>
+                        <select value={displayPrefs.timeRange || "all"} onChange={e => setDisplayPrefs(prev => ({ ...prev, timeRange: e.target.value }))} style={{
+                          width: "100%", padding: "8px 10px", borderRadius: 5, border: `1px solid ${palette.border}`, background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                        }}>
+                          <option value="all">All time</option>
+                          <option value="1h">Last hour</option>
+                          <option value="24h">Last 24 hours</option>
+                          <option value="7d">Last 7 days</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <div style={{
+                        width: 38, height: 22, borderRadius: 11, cursor: "pointer",
+                        background: displayPrefs.showSuperseded ? palette.green : palette.border,
+                        transition: "background 0.2s", position: "relative",
+                      }} onClick={() => { setDisplayPrefs(prev => ({ ...prev, showSuperseded: !prev.showSuperseded })); setTimeout(fetchClaims, 100); }}>
+                        <div style={{
+                          width: 18, height: 18, borderRadius: "50%", background: "#fff",
+                          position: "absolute", top: 2, left: displayPrefs.showSuperseded ? 18 : 2, transition: "left 0.2s",
+                        }} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 12, color: palette.text }}>Show superseded claims</div>
+                        <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>Include retracted and overridden claims</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Service Control */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 14 }}>Service Control</div>
+                    {services.length === 0 ? (
+                      <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim }}>No services running</span>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {services.map(s => (
+                          <div key={s.service_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}` }}>
+                            <StatusDot alive={s.status === "alive"} />
+                            <span style={{ fontSize: 12, color: palette.text, flex: 1 }}>{s.display_name || s.service_id}</span>
+                            <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>t{s.turn_count || 0}</span>
+                            {s.circuit_broken && (
+                              <React.Fragment>
+                                <Badge color={palette.red}>BROKEN</Badge>
+                                <button onClick={() => handleResetCircuit(s.service_id)} style={{
+                                  padding: "4px 12px", borderRadius: 4, fontSize: 10, fontFamily: FONT_MONO, fontWeight: 600,
+                                  border: "none", cursor: "pointer", background: palette.accentDim, color: palette.accent,
+                                }}>Reset</button>
+                              </React.Fragment>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                </div>
               </div>
             )}
           </main>
