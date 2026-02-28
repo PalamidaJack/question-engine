@@ -27,15 +27,17 @@ Multi-agent orchestration system with a bus-driven architecture. Services commun
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ --timeout=60 -q    # 997 tests, all passing
+.venv/bin/pytest tests/ --timeout=60 -q    # 1014 tests, all passing
 .venv/bin/ruff check src/ tests/            # all clean
 ```
 
 ## Current State (2026-02-28)
 
-997 tests pass, ruff clean.
+1014 tests pass, ruff clean.
 
 ### Recently Completed
+- Phase 3 bug fixes: subtask_results deserialization, goal route registration order, drift_detected handler
+- Phase 3 tests: subtask_results round-trip, DAG validation (10 structures), diamond deps, crash recovery, schema enforcement, e2e lifecycle
 - Multi-agent orchestration (planner, dispatcher, executor)
 - Kilo Code LLM provider integration with litellm
 - Channel adapters (Telegram, Slack, Email, Webhook)
