@@ -30,8 +30,11 @@ from qe.bus.event_log import EventLog
 from qe.kernel.supervisor import Supervisor
 from qe.models.envelope import Envelope
 from qe.services.chat import ChatService
+from qe.services.dispatcher import Dispatcher
+from qe.services.planner import PlannerService
 from qe.services.query import answer_question
 from qe.substrate import Substrate
+from qe.substrate.goal_store import GoalStore
 
 load_dotenv()
 
@@ -45,6 +48,9 @@ _substrate: Substrate | None = None
 _supervisor_task: asyncio.Task | None = None
 _event_log: EventLog | None = None
 _chat_service: ChatService | None = None
+_planner: PlannerService | None = None
+_dispatcher: Dispatcher | None = None
+_goal_store: GoalStore | None = None
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -97,6 +103,7 @@ def _bus_to_ws_bridge() -> None:
 async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
     global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
+    global _planner, _dispatcher, _goal_store
 
     logging.basicConfig(
         level=logging.INFO,
@@ -127,12 +134,21 @@ async def lifespan(app: FastAPI):
         _supervisor_task = asyncio.create_task(
             _supervisor.start(_genome_paths())
         )
+        balanced_model = get_current_tiers().get("balanced", "gpt-4o")
         _chat_service = ChatService(
             substrate=_substrate,
             bus=bus,
             budget_tracker=_supervisor.budget_tracker,
-            model=get_current_tiers().get("balanced", "gpt-4o"),
+            model=balanced_model,
         )
+        _goal_store = GoalStore(_substrate.belief_ledger._db_path)
+        _planner = PlannerService(
+            bus=bus,
+            substrate=_substrate,
+            budget_tracker=_supervisor.budget_tracker,
+            model=balanced_model,
+        )
+        _dispatcher = Dispatcher(bus=bus, goal_store=_goal_store)
         log.info("QE API server started (engine running)")
     else:
         log.info("QE API server started (setup required — no API keys configured)")
@@ -333,11 +349,10 @@ async def get_claim(claim_id: str):
     if not _substrate:
         return JSONResponse({"error": "Substrate not ready"}, status_code=503)
 
-    claims = await _substrate.get_claims(include_superseded=True)
-    for claim in claims:
-        if claim.claim_id == claim_id:
-            return claim.model_dump(mode="json")
-    return JSONResponse({"error": "Claim not found"}, status_code=404)
+    claim = await _substrate.get_claim_by_id(claim_id)
+    if not claim:
+        return JSONResponse({"error": "Claim not found"}, status_code=404)
+    return claim.model_dump(mode="json")
 
 
 @app.delete("/api/claims/{claim_id}")
@@ -455,6 +470,144 @@ async def hil_reject(envelope_id: str, body: dict[str, Any] | None = None):
         encoding="utf-8",
     )
     return {"status": "rejected", "envelope_id": envelope_id}
+
+
+# ── Goals ───────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/goals")
+async def submit_goal(body: dict[str, Any]):
+    """Submit a new goal for decomposition and execution."""
+    if not _planner or not _dispatcher:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    description = body.get("description", "").strip()
+    if not description:
+        return JSONResponse(
+            {"error": "description is required"}, status_code=400
+        )
+
+    state = await _planner.decompose(description)
+    await _dispatcher.submit_goal(state)
+
+    get_bus().publish(
+        Envelope(
+            topic="goals.submitted",
+            source_service_id="api",
+            correlation_id=state.goal_id,
+            payload={
+                "goal_id": state.goal_id,
+                "description": description,
+            },
+        )
+    )
+
+    return {
+        "goal_id": state.goal_id,
+        "status": state.status,
+        "subtask_count": len(state.subtask_states),
+        "strategy": (
+            state.decomposition.strategy if state.decomposition else ""
+        ),
+    }
+
+
+@app.get("/api/goals")
+async def list_goals(status: str | None = None):
+    """List all goals with status."""
+    if not _goal_store:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    goals = await _goal_store.list_goals(status=status)
+    return {
+        "goals": [
+            {
+                "goal_id": g.goal_id,
+                "description": g.description,
+                "status": g.status,
+                "subtask_count": len(g.subtask_states),
+                "created_at": g.created_at.isoformat(),
+                "completed_at": (
+                    g.completed_at.isoformat()
+                    if g.completed_at
+                    else None
+                ),
+            }
+            for g in goals
+        ],
+        "count": len(goals),
+    }
+
+
+@app.get("/api/goals/{goal_id}")
+async def get_goal(goal_id: str):
+    """Get goal detail with DAG and subtask states."""
+    if not _dispatcher or not _goal_store:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+
+    # Try in-memory first, then store
+    state = _dispatcher.get_goal_state(goal_id)
+    if not state:
+        state = await _goal_store.load_goal(goal_id)
+    if not state:
+        return JSONResponse({"error": "Goal not found"}, status_code=404)
+
+    return {
+        "goal_id": state.goal_id,
+        "description": state.description,
+        "status": state.status,
+        "subtask_states": state.subtask_states,
+        "created_at": state.created_at.isoformat(),
+        "completed_at": (
+            state.completed_at.isoformat()
+            if state.completed_at
+            else None
+        ),
+        "decomposition": (
+            state.decomposition.model_dump(mode="json")
+            if state.decomposition
+            else None
+        ),
+    }
+
+
+@app.post("/api/goals/{goal_id}/pause")
+async def pause_goal(goal_id: str):
+    """Pause execution of a goal."""
+    if not _dispatcher:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+    ok = await _dispatcher.pause_goal(goal_id)
+    if not ok:
+        return JSONResponse(
+            {"error": "Goal not found or not running"}, status_code=404
+        )
+    return {"status": "paused", "goal_id": goal_id}
+
+
+@app.post("/api/goals/{goal_id}/resume")
+async def resume_goal(goal_id: str):
+    """Resume a paused goal."""
+    if not _dispatcher:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+    ok = await _dispatcher.resume_goal(goal_id)
+    if not ok:
+        return JSONResponse(
+            {"error": "Goal not found or not paused"}, status_code=404
+        )
+    return {"status": "resumed", "goal_id": goal_id}
+
+
+@app.post("/api/goals/{goal_id}/cancel")
+async def cancel_goal(goal_id: str):
+    """Cancel a running goal."""
+    if not _dispatcher:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
+    ok = await _dispatcher.cancel_goal(goal_id)
+    if not ok:
+        return JSONResponse(
+            {"error": "Goal not found"}, status_code=404
+        )
+    return {"status": "cancelled", "goal_id": goal_id}
 
 
 # ── Chat ────────────────────────────────────────────────────────────────────

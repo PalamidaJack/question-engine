@@ -25,9 +25,11 @@ app = typer.Typer(help="Question Engine CLI")
 claims_app = typer.Typer(help="Claim inspection commands")
 hil_app = typer.Typer(help="Human-in-the-loop commands")
 ingest_app = typer.Typer(help="Ingestion commands")
+goal_app = typer.Typer(help="Goal management commands")
 app.add_typer(claims_app, name="claims")
 app.add_typer(hil_app, name="hil")
 app.add_typer(ingest_app, name="ingest")
+app.add_typer(goal_app, name="goal")
 
 console = Console()
 INBOX_DIR = Path("data/runtime_inbox")
@@ -290,6 +292,136 @@ def ingest_file(file_path: Path) -> None:
         count += 1
 
     console.print(f"Ingested {count} observations from {file_path}")
+
+
+@goal_app.callback(invoke_without_command=True)
+def goal_submit(
+    ctx: typer.Context,
+    description: str = typer.Argument(None, help="Goal description"),
+) -> None:
+    """Submit a goal or manage goals. Use subcommands for list/status/pause/resume/cancel."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if not description:
+        console.print("[red]Usage: qe goal 'description' or qe goal list[/red]")
+        raise typer.Exit(code=1)
+
+    import httpx
+
+    try:
+        resp = httpx.post(
+            "http://localhost:8000/api/goals",
+            json={"description": description},
+            timeout=60,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            console.print(f"[green]Goal submitted:[/green] {data['goal_id']}")
+            console.print(f"  Status: {data['status']}")
+            console.print(f"  Subtasks: {data['subtask_count']}")
+            if data.get("strategy"):
+                console.print(f"  Strategy: {data['strategy']}")
+        else:
+            console.print(f"[red]Error:[/red] {resp.text}")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server. Is it running?[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@goal_app.command("list")
+def goal_list() -> None:
+    """List all goals."""
+    import httpx
+
+    try:
+        resp = httpx.get("http://localhost:8000/api/goals", timeout=10)
+        data = resp.json()
+        goals = data.get("goals", [])
+        if not goals:
+            console.print("No goals found.")
+            return
+
+        table = Table(title="Goals")
+        table.add_column("goal_id")
+        table.add_column("description")
+        table.add_column("status")
+        table.add_column("subtasks")
+        table.add_column("created_at")
+        for g in goals:
+            table.add_row(
+                g["goal_id"],
+                g["description"][:60],
+                g["status"],
+                str(g["subtask_count"]),
+                g["created_at"],
+            )
+        console.print(table)
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@goal_app.command("status")
+def goal_status(goal_id: str) -> None:
+    """Show detailed status of a goal."""
+    import httpx
+
+    try:
+        resp = httpx.get(
+            f"http://localhost:8000/api/goals/{goal_id}", timeout=10
+        )
+        if resp.status_code == 404:
+            console.print(f"[red]Goal not found: {goal_id}[/red]")
+            raise typer.Exit(code=1)
+        console.print_json(data=resp.json())
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@goal_app.command("pause")
+def goal_pause(goal_id: str) -> None:
+    """Pause a running goal."""
+    import httpx
+
+    try:
+        resp = httpx.post(
+            f"http://localhost:8000/api/goals/{goal_id}/pause", timeout=10
+        )
+        console.print(resp.json())
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@goal_app.command("resume")
+def goal_resume(goal_id: str) -> None:
+    """Resume a paused goal."""
+    import httpx
+
+    try:
+        resp = httpx.post(
+            f"http://localhost:8000/api/goals/{goal_id}/resume", timeout=10
+        )
+        console.print(resp.json())
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@goal_app.command("cancel")
+def goal_cancel(goal_id: str) -> None:
+    """Cancel a running goal."""
+    import httpx
+
+    try:
+        resp = httpx.post(
+            f"http://localhost:8000/api/goals/{goal_id}/cancel", timeout=10
+        )
+        console.print(resp.json())
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
 
 
 @app.command()

@@ -241,6 +241,44 @@ class BeliefLedger:
 
         return null_result
 
+    async def get_claim_by_id(self, claim_id: str) -> Claim | None:
+        """Fetch a single claim by its ID."""
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "SELECT * FROM claims WHERE claim_id = ?",
+                (claim_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_claim(row)
+
+    async def count_claims(self, include_superseded: bool = False) -> int:
+        """Return the total number of claims in the ledger."""
+        query = "SELECT COUNT(*) FROM claims"
+        if not include_superseded:
+            query += " WHERE superseded_by IS NULL"
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(query)
+            row = await cursor.fetchone()
+        return row[0]
+
+    async def get_claims_since(
+        self,
+        since: datetime,
+        include_superseded: bool = False,
+    ) -> list[Claim]:
+        """Return claims created after the given timestamp."""
+        query = "SELECT * FROM claims WHERE created_at > ?"
+        params: list = [since.isoformat()]
+        if not include_superseded:
+            query += " AND superseded_by IS NULL"
+        query += " ORDER BY created_at DESC"
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+        return [self._row_to_claim(row) for row in rows]
+
     async def retract_claim(self, claim_id: str) -> bool:
         """Soft-retract a claim by marking it as superseded by 'retracted'."""
         async with aiosqlite.connect(self._db_path) as db:

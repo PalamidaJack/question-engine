@@ -59,7 +59,10 @@ class Supervisor:
         self._running = False
         self._daemon_tasks: list[asyncio.Task] = []
         # Budget tracker shared across all services
-        self.budget_tracker = BudgetTracker()
+        db_path = None
+        if self.substrate and hasattr(self.substrate, "belief_ledger"):
+            db_path = self.substrate.belief_ledger._db_path
+        self.budget_tracker = BudgetTracker(db_path=db_path)
         BaseService.set_budget_tracker(self.budget_tracker)
         # Loop detection: service_id -> deque of (timestamp, payload_hash)
         self._pub_history: dict[str, deque] = {}
@@ -81,6 +84,9 @@ class Supervisor:
                 blueprint.service_id,
                 blueprint.capabilities.bus_topics_subscribe,
             )
+
+        # Load persisted budget state
+        await self.budget_tracker.load()
 
         self._start_watchdog(asyncio.get_running_loop())
         self._start_daemons()
@@ -106,6 +112,8 @@ class Supervisor:
         self._daemon_tasks.clear()
         for service in self.registry.all_services():
             await service.stop()
+        # Flush budget state before shutdown
+        await self.budget_tracker.save()
         if self._observer:
             self._observer.stop()
             self._observer.join(timeout=2)
@@ -244,6 +252,9 @@ class Supervisor:
         self._daemon_tasks.append(
             asyncio.create_task(self._stall_detector())
         )
+        self._daemon_tasks.append(
+            asyncio.create_task(self._budget_flush_loop())
+        )
 
     async def _on_heartbeat(self, envelope: Envelope) -> None:
         """Record heartbeat timestamp for a service."""
@@ -305,3 +316,12 @@ class Supervisor:
                             },
                         )
                     )
+
+    async def _budget_flush_loop(self) -> None:
+        """Periodically flush budget records to SQLite."""
+        while self._running:
+            await asyncio.sleep(30)
+            try:
+                await self.budget_tracker.save()
+            except Exception:
+                log.exception("Failed to flush budget records")

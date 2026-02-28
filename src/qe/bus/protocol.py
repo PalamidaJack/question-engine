@@ -8,10 +8,27 @@ TOPICS = {
     "claims.proposed",
     "claims.committed",
     "claims.contradiction_detected",
+    "claims.challenged",
+    "claims.verification_requested",
     "predictions.proposed",
     "predictions.committed",
     "null_results.committed",
-    # Orchestration
+    # Goal orchestration
+    "goals.submitted",
+    "goals.enriched",
+    "goals.completed",
+    "goals.failed",
+    # Task decomposition
+    "tasks.planned",
+    "tasks.dispatched",
+    "tasks.completed",
+    "tasks.verified",
+    "tasks.verification_failed",
+    "tasks.recovered",
+    "tasks.failed",
+    "tasks.progress",
+    "tasks.checkpoint",
+    # Orchestration (legacy)
     "investigations.requested",
     "investigations.completed",
     # Query
@@ -28,12 +45,24 @@ TOPICS = {
     # Chat
     "chat.message_received",
     "chat.response_sent",
+    # Memory
+    "memory.updated",
+    "memory.preference_set",
+    # Analysis
+    "analysis.requested",
+    "analysis.completed",
+    # Synthesis
+    "synthesis.requested",
+    "synthesis.completed",
     # System
     "system.heartbeat",
     "system.error",
     "system.circuit_break",
     "system.service_stalled",
     "system.budget_alert",
+    "system.resource_alert",
+    "system.security_alert",
+    "system.digest",
 }
 
 
