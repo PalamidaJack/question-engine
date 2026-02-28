@@ -180,6 +180,103 @@ async def _init_channels() -> None:
     _active_adapters.append(webhook_adapter)
     activated.append("webhook")
 
+    # ── Bus subscriptions: channel → goals, goals → notifications ──
+    bus = get_bus()
+
+    async def _on_channel_message(envelope: Envelope) -> None:
+        """Forward inbound channel messages to the planner as goals."""
+        if not _planner or not _dispatcher:
+            log.warning("channel.message_ignored reason=engine_not_ready")
+            return
+
+        text = envelope.payload.get("text", "").strip()
+        if not text:
+            return
+
+        user_id = envelope.payload.get("user_id", "")
+        channel = envelope.payload.get("channel", "unknown")
+
+        log.info(
+            "channel.goal_from_message channel=%s user=%s text=%s",
+            channel,
+            user_id,
+            text[:80],
+        )
+
+        try:
+            state = await _planner.decompose(text)
+            await _dispatcher.submit_goal(state)
+
+            bus.publish(
+                Envelope(
+                    topic="goals.submitted",
+                    source_service_id="channel_bridge",
+                    correlation_id=state.goal_id,
+                    payload={
+                        "goal_id": state.goal_id,
+                        "description": text,
+                        "channel": channel,
+                        "user_id": user_id,
+                    },
+                )
+            )
+        except Exception:
+            log.exception(
+                "channel.goal_creation_failed channel=%s user=%s",
+                channel,
+                user_id,
+            )
+
+    bus.subscribe("channel.message_received", _on_channel_message)
+
+    async def _on_goal_completed(envelope: Envelope) -> None:
+        """Deliver goal results to users via notification channels."""
+        if _notification_router is None:
+            return
+
+        goal_id = envelope.payload.get("goal_id", "")
+        if not goal_id:
+            return
+
+        # Build a summary from the goal's subtask results
+        summary = f"Goal completed with {envelope.payload.get('subtask_count', 0)} subtasks."
+        if _goal_store:
+            state = await _goal_store.load_goal(goal_id)
+            if state and state.subtask_results:
+                parts = []
+                for _st_id, res in state.subtask_results.items():
+                    output_text = res.output.get("result", "")
+                    if output_text:
+                        parts.append(str(output_text)[:500])
+                if parts:
+                    summary = "\n---\n".join(parts)
+
+        # Notify all registered channels (no user targeting yet)
+        await _notification_router.notify(
+            user_id="broadcast",
+            event_type="goal_result",
+            message=f"Goal {goal_id} completed:\n{summary}",
+            urgency="high",
+        )
+
+    async def _on_goal_failed(envelope: Envelope) -> None:
+        """Notify channels when a goal fails."""
+        if _notification_router is None:
+            return
+
+        goal_id = envelope.payload.get("goal_id", "")
+        reason = envelope.payload.get("reason", "unknown")
+
+        await _notification_router.notify(
+            user_id="broadcast",
+            event_type="goal_failed",
+            message=f"Goal {goal_id} failed: {reason}",
+            urgency="high",
+        )
+
+    bus.subscribe("goals.completed", _on_goal_completed)
+    bus.subscribe("goals.failed", _on_goal_failed)
+
     log.info("channels.initialized active=%s", activated)
 
 
