@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import typer
 from dotenv import load_dotenv
@@ -26,10 +27,16 @@ claims_app = typer.Typer(help="Claim inspection commands")
 hil_app = typer.Typer(help="Human-in-the-loop commands")
 ingest_app = typer.Typer(help="Ingestion commands")
 goal_app = typer.Typer(help="Goal management commands")
+dlq_app = typer.Typer(help="Dead-letter queue commands")
+export_app = typer.Typer(help="Data export commands")
+db_app = typer.Typer(help="Database management commands")
 app.add_typer(claims_app, name="claims")
 app.add_typer(hil_app, name="hil")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(goal_app, name="goal")
+app.add_typer(dlq_app, name="dlq")
+app.add_typer(export_app, name="export")
+app.add_typer(db_app, name="db")
 
 console = Console()
 INBOX_DIR = Path("data/runtime_inbox")
@@ -59,12 +66,10 @@ async def _inbox_relay_loop() -> None:
 
 
 def _configure_logging(verbose: bool = False) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    from qe.api.setup import get_settings
+    from qe.runtime.logging_config import configure_from_config
+
+    configure_from_config(get_settings(), verbose=verbose)
 
 
 @app.command()
@@ -422,6 +427,317 @@ def goal_cancel(goal_id: str) -> None:
     except httpx.ConnectError:
         console.print("[red]Cannot connect to QE API server.[/red]")
         raise typer.Exit(code=1) from None
+
+
+@app.command()
+def health(
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Check engine health by hitting the live health endpoint."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"{base_url}/api/health/live", timeout=10)
+        data = resp.json()
+        overall = data.get("overall_status", "unknown")
+        color = "green" if overall == "healthy" else "red"
+        console.print(f"[{color}]Health: {overall}[/{color}]")
+        for check in data.get("checks", []):
+            status = check.get("status", "?")
+            c = "green" if status == "pass" else ("yellow" if status == "warn" else "red")
+            console.print(f"  [{c}]{check.get('name', '?')}: {status}[/{c}]")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def metrics(
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Display engine metrics."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"{base_url}/api/metrics", timeout=10)
+        console.print_json(data=resp.json())
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@app.command("config-validate")
+def config_validate(
+    config_path: Path = typer.Option(Path("config.toml"), "--config"),  # noqa: B008
+) -> None:
+    """Validate config.toml without starting the engine."""
+    from pydantic import ValidationError
+
+    from qe.config import load_config
+
+    try:
+        cfg = load_config(config_path)
+        console.print("[green]Config valid.[/green]")
+        console.print(f"  Budget limit: ${cfg.budget.monthly_limit_usd:.2f}")
+        console.print(f"  Log level: {cfg.runtime.log_level}")
+        models = f"{cfg.models.fast} / {cfg.models.balanced} / {cfg.models.powerful}"
+        console.print(f"  Models: {models}")
+    except ValidationError as exc:
+        console.print("[red]Config validation failed:[/red]")
+        for err in exc.errors():
+            loc = " → ".join(str(x) for x in err["loc"])
+            console.print(f"  {loc}: {err['msg']}")
+        raise typer.Exit(code=1) from None
+    except FileNotFoundError:
+        console.print(f"[red]Config file not found: {config_path}[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@dlq_app.command("list")
+def dlq_list(
+    limit: int = typer.Option(100, "--limit"),
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """List dead-letter queue entries."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"{base_url}/api/dlq", params={"limit": limit}, timeout=10)
+        data = resp.json()
+        entries = data.get("entries", [])
+        if not entries:
+            console.print("DLQ is empty.")
+            return
+
+        table = Table(title=f"Dead Letter Queue ({data.get('count', 0)} entries)")
+        table.add_column("envelope_id")
+        table.add_column("topic")
+        table.add_column("error")
+        table.add_column("attempts")
+        for e in entries:
+            table.add_row(
+                e["envelope_id"][:12] + "...",
+                e["topic"],
+                e["error"][:60],
+                str(e["attempts"]),
+            )
+        console.print(table)
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@dlq_app.command("replay")
+def dlq_replay(
+    envelope_id: str,
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Replay a dead-lettered envelope."""
+    import httpx
+
+    try:
+        resp = httpx.post(f"{base_url}/api/dlq/{envelope_id}/replay", timeout=10)
+        if resp.status_code == 404:
+            console.print(f"[red]Envelope not found in DLQ: {envelope_id}[/red]")
+            raise typer.Exit(code=1)
+        console.print(f"[green]Replayed: {envelope_id}[/green]")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@dlq_app.command("purge")
+def dlq_purge(base_url: str = typer.Option("http://localhost:8000", "--url")) -> None:
+    """Purge all DLQ entries."""
+    import httpx
+
+    try:
+        resp = httpx.delete(f"{base_url}/api/dlq", timeout=10)
+        data = resp.json()
+        console.print(f"[green]Purged {data.get('count', 0)} entries.[/green]")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@export_app.command("claims")
+def export_claims(
+    subject: str | None = typer.Option(None, "--subject"),
+    fmt: str = typer.Option("json", "--format"),
+    output: Path | None = typer.Option(None, "--output"),  # noqa: B008
+) -> None:
+    """Export claims from the belief ledger to JSON or CSV."""
+    async def _run() -> None:
+        substrate = Substrate()
+        await substrate.initialize()
+        claims = await substrate.get_claims(
+            subject_entity_id=subject, include_superseded=True
+        )
+        rows = [c.model_dump(mode="json") for c in claims]
+
+        if fmt == "csv":
+            import csv
+            import io
+
+            buf = io.StringIO()
+            if rows:
+                writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+            text = buf.getvalue()
+        else:
+            text = json.dumps(rows, indent=2, default=str)
+
+        if output:
+            output.write_text(text, encoding="utf-8")  # noqa: ASYNC240
+            console.print(f"Exported {len(rows)} claims to {output}")
+        else:
+            console.print(text)
+
+    asyncio.run(_run())
+
+
+@export_app.command("events")
+def export_events(
+    topic: str | None = typer.Option(None, "--topic"),
+    limit: int = typer.Option(1000, "--limit"),
+    fmt: str = typer.Option("json", "--format"),
+    output: Path | None = typer.Option(None, "--output"),  # noqa: B008
+) -> None:
+    """Export events from the event log to JSON or CSV."""
+    from qe.bus.event_log import EventLog
+
+    async def _run() -> None:
+        el = EventLog()
+        await el.initialize()
+        events = await el.replay(topic=topic, limit=limit)
+
+        if fmt == "csv":
+            import csv
+            import io
+
+            buf = io.StringIO()
+            if events:
+                writer = csv.DictWriter(
+                    buf, fieldnames=events[0].keys()
+                )
+                writer.writeheader()
+                for e in events:
+                    row = {
+                        k: json.dumps(v) if isinstance(v, dict) else v
+                        for k, v in e.items()
+                    }
+                    writer.writerow(row)
+            text = buf.getvalue()
+        else:
+            text = json.dumps(events, indent=2, default=str)
+
+        if output:
+            output.write_text(text, encoding="utf-8")  # noqa: ASYNC240
+            console.print(f"Exported {len(events)} events to {output}")
+        else:
+            console.print(text)
+
+    asyncio.run(_run())
+
+
+@app.command("events-replay")
+def events_replay(
+    topic: str | None = typer.Option(None, "--topic"),
+    since: str | None = typer.Option(None, "--since"),
+    limit: int = typer.Option(100, "--limit"),
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Replay historical events from the event log into the bus."""
+    import httpx
+
+    try:
+        body: dict[str, Any] = {"limit": limit}
+        if topic:
+            body["topic"] = topic
+        if since:
+            body["since"] = since
+        resp = httpx.post(
+            f"{base_url}/api/events/replay",
+            json=body,
+            timeout=60,
+        )
+        data = resp.json()
+        console.print(
+            f"[green]Replayed {data.get('count', 0)} events.[/green]"
+        )
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@db_app.command("backup")
+def db_backup(
+    dest: str = typer.Option("data/backups", "--dest"),
+) -> None:
+    """Back up all QE databases."""
+    from qe.runtime.db_backup import backup_all
+
+    result = backup_all(dest_dir=dest)
+    console.print(
+        f"[green]Backup complete:[/green] {result['backup_dir']}"
+    )
+    for db in result["databases"]:
+        status = db["status"]
+        c = "green" if status == "completed" else "yellow"
+        size = db.get("size_bytes", 0)
+        console.print(f"  [{c}]{db['source']}: {status} ({size} bytes)[/{c}]")
+
+
+@db_app.command("restore")
+def db_restore(
+    backup_dir: str = typer.Argument(..., help="Backup directory path"),
+) -> None:
+    """Restore databases from a backup directory."""
+    from qe.runtime.db_backup import restore_database
+
+    backup_path = Path(backup_dir)
+    if not backup_path.exists():
+        console.print(f"[red]Backup dir not found: {backup_dir}[/red]")
+        raise typer.Exit(code=1)
+
+    db_files = list(backup_path.glob("*.db"))
+    if not db_files:
+        console.print("[red]No .db files found in backup directory.[/red]")
+        raise typer.Exit(code=1)
+
+    for db_file in db_files:
+        dest = f"data/{db_file.name}"
+        result = restore_database(str(db_file), dest)
+        status = result["status"]
+        c = "green" if status == "restored" else "red"
+        console.print(f"  [{c}]{db_file.name}: {status}[/{c}]")
+
+
+@db_app.command("list-backups")
+def db_list_backups(
+    backup_dir: str = typer.Option("data/backups", "--dir"),
+) -> None:
+    """List available database backups."""
+    from qe.runtime.db_backup import list_backups
+
+    backups = list_backups(backup_dir)
+    if not backups:
+        console.print("No backups found.")
+        return
+
+    table = Table(title="Database Backups")
+    table.add_column("Name")
+    table.add_column("Databases")
+    table.add_column("Size")
+    for b in backups:
+        size_kb = b["total_size_bytes"] / 1024
+        table.add_row(
+            b["name"],
+            ", ".join(b["databases"]),
+            f"{size_kb:.1f} KB",
+        )
+    console.print(table)
 
 
 @app.command()

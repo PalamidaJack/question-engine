@@ -196,6 +196,18 @@ class BudgetTracker:
         else:
             self._reset(current_key)
 
+    def update_limits(
+        self,
+        monthly_limit_usd: float | None = None,
+        alert_at_pct: float | None = None,
+    ) -> None:
+        """Update budget limits at runtime without restart."""
+        if monthly_limit_usd is not None:
+            self.monthly_limit_usd = monthly_limit_usd
+        if alert_at_pct is not None:
+            self.alert_at_pct = alert_at_pct
+            self._alerted = False  # re-arm alert at new threshold
+
     def _reset(self, month_key: str) -> None:
         """Reset counters for a new month."""
         log.info("Budget reset for new month: %s", month_key)

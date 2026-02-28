@@ -248,3 +248,32 @@ def save_setup(
             config["models"][tier] = info["model"]
 
     CONFIG_PATH.write_text(_dump_toml(config), encoding="utf-8")
+
+
+_SETTINGS_DEFAULTS: dict[str, dict] = {
+    "budget": {"monthly_limit_usd": 50.0, "alert_at_pct": 0.80},
+    "runtime": {"log_level": "INFO", "hil_timeout_seconds": 3600},
+}
+
+
+def get_settings() -> dict:
+    """Return runtime settings from config.toml with defaults."""
+    config = _load_config()
+    result: dict[str, dict] = {}
+    for section, defaults in _SETTINGS_DEFAULTS.items():
+        values = config.get(section, {})
+        result[section] = {k: values.get(k, v) for k, v in defaults.items()}
+    return result
+
+
+def save_settings(settings: dict) -> None:
+    """Merge runtime settings into config.toml, preserving all other sections."""
+    config = _load_config()
+    for section in ("budget", "runtime"):
+        incoming = settings.get(section)
+        if not incoming or not isinstance(incoming, dict):
+            continue
+        if section not in config:
+            config[section] = {}
+        config[section].update(incoming)
+    CONFIG_PATH.write_text(_dump_toml(config), encoding="utf-8")

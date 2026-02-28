@@ -69,6 +69,20 @@ class SubtaskResult(BaseModel):
     recovery_history: list[dict] = Field(default_factory=list)
 
 
+class InvalidTransition(Exception):
+    """Raised when attempting an illegal goal state transition."""
+
+
+# Valid state transitions: from_status -> {allowed_to_statuses}
+_GOAL_TRANSITIONS: dict[str, set[str]] = {
+    "planning": {"executing", "failed", "paused"},
+    "executing": {"completed", "failed", "paused"},
+    "paused": {"executing", "failed"},
+    "completed": set(),  # terminal
+    "failed": set(),  # terminal
+}
+
+
 class GoalState(BaseModel):
     """Tracks the execution state of a goal."""
 
@@ -82,4 +96,36 @@ class GoalState(BaseModel):
     subtask_results: dict[str, SubtaskResult] = Field(default_factory=dict)
     checkpoints: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    started_at: datetime | None = None
     completed_at: datetime | None = None
+    due_at: datetime | None = None
+    project_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+    def transition_to(self, new_status: str) -> None:
+        """Validated state transition. Raises InvalidTransition if illegal."""
+        allowed = _GOAL_TRANSITIONS.get(self.status, set())
+        if new_status not in allowed:
+            raise InvalidTransition(
+                f"Cannot transition goal {self.goal_id} "
+                f"from '{self.status}' to '{new_status}'. "
+                f"Allowed: {allowed or 'none (terminal state)'}"
+            )
+        self.status = new_status  # type: ignore[assignment]
+        if new_status == "executing" and self.started_at is None:
+            self.started_at = datetime.now(UTC)
+        if new_status in ("completed", "failed"):
+            self.completed_at = datetime.now(UTC)
+
+
+class Project(BaseModel):
+    """A project groups related goals for tracking and reporting."""
+
+    project_id: str = Field(default_factory=lambda: f"proj_{uuid.uuid4().hex[:12]}")
+    name: str
+    description: str = ""
+    owner: str = ""
+    status: Literal["active", "completed", "archived"] = "active"
+    tags: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

@@ -86,6 +86,11 @@ TOPICS = {
     "system.resource_alert",
     "system.security_alert",
     "system.digest",
+    # Doctor / Health
+    "system.health.check",
+    "system.health.report",
+    # Dead Letter Queue
+    "system.dlq",
 }
 
 

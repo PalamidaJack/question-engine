@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 from qe.models.envelope import Envelope
@@ -27,6 +26,53 @@ class Dispatcher:
         self.bus = bus
         self.goal_store = goal_store
         self._active_goals: dict[str, GoalState] = {}
+
+    async def reconcile(self) -> dict[str, int]:
+        """Load in-flight goals from store on startup and resume or fail them.
+
+        Goals in 'executing' or 'planning' state are stale if the process
+        restarted. Executing goals are resumed; planning goals are failed
+        (their LLM decomposition was interrupted).
+
+        Returns counts: {"resumed": N, "failed_stale": M}.
+        """
+        active_goals = await self.goal_store.list_active_goals()
+        resumed = 0
+        failed_stale = 0
+
+        for state in active_goals:
+            if state.goal_id in self._active_goals:
+                continue  # already tracked in memory
+
+            if state.status == "executing":
+                # Resume: re-add to active goals and dispatch ready subtasks
+                self._active_goals[state.goal_id] = state
+                await self._dispatch_ready(state)
+                resumed += 1
+                log.info(
+                    "reconcile.resumed goal_id=%s subtasks=%d",
+                    state.goal_id,
+                    len(state.subtask_states),
+                )
+            elif state.status == "planning":
+                # Planning was interrupted mid-LLM — fail closed
+                state.transition_to("failed")
+                await self.goal_store.save_goal(state)
+                failed_stale += 1
+                log.warning(
+                    "reconcile.failed_stale goal_id=%s "
+                    "reason=planning_interrupted",
+                    state.goal_id,
+                )
+
+        if resumed or failed_stale:
+            log.info(
+                "reconcile.done resumed=%d failed_stale=%d",
+                resumed,
+                failed_stale,
+            )
+
+        return {"resumed": resumed, "failed_stale": failed_stale}
 
     async def submit_goal(self, state: GoalState) -> None:
         """Accept a planned goal and begin execution."""
@@ -73,8 +119,7 @@ class Dispatcher:
 
         # Check if all subtasks are complete
         if self._all_complete(state):
-            state.status = "completed"
-            state.completed_at = datetime.now(UTC)
+            state.transition_to("completed")
             await self.goal_store.save_goal(state)
             del self._active_goals[goal_id]
 
@@ -101,7 +146,7 @@ class Dispatcher:
                 if s == "failed"
             )
             if failed_count >= 3:
-                state.status = "failed"
+                state.transition_to("failed")
                 await self.goal_store.save_goal(state)
                 del self._active_goals[goal_id]
 
@@ -132,7 +177,7 @@ class Dispatcher:
         state = self._active_goals.get(goal_id)
         if not state:
             return False
-        state.status = "paused"
+        state.transition_to("paused")
         await self.goal_store.save_goal(state)
         log.info("dispatcher.goal_paused goal_id=%s", goal_id)
         return True
@@ -147,7 +192,7 @@ class Dispatcher:
                 return False
             self._active_goals[goal_id] = state
 
-        state.status = "executing"
+        state.transition_to("executing")
         await self.goal_store.save_goal(state)
         await self._dispatch_ready(state)
         log.info("dispatcher.goal_resumed goal_id=%s", goal_id)
@@ -157,8 +202,7 @@ class Dispatcher:
         """Cancel a goal."""
         state = self._active_goals.pop(goal_id, None)
         if state:
-            state.status = "failed"
-            state.completed_at = datetime.now(UTC)
+            state.transition_to("failed")
             await self.goal_store.save_goal(state)
             log.info("dispatcher.goal_cancelled goal_id=%s", goal_id)
             return True

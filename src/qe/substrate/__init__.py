@@ -4,6 +4,7 @@ from qe.substrate.belief_ledger import BeliefLedger
 from qe.substrate.cold_storage import ColdStorage
 from qe.substrate.embeddings import EmbeddingStore
 from qe.substrate.entities import EntityResolver
+from qe.substrate.magma import MultiGraphQuery
 
 
 class Substrate:
@@ -19,6 +20,12 @@ class Substrate:
         self.cold_storage = ColdStorage(cold_path)
         self.entity_resolver = EntityResolver(db_path)
         self.embeddings = EmbeddingStore(db_path, model=embedding_model)
+        # MAGMA multi-graph query (event_log wired later via set_event_log)
+        self._magma = MultiGraphQuery(
+            embeddings=self.embeddings,
+            belief_ledger=self.belief_ledger,
+            entity_resolver=self.entity_resolver,
+        )
 
     async def initialize(self) -> None:
         await self.ledger.initialize()
@@ -47,3 +54,26 @@ class Substrate:
 
     async def search_semantic(self, query: str, top_k: int = 10):
         return await self.embeddings.search(query, top_k=top_k)
+
+    def set_event_log(self, event_log) -> None:
+        """Wire the EventLog into MAGMA for temporal + causal queries."""
+        self._magma = MultiGraphQuery(
+            embeddings=self.embeddings,
+            event_log=event_log,
+            belief_ledger=self.belief_ledger,
+            entity_resolver=self.entity_resolver,
+        )
+
+    def set_memory_store(self, memory_store) -> None:
+        """Wire MemoryStore into MAGMA for entity memory queries."""
+        self._magma = MultiGraphQuery(
+            embeddings=self.embeddings,
+            event_log=self._magma._event_log,
+            belief_ledger=self.belief_ledger,
+            entity_resolver=self.entity_resolver,
+            memory_store=memory_store,
+        )
+
+    async def multi_query(self, query: str, **kwargs):
+        """MAGMA multi-graph query: fan out across semantic, temporal, entity, causal."""
+        return await self._magma.multi_query(query, **kwargs)
