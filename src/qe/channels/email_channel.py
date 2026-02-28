@@ -35,8 +35,13 @@ class EmailAdapter(ChannelAdapter):
         password: str = "",
         inbox_folder: str = "INBOX",
         sanitizer: Any | None = None,
+        message_callback: Any | None = None,
     ) -> None:
-        super().__init__(channel_name="email", sanitizer=sanitizer)
+        super().__init__(
+            channel_name="email",
+            sanitizer=sanitizer,
+            message_callback=message_callback,
+        )
         self._imap_host = imap_host or os.environ.get("EMAIL_IMAP_HOST", "")
         self._smtp_host = smtp_host or os.environ.get("EMAIL_SMTP_HOST", "")
         self._username = username or os.environ.get("EMAIL_USERNAME", "")
@@ -161,6 +166,15 @@ class EmailAdapter(ChannelAdapter):
     # Polling
     # ------------------------------------------------------------------
 
+    def _classify_command(self, text: str) -> str:
+        """Classify an email message as ask, status, or goal."""
+        lower = text.strip().lower()
+        if lower.startswith("ask:") or lower.startswith("/ask"):
+            return "ask"
+        if lower.startswith("status:") or lower.startswith("/status"):
+            return "status"
+        return "goal"
+
     async def _poll_loop(self) -> None:
         """Periodically check for new IMAP messages."""
         loop = asyncio.get_running_loop()
@@ -168,7 +182,12 @@ class EmailAdapter(ChannelAdapter):
             try:
                 messages = await loop.run_in_executor(None, self._fetch_new_messages)
                 for msg in messages:
-                    await self.receive(msg)
+                    result = await self.receive(msg)
+                    if result is not None:
+                        result["command"] = self._classify_command(
+                            result.get("text", "")
+                        )
+                        self._forward_message(result)
             except Exception:
                 log.exception("email.poll_error")
             await asyncio.sleep(self._poll_interval)

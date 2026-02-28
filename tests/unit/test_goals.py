@@ -172,6 +172,33 @@ class TestGoalStore:
         assert loaded["subtask_states"]["s1"] == "completed"
 
     @pytest.mark.asyncio
+    async def test_metadata_persistence(self, goal_db):
+        store = GoalStore(goal_db)
+        state = _make_state(
+            "g_meta",
+            metadata={
+                "origin_user_id": "user-123",
+                "origin_channel": "telegram",
+            },
+        )
+        await store.save_goal(state)
+
+        loaded = await store.load_goal("g_meta")
+        assert loaded is not None
+        assert loaded.metadata["origin_user_id"] == "user-123"
+        assert loaded.metadata["origin_channel"] == "telegram"
+
+    @pytest.mark.asyncio
+    async def test_metadata_defaults_to_empty(self, goal_db):
+        store = GoalStore(goal_db)
+        state = _make_state("g_no_meta")
+        await store.save_goal(state)
+
+        loaded = await store.load_goal("g_no_meta")
+        assert loaded is not None
+        assert loaded.metadata == {}
+
+    @pytest.mark.asyncio
     async def test_update_status(self, goal_db):
         store = GoalStore(goal_db)
         state = _make_state("g1", status="executing")

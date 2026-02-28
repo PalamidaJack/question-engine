@@ -190,7 +190,10 @@ async def _init_channels() -> None:
     email_pass = os.environ.get("EMAIL_PASSWORD", "")
     if email_host and email_user and email_pass:
         adapter = EmailAdapter(
-            imap_host=email_host, username=email_user, password=email_pass
+            imap_host=email_host,
+            username=email_user,
+            password=email_pass,
+            message_callback=_publish_channel_message,
         )
         try:
             await adapter.start()
@@ -705,15 +708,23 @@ async def inbound_webhook(request: Request):
     if result is None:
         return JSONResponse({"error": "Invalid signature or rejected"}, status_code=403)
 
-    # Publish the received message onto the bus
+    # Route based on command field in the original payload
+    command = body.get("command", "goal")
+    topic_map = {
+        "ask": "queries.asked",
+        "status": "system.health.check",
+    }
+    topic = topic_map.get(command, "channel.message_received")
+
     get_bus().publish(
         Envelope(
-            topic="channel.message_received",
+            topic=topic,
             source_service_id="webhook",
             payload={
                 "channel": "webhook",
                 "user_id": result.get("user_id", ""),
                 "text": result.get("sanitized_text", ""),
+                "command": command,
             },
         )
     )

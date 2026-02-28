@@ -27,13 +27,13 @@ Multi-agent orchestration system with a bus-driven architecture. Services commun
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ --timeout=60 -q    # 992 tests, all passing
+.venv/bin/pytest tests/ --timeout=60 -q    # 997 tests, all passing
 .venv/bin/ruff check src/ tests/            # all clean
 ```
 
 ## Current State (2026-02-28)
 
-Everything is committed and pushed to `origin/main`. 992 tests pass, ruff clean.
+997 tests pass, ruff clean.
 
 ### Recently Completed
 - Multi-agent orchestration (planner, dispatcher, executor)
@@ -41,26 +41,18 @@ Everything is committed and pushed to `origin/main`. 992 tests pass, ruff clean.
 - Channel adapters (Telegram, Slack, Email, Webhook)
 - Channel -> goal -> notification wiring in app.py
 - `message_callback` + `_forward_message()` on ChannelAdapter base class
-- Telegram/Slack adapters forward messages with command classification (goal/ask/status)
+- Telegram/Slack/Email adapters forward messages with command classification (goal/ask/status)
 - Per-user notification routing via `GoalState.metadata["origin_user_id"]`
 - Command routing: ask -> `queries.asked`, status -> `system.health.check`, default -> `channel.message_received`
 - `_on_query_asked` handler (calls `answer_question()`, notifies user)
 - `_on_health_check` handler (builds status summary, notifies user)
 - 10 channel wiring unit tests in `tests/unit/test_channel_wiring.py`
-
-### Remaining Work
-
-1. **Webhook command routing** — `/api/webhooks/inbound` always publishes to `channel.message_received`. Should respect a `command` field in the payload to route `ask`/`status` commands properly.
-
-2. **Email adapter callback** — `EmailAdapter` needs `message_callback` parameter like Telegram/Slack adapters got.
-
-3. **Integration test for command routing** — Need a live-server test that sends a webhook with `command: "ask"` and verifies the answer notification.
-
-4. **GoalStore metadata round-trip** — Verify `GoalState.metadata` persists through SQLite serialization in `GoalStore`. Could be a silent bug.
-
-5. **Planner genome warning** — Startup logs: `WARNING: Skipping genome planner.toml: PlannerService does not extend BaseService`. The planner genome isn't loading through the supervisor.
-
-Items 1-2 are quick fixes. Item 4 may be a silent bug worth checking first.
+- Webhook `/api/webhooks/inbound` command routing (respects `command` field in payload)
+- Email adapter `message_callback` + `_classify_command()` for ask/status/goal routing
+- GoalStore metadata round-trip fix (was a silent bug — metadata column added, saved, and loaded)
+- Removed vestigial `genomes/planner.toml` (PlannerService is directly instantiated in app.py, not via supervisor)
+- 3 integration tests for webhook routing in `tests/integration/test_webhook_routing.py`
+- 2 metadata persistence unit tests in `tests/unit/test_goals.py`
 
 ## Important Patterns
 

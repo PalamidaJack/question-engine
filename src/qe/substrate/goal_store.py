@@ -42,6 +42,13 @@ class GoalStore:
                 await db.commit()
                 log.info("goal_store: added PM columns to goals table")
 
+            if "metadata" not in columns:
+                await db.execute(
+                    "ALTER TABLE goals ADD COLUMN metadata JSON DEFAULT '{}'"
+                )
+                await db.commit()
+                log.info("goal_store: added metadata column to goals table")
+
             # Create projects table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS projects (
@@ -76,8 +83,8 @@ class GoalStore:
                 INSERT INTO goals
                     (goal_id, description, status, decomposition,
                      subtask_states, subtask_results, created_at, completed_at,
-                     project_id, started_at, due_at, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     project_id, started_at, due_at, tags, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(goal_id) DO UPDATE SET
                     status = excluded.status,
                     decomposition = excluded.decomposition,
@@ -87,7 +94,8 @@ class GoalStore:
                     project_id = excluded.project_id,
                     started_at = excluded.started_at,
                     due_at = excluded.due_at,
-                    tags = excluded.tags
+                    tags = excluded.tags,
+                    metadata = excluded.metadata
                 """,
                 (
                     state.goal_id,
@@ -114,6 +122,7 @@ class GoalStore:
                         else None
                     ),
                     json.dumps(state.tags),
+                    json.dumps(state.metadata),
                 ),
             )
             await db.commit()
@@ -345,6 +354,7 @@ class GoalStore:
             datetime.fromisoformat(row[10]) if len(row) > 10 and row[10] else None
         )
         tags = json.loads(row[11]) if len(row) > 11 and row[11] else []
+        metadata = json.loads(row[12]) if len(row) > 12 and row[12] else {}
 
         return GoalState(
             goal_id=row[0],
@@ -361,6 +371,7 @@ class GoalStore:
             started_at=started_at,
             due_at=due_at,
             tags=tags,
+            metadata=metadata,
         )
 
     @staticmethod
