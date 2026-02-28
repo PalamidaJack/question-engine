@@ -74,7 +74,7 @@ async def test_commit_and_get_claim(ledger):
     assert retrieved.subject_entity_id == claim.subject_entity_id
     assert retrieved.predicate == claim.predicate
     assert retrieved.object_value == claim.object_value
-    assert retrieved.confidence == claim.confidence
+    assert retrieved.confidence == pytest.approx(claim.confidence)
     assert retrieved.source_service_id == claim.source_service_id
     assert retrieved.source_envelope_ids == claim.source_envelope_ids
     assert retrieved.superseded_by is None

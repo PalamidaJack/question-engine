@@ -4,6 +4,7 @@ Requires a real LLM API key. Skip in CI with: pytest -m "not slow"
 """
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,50 @@ from qe.services.validator.service import ClaimValidatorService
 from qe.substrate import Substrate
 
 
+def _has_any_llm_key() -> bool:
+    """Check if any LLM API key is available (including from .env)."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    return bool(
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("KILOCODE_API_KEY")
+    )
+
+
+_has_llm_key = _has_any_llm_key()
+
+
+@pytest.fixture(autouse=False)
+def _kilo_code_env():
+    """If only KILOCODE_API_KEY is set, temporarily configure litellm env vars."""
+    if os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"):
+        yield
+        return
+
+    kilo_key = os.environ.get("KILOCODE_API_KEY", "")
+    if not kilo_key:
+        yield
+        return
+
+    kilo_base = os.environ.get(
+        "KILOCODE_API_BASE", "https://kilo.ai/api/openrouter"
+    )
+    os.environ["OPENAI_API_KEY"] = kilo_key
+    os.environ["OPENAI_API_BASE"] = kilo_base
+    yield
+    # Clean up to avoid polluting other tests
+    if os.environ.get("OPENAI_API_KEY") == kilo_key:
+        del os.environ["OPENAI_API_KEY"]
+    if os.environ.get("OPENAI_API_BASE") == kilo_base:
+        del os.environ["OPENAI_API_BASE"]
+
+
 @pytest.mark.slow
+@pytest.mark.skipif(not _has_llm_key, reason="No LLM API key configured")
+@pytest.mark.usefixtures("_kilo_code_env")
 @pytest.mark.asyncio
 async def test_full_pipeline_observation_to_answer(tmp_path: Path):
     """Full pipeline: observation -> researcher -> validator -> commit -> query."""
