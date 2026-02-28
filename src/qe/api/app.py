@@ -46,7 +46,10 @@ from qe.services.doctor import DoctorService
 from qe.services.executor import ExecutorService
 from qe.services.planner import PlannerService
 from qe.services.query import answer_question
+from qe.services.recovery import RecoveryOrchestrator
+from qe.services.verification import VerificationGate, VerificationService
 from qe.substrate import Substrate
+from qe.substrate.failure_kb import FailureKnowledgeBase
 from qe.substrate.goal_store import GoalStore
 from qe.substrate.memory_store import MemoryStore
 
@@ -67,6 +70,7 @@ _dispatcher: Dispatcher | None = None
 _executor: ExecutorService | None = None
 _goal_store: GoalStore | None = None
 _doctor: DoctorService | None = None
+_verification_gate: VerificationGate | None = None
 _memory_store: MemoryStore | None = None
 _notification_router = None
 _active_adapters: list = []
@@ -448,7 +452,7 @@ def _bus_to_ws_bridge() -> None:
 async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
     global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
-    global _planner, _dispatcher, _executor, _goal_store, _doctor
+    global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
     global _memory_store, _extra_routes_registered
 
     configure_from_config(get_settings())
@@ -521,16 +525,6 @@ async def lifespan(app: FastAPI):
             )
             _extra_routes_registered = True
 
-        # Wire dispatcher to receive subtask completion/failure events
-        async def _on_task_result(envelope: Envelope) -> None:
-            from qe.models.goal import SubtaskResult as _SR
-
-            result = _SR.model_validate(envelope.payload)
-            await _dispatcher.handle_subtask_completed(result.goal_id, result)
-
-        bus.subscribe("tasks.completed", _on_task_result)
-        bus.subscribe("tasks.failed", _on_task_result)
-
         # Start the executor service that processes dispatched tasks
         _executor = ExecutorService(
             bus=bus,
@@ -540,6 +534,26 @@ async def lifespan(app: FastAPI):
             agent_id="executor_default",
         )
         await _executor.start()
+
+        # Phase 4: Wire verification gate between executor and dispatcher
+        _db_path = _substrate.belief_ledger._db_path
+        _failure_kb = FailureKnowledgeBase(_db_path)
+        _verification_svc = VerificationService(substrate=_substrate)
+        _recovery = RecoveryOrchestrator(failure_kb=_failure_kb, bus=bus)
+        _verification_gate = VerificationGate(
+            bus, _verification_svc, _recovery, _failure_kb
+        )
+        await _verification_gate.start()
+
+        # Dispatcher receives verified/recovered results instead of raw results
+        async def _on_verified_result(envelope: Envelope) -> None:
+            from qe.models.goal import SubtaskResult as _SR
+
+            result = _SR.model_validate(envelope.payload)
+            await _dispatcher.handle_subtask_completed(result.goal_id, result)
+
+        bus.subscribe("tasks.verified", _on_verified_result)
+        bus.subscribe("tasks.recovered", _on_verified_result)
 
         # Register the default executor as an agent in the pool
         from qe.runtime.agent_pool import AgentRecord
@@ -596,6 +610,8 @@ async def lifespan(app: FastAPI):
             await adapter.stop()
         except Exception:
             log.exception("channel.stop_failed adapter=%s", adapter.channel_name)
+    if _verification_gate:
+        await _verification_gate.stop()
     if _executor:
         await _executor.stop()
     if _doctor:

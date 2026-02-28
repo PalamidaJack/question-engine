@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from enum import StrEnum
 from typing import Any
 
+from qe.models.envelope import Envelope
 from qe.substrate.failure_kb import FailureKnowledgeBase
 
 log = logging.getLogger(__name__)
@@ -143,3 +145,89 @@ class RecoveryOrchestrator:
                 else None
             ),
         }
+
+    # ── Recovery Execution ────────────────────────────────────────────
+
+    async def execute_strategy(
+        self,
+        strategy_info: dict[str, Any],
+        original_dispatch_payload: dict[str, Any],
+    ) -> Envelope | None:
+        """Execute a recovery strategy and return an Envelope to publish.
+
+        Returns a ``tasks.dispatched`` envelope for retries/escalations,
+        an ``hil.approval_required`` envelope for HIL escalation,
+        or ``None`` if no action can be taken.
+        """
+        strategy = strategy_info["strategy"]
+
+        if strategy == "retry_with_backoff":
+            retry = strategy_info.get("retry_count", 0)
+            delay = min(2 ** retry, 30)
+            await asyncio.sleep(delay)
+            return self._build_redispatch(original_dispatch_payload)
+
+        if strategy == "retry_with_simplified_prompt":
+            new_desc = self._simplify_description(
+                original_dispatch_payload.get("description", "")
+            )
+            return self._build_redispatch(
+                original_dispatch_payload, description=new_desc
+            )
+
+        if strategy.startswith("escalate_to_") and strategy != "escalate_to_hil":
+            new_tier = strategy.removeprefix("escalate_to_")
+            return self._build_redispatch(
+                original_dispatch_payload, model_tier=new_tier
+            )
+
+        if strategy in ("escalate_to_hil", "replan_subtask"):
+            return self._build_hil_envelope(original_dispatch_payload)
+
+        return None
+
+    def _build_redispatch(
+        self,
+        payload: dict[str, Any],
+        **overrides: Any,
+    ) -> Envelope:
+        """Create a new ``tasks.dispatched`` envelope preserving dispatch context."""
+        new_payload = {
+            "goal_id": payload.get("goal_id"),
+            "subtask_id": payload.get("subtask_id"),
+            "task_type": payload.get("task_type"),
+            "description": payload.get("description"),
+            "contract": payload.get("contract"),
+            "model_tier": payload.get("model_tier", "balanced"),
+            "dependency_context": payload.get("dependency_context"),
+            "assigned_agent_id": payload.get("assigned_agent_id"),
+        }
+        new_payload.update(overrides)
+
+        return Envelope(
+            topic="tasks.dispatched",
+            source_service_id="recovery",
+            correlation_id=payload.get("goal_id"),
+            payload=new_payload,
+        )
+
+    def _build_hil_envelope(self, payload: dict[str, Any]) -> Envelope:
+        """Create an ``hil.approval_required`` envelope with context."""
+        return Envelope(
+            topic="hil.approval_required",
+            source_service_id="recovery",
+            correlation_id=payload.get("goal_id"),
+            payload={
+                "goal_id": payload.get("goal_id"),
+                "subtask_id": payload.get("subtask_id"),
+                "task_type": payload.get("task_type"),
+                "description": payload.get("description"),
+                "reason": "Recovery exhausted — human intervention required",
+            },
+        )
+
+    @staticmethod
+    def _simplify_description(desc: str) -> str:
+        """Truncate and prepend 'Simplified: ' for retry-with-simplified-prompt."""
+        truncated = desc[:500] if len(desc) > 500 else desc
+        return f"Simplified: {truncated}"
