@@ -33,14 +33,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1599 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1647 unit/integration tests, all passing
 .venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1599 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~1647 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -153,6 +153,14 @@ All built, tested (49 tests across 2 test files), lint clean. LLM-powered auto-g
 - `src/qe/api/app.py` — PromptMutator wired in lifespan (start/stop), 2 new endpoints: `GET /api/prompts/mutator/status`, `GET /api/prompts/slots/{slot_key}`
 - Tests: `tests/unit/test_prompt_mutator.py` (37 tests: strategies, models, format key extraction/validation, init/lifecycle, rollback/promote/feature flag/max variants/max mutations, LLM mutation with mock instructor, bus events, full integration cycle), `tests/unit/test_prompt_mutator_wiring.py` (12 tests: bus topics, schemas, registry extensions, promote_variant)
 
+### Knowledge Loop — COMPLETE
+All built, tested (48 tests across 2 test files), lint clean. The missing middle loop that consolidates short-term episodic findings into long-term semantic beliefs:
+- `src/qe/runtime/knowledge_loop.py` — `KnowledgeLoop`: background consolidation service (minutes-hours timescale) with four-phase cycle: (1) Episode Scan — recalls recent episodes, groups by type (synthesis/claim_committed), (2) Pattern Detection & Belief Promotion — LLM-extracts structured claims from episodic clusters via instructor, promotes high-confidence patterns to BayesianBeliefStore, (3) Hypothesis Review — checks active hypotheses for auto-confirm (≥0.95) or auto-falsify (≤0.05), (4) Procedural Retirement — flags templates/sequences with success_rate < threshold and ≥10 observations. Follows StrategyEvolver lifecycle pattern (start/stop/status). `ConsolidationResult` + `ExtractedClaim` Pydantic models. Gated by `knowledge_consolidation` feature flag (disabled by default)
+- `src/qe/bus/protocol.py` — 3 new topics (144 total): `knowledge.consolidation_completed`, `knowledge.belief_promoted`, `knowledge.hypothesis_updated`
+- `src/qe/bus/schemas.py` — 3 new payload schemas (40 total): `KnowledgeConsolidationCompletedPayload`, `KnowledgeBeliefPromotedPayload`, `KnowledgeHypothesisUpdatedPayload`
+- `src/qe/api/app.py` — KnowledgeLoop wired in lifespan (after strategy evolver), `knowledge_consolidation` feature flag, `GET /api/knowledge/status` endpoint, shutdown cleanup
+- Tests: `tests/unit/test_knowledge_loop.py` (36 tests: models, init, lifecycle, feature flag gating, episode scan/grouping, pattern detection with mock LLM, belief promotion, hypothesis review, procedural retirement, bus events, full integration cycle), `tests/unit/test_knowledge_loop_wiring.py` (12 tests: bus topics, schemas, TOPIC_SCHEMAS registration, payload validation, schema defaults)
+
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
 - Multi-agent orchestration (planner, dispatcher, executor)
@@ -173,3 +181,4 @@ All built, tested (49 tests across 2 test files), lint clean. LLM-powered auto-g
 - Gemini models (via Kilo Code/OpenRouter) fail with instructor tool calling on nested `list[PydanticModel]` schemas — use Claude models for real LLM integration tests
 - Real LLM integration tests use `@pytest.mark.slow` + `skipif(not KILOCODE_API_KEY)` — see `tests/integration/test_real_llm_inquiry.py`
 - PromptMutator tests mock LLM via `patch("qe.optimization.prompt_mutator.instructor")` + mock client with `AsyncMock` for `chat.completions.create` returning `MutatedPrompt`; feature flag gating via `patch("qe.optimization.prompt_mutator.get_flag_store")`
+- KnowledgeLoop tests mock LLM via `patch("qe.runtime.knowledge_loop.instructor")` + mock client; feature flag gating via `patch("qe.runtime.knowledge_loop.get_flag_store")`; `Claim` model requires `source_envelope_ids=[]` when constructing programmatically
