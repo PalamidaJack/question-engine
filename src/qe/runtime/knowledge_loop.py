@@ -136,6 +136,15 @@ class KnowledgeLoop:
             ),
         }
 
+    async def trigger_consolidation(self) -> None:
+        """Run consolidation immediately (event-driven, called by InquiryBridge)."""
+        if not self._running:
+            return
+        try:
+            await self._consolidate()
+        except Exception:
+            log.exception("knowledge_loop.triggered_consolidation_error")
+
     # ── Main loop ─────────────────────────────────────────────────────
 
     async def _consolidation_loop(self) -> None:

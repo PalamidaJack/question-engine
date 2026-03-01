@@ -393,6 +393,18 @@ class KnowledgeHypothesisUpdatedPayload(BaseModel):
     probability: float = 0.5
 
 
+# ── Inquiry Bridge payloads ────────────────────────────────────────────────
+
+
+class BridgeStrategyOutcomePayload(BaseModel):
+    """Payload for bridge.strategy_outcome_recorded topic."""
+
+    strategy_name: str
+    goal_id: str = ""
+    success: bool = False
+    insights_count: int = 0
+
+
 # ── Schema Registry ────────────────────────────────────────────────────────
 
 # Maps topic -> payload model for validation
@@ -437,6 +449,7 @@ TOPIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "knowledge.consolidation_completed": KnowledgeConsolidationCompletedPayload,
     "knowledge.belief_promoted": KnowledgeBeliefPromotedPayload,
     "knowledge.hypothesis_updated": KnowledgeHypothesisUpdatedPayload,
+    "bridge.strategy_outcome_recorded": BridgeStrategyOutcomePayload,
 }
 
 

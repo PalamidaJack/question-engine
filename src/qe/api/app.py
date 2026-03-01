@@ -99,6 +99,7 @@ _strategy_evolver = None
 _prompt_registry: PromptRegistry | None = None
 _prompt_mutator = None
 _knowledge_loop = None
+_inquiry_bridge = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
@@ -245,10 +246,6 @@ async def _init_channels() -> None:
 
     async def _on_channel_message(envelope: Envelope) -> None:
         """Forward inbound channel messages to the planner as goals."""
-        if not _planner or not _dispatcher:
-            log.warning("channel.message_ignored reason=engine_not_ready")
-            return
-
         text = envelope.payload.get("text", "").strip()
         if not text:
             return
@@ -262,6 +259,28 @@ async def _init_channels() -> None:
             user_id,
             text[:80],
         )
+
+        # v2 Inquiry path
+        if get_flag_store().is_enabled("inquiry_mode") and _inquiry_engine is not None:
+            try:
+                goal_id = f"goal_{uuid.uuid4().hex[:12]}"
+                result = await _inquiry_engine.run_inquiry(
+                    goal_id=goal_id, goal_description=text,
+                )
+                # Notify via channel if router available
+                if _notification_router is not None:
+                    await _notification_router.send(
+                        channel=channel, user_id=user_id,
+                        message=f"Inquiry complete: {result.findings_summary[:500]}",
+                    )
+                return
+            except Exception:
+                log.exception("channel.inquiry_failed channel=%s", channel)
+
+        # v1 Pipeline fallback
+        if not _planner or not _dispatcher:
+            log.warning("channel.message_ignored reason=engine_not_ready")
+            return
 
         try:
             state = await _planner.decompose(text)
@@ -481,6 +500,7 @@ async def lifespan(app: FastAPI):
     global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
     global _memory_store, _extra_routes_registered, _inquiry_engine
     global _cognitive_pool, _strategy_evolver, _prompt_mutator, _knowledge_loop
+    global _inquiry_bridge
 
     configure_from_config(get_settings())
 
@@ -682,6 +702,18 @@ async def lifespan(app: FastAPI):
             enabled=False,
             description="Enable background knowledge consolidation loop",
         )
+        readiness.mark_ready("knowledge_loop_ready")
+
+        # Inquiry Bridge — cross-loop glue
+        from qe.runtime.inquiry_bridge import InquiryBridge
+
+        _inquiry_bridge = InquiryBridge(
+            bus=bus,
+            episodic_memory=_episodic_memory,
+            strategy_evolver=_strategy_evolver,
+            knowledge_loop=_knowledge_loop,
+        )
+        _inquiry_bridge.start()
 
         _chat_service = ChatService(
             substrate=_substrate,
@@ -812,6 +844,14 @@ async def lifespan(app: FastAPI):
             log.info("engram_cache.cleared count=%d", cleared)
         except Exception:
             log.debug("shutdown.engram_cache_clear_failed")
+
+        # Shutdown — Inquiry Bridge
+        try:
+            if _inquiry_bridge is not None:
+                await _inquiry_bridge.stop()
+        except Exception:
+            log.debug("shutdown.inquiry_bridge_stop_failed")
+        _inquiry_bridge = None
 
         # Shutdown — Knowledge Loop
         try:
@@ -1268,6 +1308,14 @@ async def knowledge_loop_status():
     if _knowledge_loop is None:
         return {"running": False}
     return _knowledge_loop.status()
+
+
+@app.get("/api/bridge/status")
+async def inquiry_bridge_status():
+    """Return inquiry bridge status."""
+    if _inquiry_bridge is None:
+        return {"running": False}
+    return _inquiry_bridge.status()
 
 
 @app.get("/api/prompts/mutator/status")

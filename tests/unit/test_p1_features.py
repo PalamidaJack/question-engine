@@ -612,6 +612,7 @@ class TestEventVersioning:
             "prompt.mutation_cycle_completed", "prompt.variant_promoted",
             "knowledge.consolidation_completed", "knowledge.belief_promoted",
             "knowledge.hypothesis_updated",
+            "bridge.strategy_outcome_recorded",
         }
         assert set(TOPIC_SCHEMAS.keys()) == expected
 

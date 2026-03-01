@@ -385,7 +385,7 @@ class InquiryEngine:
         if self._episodic is not None:
             try:
                 episodes = await self._episodic.recall_for_goal(
-                    state.goal_id, state.goal_description, limit=10
+                    state.goal_id, top_k=10
                 )
                 context["episodes"] = episodes
             except Exception:

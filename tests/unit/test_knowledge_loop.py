@@ -193,6 +193,25 @@ class TestKnowledgeLoopLifecycle:
         await loop.stop()
         assert loop._running is False
 
+    @pytest.mark.asyncio
+    async def test_trigger_consolidation_runs_consolidate(self):
+        loop = _make_loop()
+        loop._running = True
+        mock_flag = MagicMock()
+        mock_flag.is_enabled.return_value = True
+
+        with patch("qe.runtime.knowledge_loop.get_flag_store", return_value=mock_flag):
+            await loop.trigger_consolidation()
+
+        loop._episodic.recall.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_trigger_consolidation_noop_when_stopped(self):
+        loop = _make_loop()
+        # _running is False by default
+        await loop.trigger_consolidation()
+        loop._episodic.recall.assert_not_called()
+
 
 # ── Feature Flag Gating ──────────────────────────────────────────────────
 

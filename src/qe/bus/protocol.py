@@ -143,6 +143,8 @@ TOPICS = {
     "knowledge.consolidation_completed",
     "knowledge.belief_promoted",
     "knowledge.hypothesis_updated",
+    # Inquiry Bridge
+    "bridge.strategy_outcome_recorded",
 }
 
 

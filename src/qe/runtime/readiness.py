@@ -27,6 +27,9 @@ class ReadinessState:
 
     # Inquiry engine tracking (not part of container readiness)
     inquiry_engine_ready: bool = False
+    cognitive_layer_ready: bool = False
+    strategy_loop_ready: bool = False
+    knowledge_loop_ready: bool = False
     last_inquiry_status: str | None = None
     last_inquiry_at: float | None = None
     last_inquiry_duration_s: float | None = None
@@ -88,6 +91,12 @@ class ReadinessState:
                 "last_status": self.last_inquiry_status,
                 "age_seconds": inquiry_age,
                 "duration_s": self.last_inquiry_duration_s,
+            },
+            "loops": {
+                "cognitive_layer_ready": self.cognitive_layer_ready,
+                "inquiry_engine_ready": self.inquiry_engine_ready,
+                "strategy_loop_ready": self.strategy_loop_ready,
+                "knowledge_loop_ready": self.knowledge_loop_ready,
             },
             "uptime_seconds": round(elapsed, 2),
             "startup_duration": (
