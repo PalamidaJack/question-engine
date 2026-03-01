@@ -93,6 +93,7 @@ _extra_routes_registered = False
 _inquiry_engine: InquiryEngine | None = None
 _cognitive_pool = None
 _strategy_evolver = None
+_last_inquiry_profile: dict[str, Any] = {}
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -727,48 +728,91 @@ async def lifespan(app: FastAPI):
     else:
         log.info("QE API server started (setup required — no API keys configured)")
 
-    yield
+    # Initialize EngramCache before yielding
+    from qe.runtime.engram_cache import get_engram_cache
 
-    # Shutdown — Phase 4 strategy loop
-    if _strategy_evolver is not None:
+    _engram_cache = get_engram_cache()
+    _cache_stats = _engram_cache.stats()
+    log.info(
+        "engram_cache.initialized exact=%d template=%d",
+        _cache_stats.get("exact_entries", 0),
+        _cache_stats.get("template_entries", 0),
+    )
+
+    try:
+        yield
+    finally:
+        # Shutdown — EngramCache cleanup
         try:
-            await _strategy_evolver.stop()
+            from qe.runtime.engram_cache import get_engram_cache as _get_cache
+
+            _cache = _get_cache()
+            cleared = _cache.clear()
+            log.info("engram_cache.cleared count=%d", cleared)
+        except Exception:
+            log.debug("shutdown.engram_cache_clear_failed")
+
+        # Shutdown — Phase 4 strategy loop
+        try:
+            if _strategy_evolver is not None:
+                await _strategy_evolver.stop()
         except Exception:
             log.debug("shutdown.strategy_evolver_stop_failed")
-    _cognitive_pool = None
-    _strategy_evolver = None
 
-    # Shutdown — clear Phase 3 refs
-    _inquiry_engine = None
+        _cognitive_pool = None
+        _strategy_evolver = None
 
-    # Shutdown — clear cognitive layer refs
-    BaseService._shared_episodic_memory = None
-    BaseService._shared_bayesian_belief = None
-    BaseService._shared_context_curator = None
-    BaseService._shared_metacognitor = None
-    BaseService._shared_epistemic_reasoner = None
-    BaseService._shared_dialectic_engine = None
-    BaseService._shared_persistence_engine = None
-    BaseService._shared_insight_crystallizer = None
+        # Shutdown — clear Phase 3 refs
+        _inquiry_engine = None
 
-    for adapter in _active_adapters:
+        # Shutdown — clear cognitive layer refs
         try:
-            await adapter.stop()
+            BaseService._shared_episodic_memory = None
+            BaseService._shared_bayesian_belief = None
+            BaseService._shared_context_curator = None
+            BaseService._shared_metacognitor = None
+            BaseService._shared_epistemic_reasoner = None
+            BaseService._shared_dialectic_engine = None
+            BaseService._shared_persistence_engine = None
+            BaseService._shared_insight_crystallizer = None
         except Exception:
-            log.exception("channel.stop_failed adapter=%s", adapter.channel_name)
-    if _verification_gate:
-        await _verification_gate.stop()
-    if _executor:
-        await _executor.stop()
-    if _doctor:
-        await _doctor.stop()
-    if _supervisor:
-        await _supervisor.stop()
-    if relay_task:
-        relay_task.cancel()
-    if _supervisor_task:
-        _supervisor_task.cancel()
-    log.info("QE API server stopped")
+            log.debug("shutdown.clear_shared_refs_failed")
+
+        for adapter in _active_adapters:
+            try:
+                await adapter.stop()
+            except Exception:
+                log.exception("channel.stop_failed adapter=%s", adapter.channel_name)
+
+        try:
+            if _verification_gate:
+                await _verification_gate.stop()
+        except Exception:
+            log.debug("shutdown.verification_gate_stop_failed")
+
+        try:
+            if _executor:
+                await _executor.stop()
+        except Exception:
+            log.debug("shutdown.executor_stop_failed")
+
+        try:
+            if _doctor:
+                await _doctor.stop()
+        except Exception:
+            log.debug("shutdown.doctor_stop_failed")
+
+        try:
+            if _supervisor:
+                await _supervisor.stop()
+        except Exception:
+            log.debug("shutdown.supervisor_stop_failed")
+
+        if relay_task:
+            relay_task.cancel()
+        if _supervisor_task:
+            _supervisor_task.cancel()
+        log.info("QE API server stopped")
 
 
 app = FastAPI(
@@ -1068,6 +1112,52 @@ async def list_audit(
 async def metrics_snapshot():
     """Return full metrics snapshot: counters, histograms, gauges, SLOs."""
     return get_metrics().snapshot()
+
+
+# ── Profiling ─────────────────────────────────────────────────────────────
+
+
+@app.get("/api/profiling/inquiry")
+async def profiling_inquiry():
+    """Return profiling data for inquiry runs and system resources."""
+    import resource
+    import sys
+
+    from qe.runtime.engram_cache import get_engram_cache as _get_cache
+
+    rusage = resource.getrusage(resource.RUSAGE_SELF)
+
+    # Engram cache stats
+    try:
+        cache_stats = _get_cache().stats()
+    except Exception:
+        cache_stats = {}
+
+    # Episodic memory hot store size
+    episodic_hot_size = 0
+    if BaseService._shared_episodic_memory is not None:
+        try:
+            episodic_hot_size = len(BaseService._shared_episodic_memory._hot_store)
+        except Exception:
+            pass
+
+    # Belief store status
+    belief_status = "unavailable"
+    if BaseService._shared_bayesian_belief is not None:
+        belief_status = "available"
+
+    return {
+        "phase_timings": _last_inquiry_profile,
+        "process": {
+            "rss_bytes": rusage.ru_maxrss,
+            "python_version": sys.version,
+        },
+        "engram_cache": cache_stats,
+        "components": {
+            "episodic_hot_store_size": episodic_hot_size,
+            "belief_store_status": belief_status,
+        },
+    }
 
 
 # ── Bus Stats ─────────────────────────────────────────────────────────────
@@ -1459,11 +1549,13 @@ async def submit_goal(body: dict[str, Any]):
 
     # v2 Inquiry path (single agent)
     if flag_store.is_enabled("inquiry_mode") and _inquiry_engine is not None:
+        global _last_inquiry_profile
         goal_id = f"goal_{uuid.uuid4().hex[:12]}"
         result = await _inquiry_engine.run_inquiry(
             goal_id=goal_id,
             goal_description=description,
         )
+        _last_inquiry_profile = result.phase_timings
         return {
             "goal_id": result.goal_id,
             "inquiry_id": result.inquiry_id,

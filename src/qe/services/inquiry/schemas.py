@@ -112,6 +112,7 @@ class InquiryState(BaseModel):
     findings_summary: str = ""
     overall_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     hypotheses_tested: int = 0
+    phase_timings: dict[str, list[float]] = Field(default_factory=dict)
 
 
 class InquiryResult(BaseModel):
@@ -129,4 +130,5 @@ class InquiryResult(BaseModel):
     hypotheses_tested: int = 0
     total_cost_usd: float = 0.0
     duration_seconds: float = 0.0
+    phase_timings: dict[str, dict[str, float]] = Field(default_factory=dict)
     question_tree: list[Question] = Field(default_factory=list)

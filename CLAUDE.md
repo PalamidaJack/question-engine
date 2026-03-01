@@ -31,13 +31,13 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ --timeout=60 -q    # ~1424 tests, all passing
+.venv/bin/pytest tests/ --timeout=60 -q    # ~1481 tests, all passing
 .venv/bin/ruff check src/ tests/            # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1448 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes), ruff clean.
+~1481 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5), ruff clean.
 
 ### v2 Redesign — Architecture Plan
 
@@ -100,8 +100,16 @@ All built, tested (88 tests across 6 test files), lint clean:
 - `src/qe/api/app.py` — CognitiveAgentPool + StrategyEvolver + ElasticScaler wired in lifespan with engine_factory closure; `multi_agent_mode` feature flag for parallel inquiry; cleanup on shutdown
 - Tests: `tests/unit/test_thompson_router.py`, `test_strategy_models.py`, `test_cognitive_agent_pool.py`, `test_strategy_evolver.py`, `test_elastic_scaler.py`, `test_phase4_wiring.py`
 
-### Next Steps (in order)
-1. **Phase 5**: Integration + Polish — E2E investment opportunity walkthrough, Mac M1 profiling
+### v2 Phase 5: Integration + Polish — COMPLETE
+All built, tested (33 tests across 3 new files + 9 new in existing), lint clean:
+- `src/qe/services/inquiry/engine.py` — ProceduralMemory wired into Orient (template hints in findings_summary); PersistenceEngine wired into Reflect (root cause + reframe + lessons on drift); phase timing instrumentation (7 phases timed with start/stop monotonic, stats in result)
+- `src/qe/services/inquiry/schemas.py` — `phase_timings: dict[str, list[float]]` on InquiryState; `phase_timings: dict[str, dict[str, float]]` on InquiryResult (count/total_s/avg_s/max_s per phase)
+- `src/qe/api/app.py` — Lifespan hardened with try/finally (all cleanup runs on crash); EngramCache lifecycle (init before yield, clear in finally); each shutdown step wrapped in individual try/except; `GET /api/profiling/inquiry` endpoint (phase_timings, RSS, Python version, cache stats, component counts); `_last_inquiry_profile` updated after each inquiry run
+- Tests: `tests/unit/test_inquiry_engine.py` (+9 new: procedural in orient, persistence in reflect, phase timings), `tests/unit/test_phase5_wiring.py` (4 tests: lifespan + profiling), `tests/unit/test_feature_flag_routing.py` (8 tests: flag defaults, toggle, precedence, rollout), `tests/integration/test_investment_e2e.py` (12 tests: full $50M lithium-ion investment walkthrough with procedural memory, persistence on drift, question persistence, bus event ordering, phase timings, budget termination)
+- `tests/integration/conftest.py` — cognitive_stack fixture extended with real ProceduralMemory (pre-seeded finance templates) and real QuestionStore (SQLite); PersistenceEngine mock returns proper RootCauseAnalysis + ReframingResult objects
+
+### Next Steps
+- v2 complete — all 5 phases implemented. Ready for M1 benchmarking and production deployment.
 
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager

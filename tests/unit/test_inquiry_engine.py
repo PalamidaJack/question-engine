@@ -9,6 +9,8 @@ import pytest
 from qe.models.cognition import (
     ApproachAssessment,
     DialecticReport,
+    ReframingResult,
+    RootCauseAnalysis,
     SurpriseDetection,
     UncertaintyAssessment,
 )
@@ -217,6 +219,32 @@ class TestPhaseOrient:
 
         mc.suggest_next_approach.assert_called()
 
+    @pytest.mark.asyncio
+    async def test_orient_consults_procedural_memory(self):
+        from qe.runtime.procedural_memory import QuestionTemplate
+
+        pm = MagicMock()
+        pm.get_best_templates = AsyncMock(return_value=[
+            QuestionTemplate(
+                pattern="What are the costs?",
+                domain="general",
+                success_count=5,
+                failure_count=1,
+            ),
+        ])
+
+        engine = _make_engine(procedural_memory=pm)
+        await engine.run_inquiry("g_1", "Test")
+
+        pm.get_best_templates.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_orient_continues_when_procedural_unavailable(self):
+        engine = _make_engine(procedural_memory=None)
+        result = await engine.run_inquiry("g_1", "Test")
+
+        assert result.status == "completed"
+
 
 class TestPhaseQuestion:
     @pytest.mark.asyncio
@@ -341,6 +369,139 @@ class TestPhaseReflect:
         await engine.run_inquiry("g_1", "Test")
 
         cc.detect_drift.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_reflect_calls_persistence_on_drift(self):
+        cc = MagicMock()
+        drift_report = MagicMock()
+        drift_report.similarity = 0.3  # Low similarity = drift
+        cc.detect_drift = MagicMock(return_value=drift_report)
+
+        pe = MagicMock()
+        pe.analyze_root_cause = AsyncMock(
+            return_value=RootCauseAnalysis(
+                failure_summary="Drift detected",
+                root_cause="Wrong approach",
+            )
+        )
+        pe.reframe = AsyncMock(
+            return_value=ReframingResult(
+                original_framing="Test",
+                reframing_strategy="inversion",
+                reframed_question="What if we tried the opposite?",
+                reasoning="Inverting the problem reveals new angles",
+            )
+        )
+        pe.get_relevant_lessons = MagicMock(return_value=[])
+
+        engine = _make_engine(context_curator=cc, persistence_engine=pe)
+        await engine.run_inquiry("g_1", "Test")
+
+        pe.analyze_root_cause.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_reflect_adds_reframed_question(self):
+        cc = MagicMock()
+        drift_report = MagicMock()
+        drift_report.similarity = 0.3
+        cc.detect_drift = MagicMock(return_value=drift_report)
+
+        pe = MagicMock()
+        pe.analyze_root_cause = AsyncMock(
+            return_value=RootCauseAnalysis(
+                failure_summary="Drift",
+                root_cause="Stuck",
+            )
+        )
+        pe.reframe = AsyncMock(
+            return_value=ReframingResult(
+                original_framing="Test",
+                reframing_strategy="inversion",
+                reframed_question="What if we tried the opposite?",
+                reasoning="Inverting reveals new angles",
+            )
+        )
+        pe.get_relevant_lessons = MagicMock(return_value=[])
+
+        engine = _make_engine(context_curator=cc, persistence_engine=pe)
+        result = await engine.run_inquiry("g_1", "Test")
+
+        # The reframed question should have been added
+        reframed = [q for q in result.question_tree if q.text == "What if we tried the opposite?"]
+        assert len(reframed) >= 1
+
+    @pytest.mark.asyncio
+    async def test_reflect_skips_persistence_when_on_track(self):
+        cc = MagicMock()
+        drift_report = MagicMock()
+        drift_report.similarity = 0.8  # High similarity = on track
+        cc.detect_drift = MagicMock(return_value=drift_report)
+
+        pe = MagicMock()
+        pe.analyze_root_cause = AsyncMock()
+        pe.reframe = AsyncMock()
+        pe.get_relevant_lessons = MagicMock(return_value=[])
+
+        engine = _make_engine(context_curator=cc, persistence_engine=pe)
+        await engine.run_inquiry("g_1", "Test")
+
+        pe.analyze_root_cause.assert_not_called()
+
+
+# ── Phase timings tests ────────────────────────────────────────────────────
+
+
+class TestPhaseTimings:
+    @pytest.mark.asyncio
+    async def test_phase_timings_recorded(self):
+        engine = _make_engine()
+        result = await engine.run_inquiry("g_1", "Test")
+        assert result.phase_timings
+
+    @pytest.mark.asyncio
+    async def test_all_seven_phases_timed(self):
+        engine = _make_engine()
+        result = await engine.run_inquiry("g_1", "Test")
+        expected = {"observe", "orient", "question", "prioritize",
+                    "investigate", "synthesize", "reflect"}
+        assert expected == set(result.phase_timings.keys())
+
+    @pytest.mark.asyncio
+    async def test_phase_timing_values_positive(self):
+        engine = _make_engine()
+        result = await engine.run_inquiry("g_1", "Test")
+        for phase, stats in result.phase_timings.items():
+            assert stats["total_s"] > 0, f"{phase} total_s should be > 0"
+            assert stats["avg_s"] > 0, f"{phase} avg_s should be > 0"
+            assert stats["max_s"] > 0, f"{phase} max_s should be > 0"
+            assert stats["count"] >= 1, f"{phase} count should be >= 1"
+
+    @pytest.mark.asyncio
+    async def test_multi_iteration_accumulates_timings(self):
+        # Generate 3 questions per iteration so there are always pending ones
+        qg = MagicMock()
+        qg.generate = AsyncMock(return_value=[
+            Question(text="Q1"), Question(text="Q2"), Question(text="Q3"),
+        ])
+        qg.prioritize = AsyncMock(side_effect=lambda g, qs: qs)
+
+        # Low confidence to avoid early termination
+        de = MagicMock()
+        de.full_dialectic = AsyncMock(return_value=DialecticReport(
+            original_conclusion="test", revised_confidence=0.1,
+        ))
+
+        engine = _make_engine(
+            question_generator=qg,
+            dialectic_engine=de,
+            config=InquiryConfig(max_iterations=2, confidence_threshold=0.99),
+        )
+        result = await engine.run_inquiry("g_1", "Test")
+
+        assert result.iterations_completed == 2
+        for phase in ("observe", "orient", "question", "prioritize",
+                      "investigate", "synthesize", "reflect"):
+            assert result.phase_timings[phase]["count"] == 2.0
 
 
 # ── Finalize tests ──────────────────────────────────────────────────────────

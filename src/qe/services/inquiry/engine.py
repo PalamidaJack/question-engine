@@ -112,7 +112,9 @@ class InquiryEngine:
 
                 # 1. OBSERVE
                 state.current_phase = "observe"
+                _t0 = time.monotonic()
                 context = await self._phase_observe(state)
+                self._record_phase_timing(state, "observe", _t0)
                 self._publish("inquiry.phase_completed", goal_id, {
                     "inquiry_id": state.inquiry_id,
                     "goal_id": goal_id,
@@ -122,7 +124,9 @@ class InquiryEngine:
 
                 # 2. ORIENT
                 state.current_phase = "orient"
+                _t0 = time.monotonic()
                 await self._phase_orient(state, context)
+                self._record_phase_timing(state, "orient", _t0)
                 self._publish("inquiry.phase_completed", goal_id, {
                     "inquiry_id": state.inquiry_id,
                     "goal_id": goal_id,
@@ -132,9 +136,11 @@ class InquiryEngine:
 
                 # 3. QUESTION
                 state.current_phase = "question"
+                _t0 = time.monotonic()
                 new_questions = await self._phase_question(state)
                 state.questions.extend(new_questions)
                 await self._persist_questions(state.inquiry_id, new_questions)
+                self._record_phase_timing(state, "question", _t0)
                 for q in new_questions:
                     self._publish("inquiry.question_generated", goal_id, {
                         "inquiry_id": state.inquiry_id,
@@ -154,7 +160,9 @@ class InquiryEngine:
                 if not pending:
                     termination_reason = "all_questions_answered"
                     break
+                _t0 = time.monotonic()
                 prioritized = await self._phase_prioritize(state, pending)
+                self._record_phase_timing(state, "prioritize", _t0)
                 self._publish("inquiry.phase_completed", goal_id, {
                     "inquiry_id": state.inquiry_id,
                     "goal_id": goal_id,
@@ -166,10 +174,12 @@ class InquiryEngine:
                 state.current_phase = "investigate"
                 top_question = prioritized[0]
                 top_question.status = "investigating"
+                _t0 = time.monotonic()
                 investigation = await self._phase_investigate(state, top_question)
                 state.investigations.append(investigation)
                 await self._record_procedural_outcome(top_question, investigation)
                 await self._persist_questions(state.inquiry_id, [top_question])
+                self._record_phase_timing(state, "investigate", _t0)
                 self._publish("inquiry.investigation_completed", goal_id, {
                     "inquiry_id": state.inquiry_id,
                     "question_id": top_question.question_id,
@@ -183,9 +193,11 @@ class InquiryEngine:
 
                 # 6. SYNTHESIZE
                 state.current_phase = "synthesize"
+                _t0 = time.monotonic()
                 insights = await self._phase_synthesize(
                     state, top_question, investigation
                 )
+                self._record_phase_timing(state, "synthesize", _t0)
                 all_insights.extend(insights)
                 for ins in insights:
                     self._publish("inquiry.insight_generated", goal_id, {
@@ -202,7 +214,9 @@ class InquiryEngine:
 
                 # 7. REFLECT
                 state.current_phase = "reflect"
+                _t0 = time.monotonic()
                 reflection = await self._phase_reflect(state, iteration)
+                self._record_phase_timing(state, "reflect", _t0)
                 state.reflections.append(reflection)
                 self._publish("inquiry.phase_completed", goal_id, {
                     "inquiry_id": state.inquiry_id,
@@ -280,6 +294,23 @@ class InquiryEngine:
         self, state: InquiryState, context: dict[str, Any]
     ) -> str:
         """Phase 2: Use metacognitor to suggest next approach."""
+        # Consult procedural memory for effective templates
+        if self._procedural is not None:
+            try:
+                templates = await self._procedural.get_best_templates(
+                    domain=state.config.domain, top_k=3
+                )
+                if templates:
+                    hints = "\n".join(
+                        f"- {t.pattern} (success_rate={t.success_rate:.0%})"
+                        for t in templates
+                    )
+                    state.findings_summary += (
+                        f"\n[Procedural hints]\n{hints}\n"
+                    )
+            except Exception:
+                log.debug("orient.procedural_memory_failed")
+
         if self._metacognitor is not None:
             try:
                 assessment = await self._metacognitor.suggest_next_approach(
@@ -555,6 +586,39 @@ class InquiryEngine:
         if not on_track and drift_score > 0:
             decision = "refocus"
             reasoning += f" Drift detected (similarity={drift_score:.2f})."
+
+            # Persistence Engine: root cause analysis
+            if self._persistence is not None:
+                try:
+                    root_cause = await self._persistence.analyze_root_cause(
+                        goal_id=state.goal_id,
+                        failure_summary=f"Drift detected at iteration {iteration}",
+                        context=state.findings_summary[:500],
+                    )
+                    reasoning += f" Root cause: {root_cause.root_cause}"
+                except Exception:
+                    log.debug("reflect.persistence_root_cause_failed")
+
+                try:
+                    reframed = await self._persistence.reframe(
+                        goal_id=state.goal_id,
+                        original_problem=state.goal_description,
+                        tried_approaches=state.findings_summary[:200],
+                        failure_reason=f"Drift score {drift_score:.2f}",
+                    )
+                    state.questions.append(
+                        Question(text=reframed.reframed_question)
+                    )
+                except Exception:
+                    log.debug("reflect.persistence_reframe_failed")
+
+                try:
+                    lessons = self._persistence.get_relevant_lessons(
+                        state.goal_description, top_k=2
+                    )
+                    reasoning += f" ({len(lessons)} relevant lessons found)"
+                except Exception:
+                    log.debug("reflect.persistence_lessons_failed")
         elif confidence >= state.config.confidence_threshold:
             decision = "terminate"
             reasoning += " Confidence threshold met."
@@ -586,6 +650,17 @@ class InquiryEngine:
 
         total_cost = sum(inv.cost_usd for inv in state.investigations)
 
+        # Compute per-phase timing stats
+        phase_timing_stats: dict[str, dict[str, float]] = {}
+        for phase_name, durations in state.phase_timings.items():
+            if durations:
+                phase_timing_stats[phase_name] = {
+                    "count": float(len(durations)),
+                    "total_s": sum(durations),
+                    "avg_s": sum(durations) / len(durations),
+                    "max_s": max(durations),
+                }
+
         result = InquiryResult(
             inquiry_id=state.inquiry_id,
             goal_id=state.goal_id,
@@ -602,6 +677,7 @@ class InquiryEngine:
             hypotheses_tested=state.hypotheses_tested,
             total_cost_usd=total_cost,
             duration_seconds=duration,
+            phase_timings=phase_timing_stats,
             question_tree=state.questions,
         )
 
@@ -619,6 +695,14 @@ class InquiryEngine:
     # -------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------
+
+    @staticmethod
+    def _record_phase_timing(
+        state: InquiryState, phase: str, start: float
+    ) -> None:
+        """Append a phase duration to state.phase_timings."""
+        elapsed = time.monotonic() - start
+        state.phase_timings.setdefault(phase, []).append(elapsed)
 
     async def _persist_questions(
         self, inquiry_id: str, questions: list[Question]

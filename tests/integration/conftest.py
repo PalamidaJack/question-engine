@@ -87,9 +87,29 @@ def _make_mock_dialectic_engine() -> MagicMock:
 
 
 def _make_mock_persistence_engine() -> MagicMock:
-    """PersistenceEngine mock (not directly called in inquiry loop)."""
+    """PersistenceEngine mock with root cause and reframe support."""
+    from qe.models.cognition import ReframingResult, RootCauseAnalysis
+
     pe = MagicMock()
-    pe.analyze_root_cause = AsyncMock(return_value=None)
+    pe.analyze_root_cause = AsyncMock(
+        return_value=RootCauseAnalysis(
+            failure_summary="Investigation drifted from goal",
+            root_cause="Insufficient focus on financial metrics",
+            lesson_learned="Always anchor analysis to ROI metrics",
+        )
+    )
+    pe.reframe = AsyncMock(
+        return_value=ReframingResult(
+            original_framing="Evaluate battery storage investment",
+            reframing_strategy="inversion",
+            reframed_question="What conditions would make battery storage a bad investment?",
+            reasoning="Inverting the question reveals hidden risks",
+            estimated_tractability=0.65,
+        )
+    )
+    pe.get_relevant_lessons = MagicMock(return_value=[
+        {"context": "energy investment", "lesson": "Focus on LCOE trends"},
+    ])
     return pe
 
 
@@ -213,6 +233,9 @@ async def cognitive_stack(
     tmp_path: Any,
 ) -> dict[str, Any]:
     """Full cognitive stack with mock LLM components and real memory stores."""
+    from qe.runtime.procedural_memory import ProceduralMemory
+    from qe.substrate.question_store import QuestionStore
+
     db_path = str(tmp_path / "phase5_test.db")
 
     episodic = EpisodicMemory(db_path=db_path)
@@ -220,6 +243,29 @@ async def cognitive_stack(
 
     belief_store = BayesianBeliefStore(db_path=db_path)
     context_curator = ContextCurator()
+
+    # Real ProceduralMemory (in-memory) pre-seeded with finance templates
+    procedural = ProceduralMemory(db_path=None)
+    await procedural.record_template_outcome(
+        template_id=None,
+        pattern="What are the unit economics of {technology}?",
+        question_type="factual",
+        success=True,
+        info_gain=0.8,
+        domain="finance",
+    )
+    await procedural.record_template_outcome(
+        template_id=None,
+        pattern="How does {technology} compare to alternatives on ROI?",
+        question_type="comparative",
+        success=True,
+        info_gain=0.7,
+        domain="finance",
+    )
+
+    # Real QuestionStore (SQLite)
+    question_store = QuestionStore(db_path=db_path)
+    await question_store.initialize()
 
     return {
         "episodic_memory": episodic,
@@ -232,6 +278,8 @@ async def cognitive_stack(
         "insight_crystallizer": _make_mock_crystallizer(),
         "question_generator": _make_mock_question_generator(),
         "hypothesis_manager": _make_mock_hypothesis_manager(),
+        "procedural_memory": procedural,
+        "question_store": question_store,
         "db_path": db_path,
     }
 
@@ -254,6 +302,8 @@ def inquiry_engine_factory(
             insight_crystallizer=cognitive_stack["insight_crystallizer"],
             question_generator=cognitive_stack["question_generator"],
             hypothesis_manager=cognitive_stack["hypothesis_manager"],
+            question_store=cognitive_stack.get("question_store"),
+            procedural_memory=cognitive_stack.get("procedural_memory"),
             bus=mock_bus,
             config=config or InquiryConfig(max_iterations=2, questions_per_iteration=2),
         )
