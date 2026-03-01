@@ -24,7 +24,9 @@ from qe.api.endpoints.memory import register_memory_routes
 from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTimingMiddleware
 from qe.api.profiling import InquiryProfilingStore
 from qe.api.setup import (
+    CHANNELS,
     PROVIDERS,
+    get_configured_channels,
     get_configured_providers,
     get_current_tiers,
     get_settings,
@@ -1082,11 +1084,12 @@ async def dashboard():
 
 @app.get("/api/setup/status")
 async def setup_status():
-    """Return setup status: whether complete, configured providers, tier mapping."""
+    """Return setup status: whether complete, configured providers, tier mapping, channels."""
     return {
         "complete": is_setup_complete(),
         "providers": get_configured_providers(),
         "tiers": get_current_tiers(),
+        "channels": get_configured_channels(),
     }
 
 
@@ -1108,7 +1111,7 @@ async def setup_providers():
 
 @app.post("/api/setup/save")
 async def setup_save(body: dict[str, Any]):
-    """Save provider API keys and tier assignments.
+    """Save provider API keys, tier assignments, and channel config.
 
     Expects:
         {
@@ -1117,26 +1120,73 @@ async def setup_save(body: dict[str, Any]):
                 "fast": {"provider": "OpenAI", "model": "gpt-4o-mini"},
                 "balanced": {"provider": "OpenAI", "model": "gpt-4o"},
                 "powerful": {"provider": "Anthropic", "model": "claude-sonnet-4-20250514"}
-            }
+            },
+            "channels": {"TELEGRAM_BOT_TOKEN": "123:ABC...", ...}
         }
     """
     # Block setup changes after initial setup is complete
     if is_setup_complete():
         return JSONResponse(
-            {"error": "Setup already complete. Reconfigure via config.toml or .env."},
+            {
+                "error": "Setup already complete. Use POST /api/setup/reconfigure to update.",
+            },
             status_code=403,
         )
 
     providers = body.get("providers", {})
     tiers = body.get("tiers", {})
+    channels = body.get("channels")
 
     if not providers and not tiers:
         return JSONResponse(
             {"error": "providers or tiers required"}, status_code=400
         )
 
-    save_setup(providers=providers, tier_config=tiers)
+    save_setup(providers=providers, tier_config=tiers, channels=channels)
     return {"status": "saved", "complete": is_setup_complete()}
+
+
+@app.get("/api/setup/channels")
+async def setup_channels():
+    """Return the static list of available communication channels."""
+    return {
+        "channels": [
+            {
+                "id": ch["id"],
+                "name": ch["name"],
+                "description": ch["description"],
+                "always_on": ch.get("always_on", False),
+                "env_vars": [
+                    {"key": ev["key"], "label": ev["label"], "type": ev["type"]}
+                    for ev in ch.get("env_vars", [])
+                ],
+            }
+            for ch in CHANNELS
+        ],
+    }
+
+
+@app.post("/api/setup/reconfigure")
+async def setup_reconfigure(body: dict[str, Any]):
+    """Reconfigure providers, tiers, and channels after initial setup.
+
+    Same payload shape as /api/setup/save but works after setup is complete.
+    """
+    providers = body.get("providers", {})
+    tiers = body.get("tiers", {})
+    channels = body.get("channels")
+
+    if not providers and not tiers and not channels:
+        return JSONResponse(
+            {"error": "providers, tiers, or channels required"}, status_code=400
+        )
+
+    save_setup(providers=providers, tier_config=tiers, channels=channels)
+    return {
+        "status": "saved",
+        "complete": is_setup_complete(),
+        "note": "Restart required for channel changes to take effect.",
+    }
 
 
 # ── Webhooks ─────────────────────────────────────────────────────────────

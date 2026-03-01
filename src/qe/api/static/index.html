@@ -453,8 +453,124 @@
       return <div ref={containerRef} style={{ height: 380, background: "#0e1018", border: `1px solid ${palette.border}`, borderRadius: 8, marginBottom: 16 }} />;
     }
 
-    // ── Setup Screen ──────────────────────────────────────────────────────
-    function SetupScreen({ onComplete }) {
+    // ── Hatching Screen ──────────────────────────────────────────────────
+    function HatchingScreen({ onReady }) {
+      const [progress, setProgress] = useState(0);
+      const [phases, setPhases] = useState({
+        substrate_ready: false,
+        event_log_ready: false,
+        services_subscribed: false,
+        supervisor_ready: false,
+      });
+      const [statusText, setStatusText] = useState("Initializing substrate...");
+      const [ready, setReady] = useState(false);
+
+      useEffect(() => {
+        const phaseLabels = [
+          { key: "substrate_ready", text: "Wiring services..." },
+          { key: "event_log_ready", text: "Spawning agents..." },
+          { key: "services_subscribed", text: "Almost there..." },
+          { key: "supervisor_ready", text: "Engine ready!" },
+        ];
+
+        const interval = setInterval(async () => {
+          try {
+            const res = await fetch(`${API}/api/health/ready`);
+            const data = await res.json();
+            if (data.phases) {
+              setPhases(data.phases);
+              const completed = Object.values(data.phases).filter(Boolean).length;
+              const pct = Math.round((completed / 4) * 100);
+              setProgress(pct);
+              // Update status text based on latest completed phase
+              for (let i = phaseLabels.length - 1; i >= 0; i--) {
+                if (data.phases[phaseLabels[i].key]) {
+                  setStatusText(phaseLabels[i].text);
+                  break;
+                }
+              }
+            }
+            if (data.ready) {
+              setReady(true);
+              setProgress(100);
+              setStatusText("Engine ready!");
+              clearInterval(interval);
+              setTimeout(() => onReady(), 1500);
+            }
+          } catch {
+            // Server may restart after .env write — ignore connection errors
+          }
+        }, 1000);
+
+        return () => clearInterval(interval);
+      }, [onReady]);
+
+      const circumference = 2 * Math.PI * 54;
+      const dashOffset = circumference - (progress / 100) * circumference;
+
+      const phaseItems = [
+        { key: "substrate_ready", label: "Initialize substrate" },
+        { key: "event_log_ready", label: "Connect event log" },
+        { key: "services_subscribed", label: "Subscribe services" },
+        { key: "supervisor_ready", label: "Start supervisor" },
+      ];
+
+      return (
+        <div style={{
+          minHeight: "100vh", background: palette.bg, display: "flex",
+          alignItems: "center", justifyContent: "center", fontFamily: FONT_SANS,
+        }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 32, animation: "fadeIn 0.4s ease" }}>
+            {/* Progress ring with QE logo */}
+            <div style={{ position: "relative", width: 128, height: 128 }}>
+              <svg width="128" height="128" viewBox="0 0 128 128" style={{ transform: "rotate(-90deg)" }}>
+                <circle cx="64" cy="64" r="54" fill="none" stroke={palette.border} strokeWidth="4" />
+                <circle cx="64" cy="64" r="54" fill="none" stroke={palette.accent} strokeWidth="4"
+                  strokeDasharray={circumference} strokeDashoffset={dashOffset}
+                  strokeLinecap="round" style={{ transition: "stroke-dashoffset 0.5s ease" }} />
+              </svg>
+              <div style={{
+                position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 28, fontFamily: FONT_MONO, fontWeight: 800, color: palette.accent,
+                animation: ready ? "none" : "pulse 2s ease-in-out infinite",
+              }}>QE</div>
+            </div>
+
+            {/* Status text */}
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: palette.textBright, marginBottom: 6 }}>{statusText}</div>
+              <div style={{ fontSize: 13, fontFamily: FONT_MONO, color: palette.textDim }}>{progress}% complete</div>
+            </div>
+
+            {/* Phase checklist */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 240 }}>
+              {phaseItems.map(item => (
+                <div key={item.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{
+                    width: 20, height: 20, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+                    background: phases[item.key] ? palette.greenDim : "transparent",
+                    border: `1px solid ${phases[item.key] ? palette.green : palette.border}`,
+                    transition: "all 0.3s",
+                  }}>
+                    {phases[item.key] && <Icon d={Icons.check} size={12} color={palette.green} />}
+                  </div>
+                  <span style={{
+                    fontSize: 13, fontFamily: FONT_MONO,
+                    color: phases[item.key] ? palette.green : palette.textDim,
+                    transition: "color 0.3s",
+                  }}>{item.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Setup Wizard (2-step) ────────────────────────────────────────────
+    function SetupWizard({ onComplete }) {
+      const [step, setStep] = useState(1);
+      const [hatching, setHatching] = useState(false);
       const [providers, setProviders] = useState([]);
       const [tierConfig, setTierConfig] = useState({
         fast:     { provider: "", model: "" },
@@ -466,21 +582,27 @@
       const [error, setError] = useState(null);
       const [ollamaEnabled, setOllamaEnabled] = useState(false);
 
+      // Channel state
+      const [availableChannels, setAvailableChannels] = useState([]);
+      const [selectedChannels, setSelectedChannels] = useState({});
+      const [channelConfig, setChannelConfig] = useState({});
+
       useEffect(() => {
         fetch(`${API}/api/setup/providers`).then(r => r.json()).then(data => {
           setProviders(data.providers || []);
         }).catch(() => {});
-        // Pre-fill from existing status
         fetch(`${API}/api/setup/status`).then(r => r.json()).then(data => {
           if (data.tiers) {
             const tiers = {};
             for (const [tier, model] of Object.entries(data.tiers)) {
-              // Try to detect provider from model name
               const prov = detectProvider(model, data.providers || []);
               tiers[tier] = { provider: prov, model };
             }
             setTierConfig(prev => ({ ...prev, ...tiers }));
           }
+        }).catch(() => {});
+        fetch(`${API}/api/setup/channels`).then(r => r.json()).then(data => {
+          setAvailableChannels(data.channels || []);
         }).catch(() => {});
       }, []);
 
@@ -513,6 +635,14 @@
         setApiKeys(prev => ({ ...prev, [envVar]: value }));
       };
 
+      const toggleChannel = (channelId) => {
+        setSelectedChannels(prev => ({ ...prev, [channelId]: !prev[channelId] }));
+      };
+
+      const handleChannelInput = (key, value) => {
+        setChannelConfig(prev => ({ ...prev, [key]: value }));
+      };
+
       // Collect unique providers that need keys
       const neededKeys = {};
       Object.values(tierConfig).forEach(tc => {
@@ -529,12 +659,12 @@
           const res = await fetch(`${API}/api/setup/save`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ providers: apiKeys, tiers: tierConfig }),
+            body: JSON.stringify({ providers: apiKeys, tiers: tierConfig, channels: channelConfig }),
           });
           const data = await res.json();
           if (!res.ok) { setError(data.error || "Save failed"); setSaving(false); return; }
           if (data.complete) {
-            onComplete();
+            setHatching(true);
           } else {
             setError("Setup saved but no valid API key detected. Please enter at least one API key.");
             setSaving(false);
@@ -545,11 +675,36 @@
         }
       };
 
+      if (hatching) {
+        return <HatchingScreen onReady={onComplete} />;
+      }
+
       const tierLabels = {
         fast: { label: "Fast", desc: "Quick responses, lower cost", color: palette.green },
         balanced: { label: "Balanced", desc: "Good quality / cost tradeoff", color: palette.blue },
         powerful: { label: "Powerful", desc: "Best quality, higher cost", color: palette.purple },
       };
+
+      const stepIndicator = (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 0, marginBottom: 28 }}>
+          {[{ num: 1, label: "LLM Providers" }, { num: 2, label: "Channels" }].map((s, i) => (
+            <React.Fragment key={s.num}>
+              {i > 0 && <div style={{ width: 48, height: 2, background: step >= s.num ? palette.accent : palette.border, transition: "background 0.3s" }} />}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 14, fontFamily: FONT_MONO, fontWeight: 700,
+                  background: step >= s.num ? palette.accentDim : "transparent",
+                  border: `2px solid ${step >= s.num ? palette.accent : palette.border}`,
+                  color: step >= s.num ? palette.accent : palette.textDim,
+                  transition: "all 0.3s",
+                }}>{step > s.num ? <Icon d={Icons.check} size={14} color={palette.accent} /> : s.num}</div>
+                <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: step >= s.num ? palette.text : palette.textDim, whiteSpace: "nowrap" }}>{s.label}</span>
+              </div>
+            </React.Fragment>
+          ))}
+        </div>
+      );
 
       return (
         <div style={{
@@ -577,155 +732,261 @@
 
             <div style={{ height: 1, background: palette.border, margin: "24px 0" }} />
 
-            {/* Tier Cards */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 20, marginBottom: 28 }}>
-              {["fast", "balanced", "powerful"].map(tier => {
-                const tc = tierConfig[tier];
-                const info = tierLabels[tier];
-                return (
-                  <div key={tier} style={{
-                    background: palette.bg, border: `1px solid ${palette.border}`,
-                    borderRadius: 8, padding: "18px 20px",
-                  }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-                      <span style={{
-                        display: "inline-block", width: 10, height: 10, borderRadius: "50%",
-                        background: info.color,
-                      }} />
-                      <span style={{ fontSize: 15, fontWeight: 700, color: palette.textBright }}>{info.label}</span>
-                      <span style={{ fontSize: 12, color: palette.textDim, fontFamily: FONT_MONO }}>{info.desc}</span>
-                    </div>
-                    <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                      <div style={{ flex: 1, minWidth: 180 }}>
-                        <label style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Provider</label>
-                        <select
-                          value={tc.provider}
-                          onChange={e => handleProviderChange(tier, e.target.value)}
-                          style={{
-                            width: "100%", padding: "8px 10px", borderRadius: 5,
-                            border: `1px solid ${palette.border}`, background: palette.surface,
-                            color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
-                          }}
-                        >
-                          <option value="">Select provider...</option>
-                          {providers.map(p => (
-                            <option key={p.name} value={p.name}>{p.name}</option>
-                          ))}
-                        </select>
+            {stepIndicator}
+
+            {/* ── Step 1: LLM Providers ── */}
+            {step === 1 && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                {/* Tier Cards */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 20, marginBottom: 28 }}>
+                  {["fast", "balanced", "powerful"].map(tier => {
+                    const tc = tierConfig[tier];
+                    const info = tierLabels[tier];
+                    return (
+                      <div key={tier} style={{
+                        background: palette.bg, border: `1px solid ${palette.border}`,
+                        borderRadius: 8, padding: "18px 20px",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                          <span style={{
+                            display: "inline-block", width: 10, height: 10, borderRadius: "50%",
+                            background: info.color,
+                          }} />
+                          <span style={{ fontSize: 15, fontWeight: 700, color: palette.textBright }}>{info.label}</span>
+                          <span style={{ fontSize: 12, color: palette.textDim, fontFamily: FONT_MONO }}>{info.desc}</span>
+                        </div>
+                        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                          <div style={{ flex: 1, minWidth: 180 }}>
+                            <label style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Provider</label>
+                            <select
+                              value={tc.provider}
+                              onChange={e => handleProviderChange(tier, e.target.value)}
+                              style={{
+                                width: "100%", padding: "8px 10px", borderRadius: 5,
+                                border: `1px solid ${palette.border}`, background: palette.bg,
+                                color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                              }}
+                            >
+                              <option value="">Select provider...</option>
+                              {providers.map(p => (
+                                <option key={p.name} value={p.name}>{p.name}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div style={{ flex: 1, minWidth: 220 }}>
+                            <label style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Model</label>
+                            <input
+                              type="text"
+                              value={tc.model}
+                              onChange={e => handleModelChange(tier, e.target.value)}
+                              placeholder="e.g. gpt-4o-mini"
+                              style={{
+                                width: "100%", padding: "8px 10px", borderRadius: 5,
+                                border: `1px solid ${palette.border}`, background: palette.bg,
+                                color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                              }}
+                            />
+                          </div>
+                        </div>
                       </div>
-                      <div style={{ flex: 1, minWidth: 220 }}>
-                        <label style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Model</label>
-                        <input
-                          type="text"
-                          value={tc.model}
-                          onChange={e => handleModelChange(tier, e.target.value)}
-                          placeholder="e.g. gpt-4o-mini"
-                          style={{
-                            width: "100%", padding: "8px 10px", borderRadius: 5,
-                            border: `1px solid ${palette.border}`, background: palette.surface,
-                            color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
-                          }}
-                        />
-                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* API Keys */}
+                {Object.keys(neededKeys).length > 0 && (
+                  <div style={{ marginBottom: 28 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: palette.textBright, marginBottom: 14 }}>API Keys</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      {Object.entries(neededKeys).map(([envVar, provName]) => (
+                        <div key={envVar} style={{
+                          background: palette.bg, border: `1px solid ${palette.border}`,
+                          borderRadius: 8, padding: "14px 18px",
+                        }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: palette.text }}>{provName}</span>
+                            <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>{envVar}</span>
+                          </div>
+                          <input
+                            type="password"
+                            value={apiKeys[envVar] || ""}
+                            onChange={e => handleKeyChange(envVar, e.target.value)}
+                            placeholder={`Enter ${envVar}...`}
+                            style={{
+                              width: "100%", padding: "8px 10px", borderRadius: 5,
+                              border: `1px solid ${palette.border}`, background: palette.bg,
+                              color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                            }}
+                          />
+                        </div>
+                      ))}
                     </div>
                   </div>
-                );
-              })}
-            </div>
+                )}
 
-            {/* API Keys */}
-            {Object.keys(neededKeys).length > 0 && (
-              <div style={{ marginBottom: 28 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: palette.textBright, marginBottom: 14 }}>API Keys</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  {Object.entries(neededKeys).map(([envVar, provName]) => (
-                    <div key={envVar} style={{
-                      background: palette.bg, border: `1px solid ${palette.border}`,
-                      borderRadius: 8, padding: "14px 18px",
-                    }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600, color: palette.text }}>{provName}</span>
-                        <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>{envVar}</span>
+                {/* Ollama toggle */}
+                <div style={{
+                  background: palette.bg, border: `1px solid ${palette.border}`,
+                  borderRadius: 8, padding: "14px 18px", marginBottom: 28,
+                  display: "flex", alignItems: "center", gap: 12,
+                }}>
+                  <div style={{
+                    width: 38, height: 22, borderRadius: 11, cursor: "pointer",
+                    background: ollamaEnabled ? palette.green : palette.border,
+                    transition: "background 0.2s", position: "relative",
+                  }} onClick={() => {
+                    const next = !ollamaEnabled;
+                    setOllamaEnabled(next);
+                    if (next) {
+                      setTierConfig(prev => {
+                        const updated = { ...prev };
+                        for (const t of ["fast", "balanced", "powerful"]) {
+                          if (!updated[t].provider) {
+                            const ollamaP = getProviderByName("Ollama (local)");
+                            updated[t] = { provider: "Ollama (local)", model: ollamaP ? ollamaP.tier_defaults[t] : "ollama/llama3.2" };
+                          }
+                        }
+                        return updated;
+                      });
+                    }
+                  }}>
+                    <div style={{
+                      width: 18, height: 18, borderRadius: "50%", background: "#fff",
+                      position: "absolute", top: 2,
+                      left: ollamaEnabled ? 18 : 2,
+                      transition: "left 0.2s",
+                    }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.text }}>Ollama (local models)</div>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>No API key needed — runs on your machine</div>
+                  </div>
+                </div>
+
+                {/* Error */}
+                {error && (
+                  <div style={{
+                    background: palette.redDim, border: `1px solid ${palette.red}40`,
+                    borderRadius: 6, padding: "10px 14px", marginBottom: 16,
+                    fontSize: 13, color: palette.red, fontFamily: FONT_MONO,
+                  }}>{error}</div>
+                )}
+
+                {/* Next Button */}
+                <button
+                  onClick={() => { setError(null); setStep(2); }}
+                  style={{
+                    width: "100%", padding: "14px 20px", borderRadius: 8, border: "none",
+                    cursor: "pointer",
+                    background: `linear-gradient(135deg, ${palette.accent}, #c47e2a)`,
+                    color: "#fff",
+                    fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700,
+                    letterSpacing: "0.02em", transition: "all 0.2s",
+                  }}
+                >Next</button>
+              </div>
+            )}
+
+            {/* ── Step 2: Channels ── */}
+            {step === 2 && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: palette.textBright, marginBottom: 6 }}>Communication Channels</div>
+                <div style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 20 }}>Choose how you want to interact with Question Engine</div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 28 }}>
+                  {availableChannels.map(ch => {
+                    const isOn = ch.always_on || selectedChannels[ch.id];
+                    return (
+                      <div key={ch.id} style={{
+                        background: palette.bg, border: `1px solid ${isOn ? palette.accent + "40" : palette.border}`,
+                        borderRadius: 8, padding: "16px 18px", transition: "border-color 0.2s",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: ch.always_on || (!isOn || ch.env_vars.length === 0) ? 0 : 14 }}>
+                          {/* Toggle or always-on badge */}
+                          {ch.always_on ? (
+                            <Badge color={palette.green}>DEFAULT</Badge>
+                          ) : (
+                            <div style={{
+                              width: 38, height: 22, borderRadius: 11, cursor: "pointer",
+                              background: isOn ? palette.green : palette.border,
+                              transition: "background 0.2s", position: "relative", flexShrink: 0,
+                            }} onClick={() => toggleChannel(ch.id)}>
+                              <div style={{
+                                width: 18, height: 18, borderRadius: "50%", background: "#fff",
+                                position: "absolute", top: 2,
+                                left: isOn ? 18 : 2,
+                                transition: "left 0.2s",
+                              }} />
+                            </div>
+                          )}
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: palette.text }}>{ch.name}</div>
+                            <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>{ch.description}</div>
+                          </div>
+                        </div>
+
+                        {/* Channel credential inputs (shown when toggled on) */}
+                        {isOn && !ch.always_on && ch.env_vars.length > 0 && (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingLeft: 50 }}>
+                            {ch.env_vars.map(ev => (
+                              <div key={ev.key}>
+                                <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 4 }}>{ev.label}</label>
+                                <input
+                                  type={ev.type === "password" ? "password" : "text"}
+                                  value={channelConfig[ev.key] || ""}
+                                  onChange={e => handleChannelInput(ev.key, e.target.value)}
+                                  placeholder={`Enter ${ev.label.toLowerCase()}...`}
+                                  style={{
+                                    width: "100%", padding: "8px 10px", borderRadius: 5,
+                                    border: `1px solid ${palette.border}`, background: palette.surface,
+                                    color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
+                                  }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <input
-                        type="password"
-                        value={apiKeys[envVar] || ""}
-                        onChange={e => handleKeyChange(envVar, e.target.value)}
-                        placeholder={`Enter ${envVar}...`}
-                        style={{
-                          width: "100%", padding: "8px 10px", borderRadius: 5,
-                          border: `1px solid ${palette.border}`, background: palette.surface,
-                          color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none",
-                        }}
-                      />
-                    </div>
-                  ))}
+                    );
+                  })}
+                </div>
+
+                {/* Error */}
+                {error && (
+                  <div style={{
+                    background: palette.redDim, border: `1px solid ${palette.red}40`,
+                    borderRadius: 6, padding: "10px 14px", marginBottom: 16,
+                    fontSize: 13, color: palette.red, fontFamily: FONT_MONO,
+                  }}>{error}</div>
+                )}
+
+                {/* Back + Start Engine buttons */}
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button
+                    onClick={() => { setError(null); setStep(1); }}
+                    style={{
+                      flex: 1, padding: "14px 20px", borderRadius: 8,
+                      border: `1px solid ${palette.border}`, cursor: "pointer",
+                      background: "transparent", color: palette.text,
+                      fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700,
+                      letterSpacing: "0.02em", transition: "all 0.2s",
+                    }}
+                  >Back</button>
+                  <button
+                    onClick={handleSave}
+                    disabled={saving}
+                    style={{
+                      flex: 2, padding: "14px 20px", borderRadius: 8, border: "none",
+                      cursor: saving ? "default" : "pointer",
+                      background: saving ? palette.border : `linear-gradient(135deg, ${palette.accent}, #c47e2a)`,
+                      color: saving ? palette.textDim : "#fff",
+                      fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700,
+                      letterSpacing: "0.02em", transition: "all 0.2s",
+                    }}
+                  >{saving ? "Saving..." : "Start Engine"}</button>
                 </div>
               </div>
             )}
-
-            {/* Ollama toggle */}
-            <div style={{
-              background: palette.bg, border: `1px solid ${palette.border}`,
-              borderRadius: 8, padding: "14px 18px", marginBottom: 28,
-              display: "flex", alignItems: "center", gap: 12,
-            }}>
-              <div style={{
-                width: 38, height: 22, borderRadius: 11, cursor: "pointer",
-                background: ollamaEnabled ? palette.green : palette.border,
-                transition: "background 0.2s", position: "relative",
-              }} onClick={() => {
-                const next = !ollamaEnabled;
-                setOllamaEnabled(next);
-                if (next) {
-                  // Auto-set any empty tiers to Ollama
-                  setTierConfig(prev => {
-                    const updated = { ...prev };
-                    for (const t of ["fast", "balanced", "powerful"]) {
-                      if (!updated[t].provider) {
-                        const ollamaP = getProviderByName("Ollama (local)");
-                        updated[t] = { provider: "Ollama (local)", model: ollamaP ? ollamaP.tier_defaults[t] : "ollama/llama3.2" };
-                      }
-                    }
-                    return updated;
-                  });
-                }
-              }}>
-                <div style={{
-                  width: 18, height: 18, borderRadius: "50%", background: "#fff",
-                  position: "absolute", top: 2,
-                  left: ollamaEnabled ? 18 : 2,
-                  transition: "left 0.2s",
-                }} />
-              </div>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: palette.text }}>Ollama (local models)</div>
-                <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>No API key needed — runs on your machine</div>
-              </div>
-            </div>
-
-            {/* Error */}
-            {error && (
-              <div style={{
-                background: palette.redDim, border: `1px solid ${palette.red}40`,
-                borderRadius: 6, padding: "10px 14px", marginBottom: 16,
-                fontSize: 13, color: palette.red, fontFamily: FONT_MONO,
-              }}>{error}</div>
-            )}
-
-            {/* Start Button */}
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              style={{
-                width: "100%", padding: "14px 20px", borderRadius: 8, border: "none",
-                cursor: saving ? "default" : "pointer",
-                background: saving ? palette.border : `linear-gradient(135deg, ${palette.accent}, #c47e2a)`,
-                color: saving ? palette.textDim : "#fff",
-                fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700,
-                letterSpacing: "0.02em", transition: "all 0.2s",
-              }}
-            >{saving ? "Saving..." : "Start Engine"}</button>
           </div>
         </div>
       );
@@ -764,6 +1025,17 @@
       const [settingsSaving, setSettingsSaving] = useState(false);
       const [settingsError, setSettingsError] = useState(null);
       const [settingsSuccess, setSettingsSuccess] = useState(false);
+
+      // Reconfigure state
+      const [showReconfigure, setShowReconfigure] = useState(false);
+      const [reconfigProviders, setReconfigProviders] = useState([]);
+      const [reconfigTiers, setReconfigTiers] = useState({ fast: "", balanced: "", powerful: "" });
+      const [reconfigKeys, setReconfigKeys] = useState({});
+      const [reconfigChannels, setReconfigChannels] = useState([]);
+      const [reconfigDirty, setReconfigDirty] = useState(false);
+      const [reconfigSaving, setReconfigSaving] = useState(false);
+      const [reconfigError, setReconfigError] = useState(null);
+      const [reconfigSuccess, setReconfigSuccess] = useState(false);
       const [displayPrefs, setDisplayPrefs] = useState(() => {
         try {
           const saved = localStorage.getItem("qe_display_prefs");
@@ -855,6 +1127,12 @@
         fetch(`${API}/api/settings`).then(r => r.json()).then(data => {
           if (data.budget || data.runtime) setSettings(data);
         }).catch(() => {});
+        // Fetch provider/channel status for reconfigure
+        fetch(`${API}/api/setup/status`).then(r => r.json()).then(data => {
+          setReconfigProviders(data.providers || []);
+          setReconfigTiers({ fast: data.tiers?.fast || "", balanced: data.tiers?.balanced || "", powerful: data.tiers?.powerful || "" });
+          setReconfigChannels(data.channels || []);
+        }).catch(() => {});
       }, []);
 
       // Persist displayPrefs to localStorage
@@ -879,6 +1157,45 @@
           else { setSettingsSuccess(true); setSettingsDirty(false); setTimeout(() => setSettingsSuccess(false), 3000); }
         } catch { setSettingsError("Network error"); }
         setSettingsSaving(false);
+      };
+
+      const handleReconfigSave = async () => {
+        setReconfigSaving(true);
+        setReconfigError(null);
+        setReconfigSuccess(false);
+        try {
+          const payload = {};
+          // Only send keys that were actually entered (non-empty)
+          const keysToSend = {};
+          Object.entries(reconfigKeys).forEach(([k, v]) => { if (v) keysToSend[k] = v; });
+          if (Object.keys(keysToSend).length > 0) payload.providers = keysToSend;
+          // Send tier models if changed
+          const tierPayload = {};
+          for (const tier of ["fast", "balanced", "powerful"]) {
+            if (reconfigTiers[tier]) tierPayload[tier] = { model: reconfigTiers[tier] };
+          }
+          if (Object.keys(tierPayload).length > 0) payload.tiers = tierPayload;
+          if (Object.keys(payload).length === 0) { setReconfigError("No changes to save"); setReconfigSaving(false); return; }
+          const res = await fetch(`${API}/api/setup/reconfigure`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          if (!res.ok) { setReconfigError(data.error || "Save failed"); }
+          else {
+            setReconfigSuccess(true);
+            setReconfigDirty(false);
+            setReconfigKeys({});
+            setTimeout(() => setReconfigSuccess(false), 4000);
+            // Refresh provider status
+            fetch(`${API}/api/setup/status`).then(r => r.json()).then(d => {
+              setReconfigProviders(d.providers || []);
+              setReconfigTiers({ fast: d.tiers?.fast || "", balanced: d.tiers?.balanced || "", powerful: d.tiers?.powerful || "" });
+              setReconfigChannels(d.channels || []);
+            }).catch(() => {});
+          }
+        } catch { setReconfigError("Network error"); }
+        setReconfigSaving(false);
       };
 
       const handleResetCircuit = async (serviceId) => {
@@ -1653,6 +1970,102 @@
 
                 <div style={{ maxWidth: 640, display: "flex", flexDirection: "column", gap: 20 }}>
 
+                  {/* LLM Providers & Channels (collapsible) */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
+                    <div
+                      onClick={() => setShowReconfigure(!showReconfigure)}
+                      style={{
+                        padding: "16px 24px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between",
+                        borderBottom: showReconfigure ? `1px solid ${palette.border}` : "none",
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright }}>LLM Providers & Channels</div>
+                        <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginTop: 2 }}>Update API keys, model tiers, and channel configuration</div>
+                      </div>
+                      <span style={{ fontSize: 16, color: palette.textDim, transform: showReconfigure ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>&#9660;</span>
+                    </div>
+                    {showReconfigure && (
+                      <div style={{ padding: "20px 24px", animation: "fadeIn 0.2s ease" }}>
+                        {reconfigError && (
+                          <div style={{ background: palette.redDim, border: `1px solid ${palette.red}40`, borderRadius: 6, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: palette.red, fontFamily: FONT_MONO }}>{reconfigError}</div>
+                        )}
+                        {reconfigSuccess && (
+                          <div style={{ background: palette.greenDim, border: `1px solid ${palette.green}40`, borderRadius: 6, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: palette.green, fontFamily: FONT_MONO }}>Configuration saved. Restart required for channel changes.</div>
+                        )}
+
+                        {/* Configured providers with status */}
+                        <div style={{ fontSize: 12, fontWeight: 600, color: palette.text, marginBottom: 10, textTransform: "uppercase", fontFamily: FONT_MONO, letterSpacing: "0.06em" }}>Providers</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+                          {reconfigProviders.map(p => (
+                            <div key={p.env_var || p.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}` }}>
+                              <StatusDot alive={p.configured} />
+                              <span style={{ fontSize: 12, color: palette.text, flex: 1 }}>{p.name}</span>
+                              {p.masked_key && <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>{p.masked_key}</span>}
+                              {p.env_var && (
+                                <input
+                                  type="password"
+                                  placeholder="Update key..."
+                                  value={reconfigKeys[p.env_var] || ""}
+                                  onChange={e => { setReconfigKeys(prev => ({ ...prev, [p.env_var]: e.target.value })); setReconfigDirty(true); }}
+                                  style={{ width: 160, padding: "4px 8px", borderRadius: 4, border: `1px solid ${palette.border}`, background: palette.surface, color: palette.text, fontFamily: FONT_MONO, fontSize: 11, outline: "none" }}
+                                />
+                              )}
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Model tiers */}
+                        <div style={{ fontSize: 12, fontWeight: 600, color: palette.text, marginBottom: 10, textTransform: "uppercase", fontFamily: FONT_MONO, letterSpacing: "0.06em" }}>Model Tiers</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+                          {["fast", "balanced", "powerful"].map(tier => (
+                            <div key={tier} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}` }}>
+                              <span style={{
+                                display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                                background: tier === "fast" ? palette.green : tier === "balanced" ? palette.blue : palette.purple,
+                              }} />
+                              <span style={{ fontSize: 12, color: palette.text, minWidth: 70, fontWeight: 600 }}>{tier.charAt(0).toUpperCase() + tier.slice(1)}</span>
+                              <input
+                                type="text"
+                                value={reconfigTiers[tier]}
+                                onChange={e => { setReconfigTiers(prev => ({ ...prev, [tier]: e.target.value })); setReconfigDirty(true); }}
+                                style={{ flex: 1, padding: "4px 8px", borderRadius: 4, border: `1px solid ${palette.border}`, background: palette.surface, color: palette.text, fontFamily: FONT_MONO, fontSize: 12, outline: "none" }}
+                              />
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Channel status */}
+                        {reconfigChannels.length > 0 && (
+                          <React.Fragment>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: palette.text, marginBottom: 10, textTransform: "uppercase", fontFamily: FONT_MONO, letterSpacing: "0.06em" }}>Channels</div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+                              {reconfigChannels.map(ch => (
+                                <div key={ch.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}` }}>
+                                  <StatusDot alive={ch.configured} />
+                                  <span style={{ fontSize: 12, color: palette.text, flex: 1 }}>{ch.name}</span>
+                                  {ch.always_on && <Badge color={palette.green}>DEFAULT</Badge>}
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 16, padding: "8px 12px", background: palette.bg, borderRadius: 4, border: `1px solid ${palette.border}` }}>
+                              Restart required for channel changes to take effect
+                            </div>
+                          </React.Fragment>
+                        )}
+
+                        {/* Save button */}
+                        <button onClick={handleReconfigSave} disabled={!reconfigDirty || reconfigSaving} style={{
+                          width: "100%", padding: "10px 20px", borderRadius: 8, border: "none",
+                          cursor: reconfigDirty && !reconfigSaving ? "pointer" : "not-allowed",
+                          background: reconfigDirty && !reconfigSaving ? `linear-gradient(135deg, ${palette.accent}, #c47e2a)` : palette.border,
+                          color: reconfigDirty && !reconfigSaving ? "#fff" : palette.textDim,
+                          fontFamily: FONT_MONO, fontSize: 13, fontWeight: 700, transition: "all 0.2s",
+                        }}>{reconfigSaving ? "Saving..." : reconfigDirty ? "Save Changes" : "No Changes"}</button>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Budget & Spending */}
                   <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 16 }}>Budget & Spending</div>
@@ -1830,7 +2243,7 @@
       }
 
       if (!setupComplete) {
-        return <SetupScreen onComplete={() => window.location.reload()} />;
+        return <SetupWizard onComplete={() => setSetupComplete(true)} />;
       }
 
       return <App />;

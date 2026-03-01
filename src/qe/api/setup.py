@@ -100,6 +100,44 @@ PROVIDERS: list[dict] = [
     },
 ]
 
+CHANNELS: list[dict] = [
+    {
+        "name": "Web Dashboard",
+        "id": "web",
+        "description": "Chat via the browser dashboard (always available)",
+        "env_vars": [],
+        "always_on": True,
+    },
+    {
+        "name": "Telegram",
+        "id": "telegram",
+        "description": "Interact via a Telegram bot",
+        "env_vars": [
+            {"key": "TELEGRAM_BOT_TOKEN", "label": "Bot Token", "type": "password"},
+        ],
+    },
+    {
+        "name": "Slack",
+        "id": "slack",
+        "description": "Interact via Slack workspace",
+        "env_vars": [
+            {"key": "SLACK_BOT_TOKEN", "label": "Bot Token", "type": "password"},
+            {"key": "SLACK_APP_TOKEN", "label": "App Token", "type": "password"},
+        ],
+    },
+    {
+        "name": "Email",
+        "id": "email",
+        "description": "Send goals and receive results via email",
+        "env_vars": [
+            {"key": "EMAIL_IMAP_HOST", "label": "IMAP Host", "type": "text"},
+            {"key": "EMAIL_SMTP_HOST", "label": "SMTP Host", "type": "text"},
+            {"key": "EMAIL_USERNAME", "label": "Username", "type": "text"},
+            {"key": "EMAIL_PASSWORD", "label": "Password", "type": "password"},
+        ],
+    },
+]
+
 ENV_PATH = Path(".env")
 CONFIG_PATH = Path("config.toml")
 
@@ -219,6 +257,50 @@ def get_configured_providers(env_path: Path | None = None) -> list[dict]:
     return configured
 
 
+def get_configured_channels(env_path: Path | None = None) -> list[dict]:
+    """Return list of channels with configuration status and masked values."""
+    env = _parse_env(env_path)
+    result = []
+    for channel in CHANNELS:
+        if channel.get("always_on"):
+            result.append({
+                "id": channel["id"],
+                "name": channel["name"],
+                "configured": True,
+                "always_on": True,
+                "env_vars": [],
+            })
+            continue
+        env_var_status = []
+        all_set = True
+        for ev in channel["env_vars"]:
+            value = env.get(ev["key"], "")
+            has_value = bool(value)
+            if not has_value:
+                all_set = False
+            masked = None
+            if has_value and ev["type"] == "password":
+                masked = mask_key(value)
+            elif has_value:
+                masked = value
+            env_var_status.append({
+                "key": ev["key"],
+                "label": ev["label"],
+                "type": ev["type"],
+                "has_value": has_value,
+                "masked_value": masked,
+            })
+        configured = all_set and len(channel["env_vars"]) > 0
+        result.append({
+            "id": channel["id"],
+            "name": channel["name"],
+            "configured": configured,
+            "always_on": False,
+            "env_vars": env_var_status,
+        })
+    return result
+
+
 def get_current_tiers() -> dict[str, str]:
     """Return current tier→model mapping from config.toml."""
     config = _load_config()
@@ -234,6 +316,7 @@ def save_setup(
     providers: dict[str, str],
     tier_config: dict[str, dict],
     env_path: Path | None = None,
+    channels: dict[str, str] | None = None,
 ) -> None:
     """Write API keys to .env and tier model assignments to config.toml.
 
@@ -243,12 +326,18 @@ def save_setup(
         tier_config: Mapping of tier → {"provider": name, "model": model_string}.
                      e.g. {"fast": {"provider": "OpenAI", "model": "gpt-4o-mini"}, ...}
         env_path: Override .env path (for testing).
+        channels: Mapping of channel env_var_key → value.
+                  e.g. {"TELEGRAM_BOT_TOKEN": "123:ABC...", "SLACK_BOT_TOKEN": "xoxb-..."}
     """
     env_file = env_path or ENV_PATH
 
     # ── Write .env ──────────────────────────────────────────────────────
     existing = _parse_env(env_file)
     existing.update({k: v for k, v in providers.items() if v})
+
+    # Merge channel env vars
+    if channels:
+        existing.update({k: v for k, v in channels.items() if v})
 
     # Write api_base for providers that need it (e.g. Kilo Code)
     for provider in PROVIDERS:
