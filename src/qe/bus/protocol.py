@@ -139,6 +139,10 @@ TOPICS = {
     "prompt.variant_deactivated",
     "prompt.mutation_cycle_completed",
     "prompt.variant_promoted",
+    # Knowledge Loop
+    "knowledge.consolidation_completed",
+    "knowledge.belief_promoted",
+    "knowledge.hypothesis_updated",
 }
 
 

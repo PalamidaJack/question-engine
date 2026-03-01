@@ -361,6 +361,38 @@ class PromptVariantPromotedPayload(BaseModel):
     new_rollout_pct: float = 50.0
 
 
+# ── Knowledge Loop payloads ──────────────────────────────────────────────
+
+
+class KnowledgeConsolidationCompletedPayload(BaseModel):
+    """Payload for knowledge.consolidation_completed topic."""
+
+    episodes_scanned: int = 0
+    patterns_detected: int = 0
+    beliefs_promoted: int = 0
+    contradictions_found: int = 0
+    hypotheses_reviewed: int = 0
+
+
+class KnowledgeBeliefPromotedPayload(BaseModel):
+    """Payload for knowledge.belief_promoted topic."""
+
+    subject_entity_id: str
+    predicate: str
+    object_value: str
+    confidence: float = 0.5
+    evidence_count: int = 0
+
+
+class KnowledgeHypothesisUpdatedPayload(BaseModel):
+    """Payload for knowledge.hypothesis_updated topic."""
+
+    hypothesis_id: str
+    old_status: str = "active"
+    new_status: str = "active"
+    probability: float = 0.5
+
+
 # ── Schema Registry ────────────────────────────────────────────────────────
 
 # Maps topic -> payload model for validation
@@ -402,6 +434,9 @@ TOPIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "prompt.variant_deactivated": PromptVariantDeactivatedPayload,
     "prompt.mutation_cycle_completed": PromptMutationCyclePayload,
     "prompt.variant_promoted": PromptVariantPromotedPayload,
+    "knowledge.consolidation_completed": KnowledgeConsolidationCompletedPayload,
+    "knowledge.belief_promoted": KnowledgeBeliefPromotedPayload,
+    "knowledge.hypothesis_updated": KnowledgeHypothesisUpdatedPayload,
 }
 
 

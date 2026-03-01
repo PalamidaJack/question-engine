@@ -98,6 +98,7 @@ _cognitive_pool = None
 _strategy_evolver = None
 _prompt_registry: PromptRegistry | None = None
 _prompt_mutator = None
+_knowledge_loop = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
@@ -479,7 +480,7 @@ async def lifespan(app: FastAPI):
     global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
     global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
     global _memory_store, _extra_routes_registered, _inquiry_engine
-    global _cognitive_pool, _strategy_evolver, _prompt_mutator
+    global _cognitive_pool, _strategy_evolver, _prompt_mutator, _knowledge_loop
 
     configure_from_config(get_settings())
 
@@ -665,6 +666,23 @@ async def lifespan(app: FastAPI):
         await _strategy_evolver.start()
         readiness.mark_ready("strategy_loop_ready")
 
+        # Knowledge Loop — background consolidation (episodic → semantic)
+        from qe.runtime.knowledge_loop import KnowledgeLoop
+
+        _knowledge_loop = KnowledgeLoop(
+            episodic_memory=_episodic_memory,
+            belief_store=_bayesian_belief,
+            procedural_memory=_procedural_memory,
+            bus=bus,
+            model=fast_model,
+        )
+        _knowledge_loop.start()
+        flag_store.define(
+            "knowledge_consolidation",
+            enabled=False,
+            description="Enable background knowledge consolidation loop",
+        )
+
         _chat_service = ChatService(
             substrate=_substrate,
             bus=bus,
@@ -794,6 +812,14 @@ async def lifespan(app: FastAPI):
             log.info("engram_cache.cleared count=%d", cleared)
         except Exception:
             log.debug("shutdown.engram_cache_clear_failed")
+
+        # Shutdown — Knowledge Loop
+        try:
+            if _knowledge_loop is not None:
+                await _knowledge_loop.stop()
+        except Exception:
+            log.debug("shutdown.knowledge_loop_stop_failed")
+        _knowledge_loop = None
 
         # Shutdown — Phase 4 strategy loop
         try:
@@ -1234,6 +1260,14 @@ async def prompt_stats():
     if _prompt_registry is None:
         return {"enabled": False, "slots": 0}
     return _prompt_registry.status()
+
+
+@app.get("/api/knowledge/status")
+async def knowledge_loop_status():
+    """Return knowledge loop status."""
+    if _knowledge_loop is None:
+        return {"running": False}
+    return _knowledge_loop.status()
 
 
 @app.get("/api/prompts/mutator/status")

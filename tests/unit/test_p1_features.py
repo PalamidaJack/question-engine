@@ -610,6 +610,8 @@ class TestEventVersioning:
             "prompt.variant_selected", "prompt.outcome_recorded",
             "prompt.variant_created", "prompt.variant_deactivated",
             "prompt.mutation_cycle_completed", "prompt.variant_promoted",
+            "knowledge.consolidation_completed", "knowledge.belief_promoted",
+            "knowledge.hypothesis_updated",
         }
         assert set(TOPIC_SCHEMAS.keys()) == expected
 
