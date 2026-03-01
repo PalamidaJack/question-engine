@@ -26,6 +26,7 @@ InquiryPhase = Literal[
 TerminationReason = Literal[
     "max_iterations", "budget_exhausted", "confidence_met",
     "all_questions_answered", "approaches_exhausted", "user_cancelled",
+    "rate_limited", "timeout",
 ]
 
 
@@ -95,6 +96,9 @@ class InquiryConfig(BaseModel):
     model_balanced: str = "openai/anthropic/claude-sonnet-4"
     model_fast: str = "openai/google/gemini-2.0-flash"
     domain: str = "general"
+    max_concurrent_inquiries: int = 3
+    inquiry_rate_limit_rpm: int = 10
+    inquiry_timeout_seconds: float = Field(default=300.0, ge=10.0, le=3600.0)
 
 
 class InquiryState(BaseModel):

@@ -27,6 +27,7 @@ class ErrorDomain(StrEnum):
     SUBSTRATE = "SUBSTRATE"
     GOAL = "GOAL"
     API = "API"
+    INQUIRY = "INQUIRY"
 
 
 # ── Base exception ─────────────────────────────────────────────────────────
@@ -233,6 +234,31 @@ class APINotReadyError(QEError):
     severity = Severity.ERROR
     is_retryable = True
     retry_delay_ms = 5000
+
+
+# ── Inquiry errors ────────────────────────────────────────────────────────
+
+
+class InquiryPhaseError(QEError):
+    code = "QE_INQUIRY_PHASE_FAILED"
+    domain = ErrorDomain.INQUIRY
+    severity = Severity.ERROR
+    is_retryable = True
+    retry_delay_ms = 1000
+
+
+class InquiryConfigError(QEError):
+    code = "QE_INQUIRY_CONFIG_INVALID"
+    domain = ErrorDomain.INQUIRY
+    severity = Severity.ERROR
+    is_retryable = False
+
+
+class InquiryTimeoutError(QEError):
+    code = "QE_INQUIRY_TIMEOUT"
+    domain = ErrorDomain.INQUIRY
+    severity = Severity.WARN
+    is_retryable = False
 
 
 # ── Error classification helper ────────────────────────────────────────────

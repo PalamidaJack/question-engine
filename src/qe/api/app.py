@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from qe.api.endpoints.goals import register_goal_routes
 from qe.api.endpoints.memory import register_memory_routes
 from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTimingMiddleware
+from qe.api.profiling import InquiryProfilingStore
 from qe.api.setup import (
     PROVIDERS,
     get_configured_providers,
@@ -94,6 +96,7 @@ _inquiry_engine: InquiryEngine | None = None
 _cognitive_pool = None
 _strategy_evolver = None
 _last_inquiry_profile: dict[str, Any] = {}
+_inquiry_profiling_store = InquiryProfilingStore()
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -1146,8 +1149,14 @@ async def profiling_inquiry():
     if BaseService._shared_bayesian_belief is not None:
         belief_status = "available"
 
+    # Build response with profiling store data
+    store_data = _inquiry_profiling_store.to_dict()
+
     return {
         "phase_timings": _last_inquiry_profile,
+        "last_inquiry": store_data["last_inquiry"],
+        "history_count": store_data["history_count"],
+        "percentiles": store_data["percentiles"],
         "process": {
             "rss_bytes": rusage.ru_maxrss,
             "python_version": sys.version,
@@ -1556,6 +1565,14 @@ async def submit_goal(body: dict[str, Any]):
             goal_description=description,
         )
         _last_inquiry_profile = result.phase_timings
+        _inquiry_profiling_store.record(result.phase_timings, result.duration_seconds)
+
+        # Update readiness with inquiry status
+        readiness = get_readiness()
+        readiness.last_inquiry_status = result.status
+        readiness.last_inquiry_at = time.monotonic()
+        readiness.last_inquiry_duration_s = result.duration_seconds
+
         return {
             "goal_id": result.goal_id,
             "inquiry_id": result.inquiry_id,

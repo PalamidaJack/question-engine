@@ -31,13 +31,13 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ --timeout=60 -q    # ~1481 tests, all passing
-.venv/bin/ruff check src/ tests/            # all clean
+.venv/bin/pytest tests/ --timeout=60 -q    # ~1504 tests, all passing
+.venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1481 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5), ruff clean.
+~1504 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6), ruff clean.
 
 ### v2 Redesign — Architecture Plan
 
@@ -108,8 +108,19 @@ All built, tested (33 tests across 3 new files + 9 new in existing), lint clean:
 - Tests: `tests/unit/test_inquiry_engine.py` (+9 new: procedural in orient, persistence in reflect, phase timings), `tests/unit/test_phase5_wiring.py` (4 tests: lifespan + profiling), `tests/unit/test_feature_flag_routing.py` (8 tests: flag defaults, toggle, precedence, rollout), `tests/integration/test_investment_e2e.py` (12 tests: full $50M lithium-ion investment walkthrough with procedural memory, persistence on drift, question persistence, bus event ordering, phase timings, budget termination)
 - `tests/integration/conftest.py` — cognitive_stack fixture extended with real ProceduralMemory (pre-seeded finance templates) and real QuestionStore (SQLite); PersistenceEngine mock returns proper RootCauseAnalysis + ReframingResult objects
 
+### v2 Phase 6: M1 Benchmarking + Production Hardening — COMPLETE
+All built, tested (23 tests across 6 test files), lint clean:
+- `benchmarks/inquiry_benchmark.py` — Standalone CLI benchmark harness: runs InquiryEngine N times with mock LLMs, reports per-phase timing percentiles (p50/p95/p99), RSS memory usage, throughput, cache stats. JSON output mode supported
+- `src/qe/api/profiling.py` — InquiryProfilingStore: ring buffer (max 50 entries) storing phase_timings + duration per inquiry, with percentile aggregation across runs. Enhanced `GET /api/profiling/inquiry` endpoint with history_count, percentiles, last_inquiry fields
+- `src/qe/services/inquiry/engine.py` — `_InquiryRateLimiter` (asyncio.Semaphore + token bucket for concurrency + RPM control); `_run_phase_with_retry()` with structured error classification and configurable retry; `_run_inquiry_loop()` extracted for `asyncio.wait_for` timeout wrapping; QEError catch in main loop
+- `src/qe/services/inquiry/schemas.py` — `InquiryConfig` extended: `max_concurrent_inquiries`, `inquiry_rate_limit_rpm`, `inquiry_timeout_seconds` (10-3600s). `TerminationReason` extended: `rate_limited`, `timeout`
+- `src/qe/errors.py` — `INQUIRY` ErrorDomain; `InquiryPhaseError` (retryable, 1000ms), `InquiryConfigError` (non-retryable), `InquiryTimeoutError` (non-retryable)
+- `src/qe/runtime/readiness.py` — `inquiry_engine_ready`, `last_inquiry_status`, `last_inquiry_at`, `last_inquiry_duration_s` fields; `inquiry_healthy` property (healthy if engine ready and last failure >300s ago); `to_dict()` includes `inquiry` section
+- `src/qe/api/app.py` — Profiling store wired; readiness updated after each inquiry run with status/timing
+- Tests: `tests/unit/test_benchmark_harness.py` (3), `test_inquiry_profiling.py` (4), `test_inquiry_rate_limiter.py` (4), `test_inquiry_error_recovery.py` (4), `test_inquiry_timeout.py` (3), `test_health_check_inquiry.py` (5)
+
 ### Next Steps
-- v2 complete — all 5 phases implemented. Ready for M1 benchmarking and production deployment.
+- v2 complete — all 6 phases implemented. Production-hardened with rate limiting, timeouts, error recovery, and health checks.
 
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager

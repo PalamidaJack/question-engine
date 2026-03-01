@@ -6,10 +6,12 @@ iterative observation, questioning, investigation, synthesis, and reflection.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
 
+from qe.errors import QEError, classify_error
 from qe.models.cognition import CrystallizedInsight
 from qe.services.inquiry.hypothesis import HypothesisManager
 from qe.services.inquiry.question_generator import QuestionGenerator
@@ -24,6 +26,40 @@ from qe.services.inquiry.schemas import (
 )
 
 log = logging.getLogger(__name__)
+
+
+class _InquiryRateLimiter:
+    """Concurrency + rate limiting for inquiry runs.
+
+    Uses an asyncio.Semaphore for concurrency control and a token bucket
+    for rate limiting (RPM / 60 refill rate).
+    """
+
+    def __init__(self, max_concurrent: int = 3, rpm: int = 10) -> None:
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._rpm = rpm
+        self._tokens = float(rpm)
+        self._max_tokens = float(rpm)
+        self._refill_rate = rpm / 60.0  # tokens per second
+        self._last_refill = time.monotonic()
+
+    def try_acquire_rate(self) -> bool:
+        """Non-blocking rate check. Returns True if a token is available."""
+        self._refill()
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
+
+    def _refill(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_refill
+        self._tokens = min(self._max_tokens, self._tokens + elapsed * self._refill_rate)
+        self._last_refill = now
+
+    @property
+    def semaphore(self) -> asyncio.Semaphore:
+        return self._semaphore
 
 
 class InquiryEngine:
@@ -55,6 +91,7 @@ class InquiryEngine:
         budget_tracker: Any = None,
         bus: Any = None,
         config: InquiryConfig | None = None,
+        rate_limiter: _InquiryRateLimiter | None = None,
     ) -> None:
         self._episodic = episodic_memory
         self._curator = context_curator
@@ -71,6 +108,7 @@ class InquiryEngine:
         self._budget = budget_tracker
         self._bus = bus
         self._config = config or InquiryConfig()
+        self._rate_limiter = rate_limiter
 
     async def run_inquiry(
         self,
@@ -81,6 +119,16 @@ class InquiryEngine:
         """Execute the full 7-phase inquiry loop."""
         cfg = config or self._config
         start_time = time.monotonic()
+
+        # Rate limiting check
+        if self._rate_limiter is not None:
+            if not self._rate_limiter.try_acquire_rate():
+                return InquiryResult(
+                    inquiry_id=f"inq_rl_{goal_id}",
+                    goal_id=goal_id,
+                    status="failed",
+                    termination_reason="rate_limited",
+                )
 
         state = InquiryState(
             goal_id=goal_id,
@@ -94,6 +142,46 @@ class InquiryEngine:
             "goal": goal_description,
         })
 
+        # Acquire concurrency semaphore if rate limiter is present
+        if self._rate_limiter is not None:
+            try:
+                await asyncio.wait_for(
+                    self._rate_limiter.semaphore.acquire(), timeout=30
+                )
+            except TimeoutError:
+                return InquiryResult(
+                    inquiry_id=state.inquiry_id,
+                    goal_id=goal_id,
+                    status="failed",
+                    termination_reason="rate_limited",
+                )
+
+        try:
+            return await asyncio.wait_for(
+                self._run_inquiry_loop(state, cfg, goal_id, start_time),
+                timeout=cfg.inquiry_timeout_seconds,
+            )
+        except TimeoutError:
+            log.warning(
+                "inquiry.timeout inquiry_id=%s timeout=%.1fs",
+                state.inquiry_id,
+                cfg.inquiry_timeout_seconds,
+            )
+            return self._finalize(
+                state, "timeout", [], start_time, status="completed"
+            )
+        finally:
+            if self._rate_limiter is not None:
+                self._rate_limiter.semaphore.release()
+
+    async def _run_inquiry_loop(
+        self,
+        state: InquiryState,
+        cfg: InquiryConfig,
+        goal_id: str,
+        start_time: float,
+    ) -> InquiryResult:
+        """Core iteration loop, extracted for timeout wrapping."""
         all_insights: list[CrystallizedInsight] = []
         termination_reason: TerminationReason = "max_iterations"
 
@@ -113,7 +201,9 @@ class InquiryEngine:
                 # 1. OBSERVE
                 state.current_phase = "observe"
                 _t0 = time.monotonic()
-                context = await self._phase_observe(state)
+                context = await self._run_phase_with_retry(
+                    "observe", self._phase_observe, state
+                )
                 self._record_phase_timing(state, "observe", _t0)
                 self._publish("inquiry.phase_completed", goal_id, {
                     "inquiry_id": state.inquiry_id,
@@ -125,7 +215,9 @@ class InquiryEngine:
                 # 2. ORIENT
                 state.current_phase = "orient"
                 _t0 = time.monotonic()
-                await self._phase_orient(state, context)
+                await self._run_phase_with_retry(
+                    "orient", self._phase_orient, state, context
+                )
                 self._record_phase_timing(state, "orient", _t0)
                 self._publish("inquiry.phase_completed", goal_id, {
                     "inquiry_id": state.inquiry_id,
@@ -137,7 +229,9 @@ class InquiryEngine:
                 # 3. QUESTION
                 state.current_phase = "question"
                 _t0 = time.monotonic()
-                new_questions = await self._phase_question(state)
+                new_questions = await self._run_phase_with_retry(
+                    "question", self._phase_question, state
+                )
                 state.questions.extend(new_questions)
                 await self._persist_questions(state.inquiry_id, new_questions)
                 self._record_phase_timing(state, "question", _t0)
@@ -161,7 +255,9 @@ class InquiryEngine:
                     termination_reason = "all_questions_answered"
                     break
                 _t0 = time.monotonic()
-                prioritized = await self._phase_prioritize(state, pending)
+                prioritized = await self._run_phase_with_retry(
+                    "prioritize", self._phase_prioritize, state, pending
+                )
                 self._record_phase_timing(state, "prioritize", _t0)
                 self._publish("inquiry.phase_completed", goal_id, {
                     "inquiry_id": state.inquiry_id,
@@ -175,7 +271,9 @@ class InquiryEngine:
                 top_question = prioritized[0]
                 top_question.status = "investigating"
                 _t0 = time.monotonic()
-                investigation = await self._phase_investigate(state, top_question)
+                investigation = await self._run_phase_with_retry(
+                    "investigate", self._phase_investigate, state, top_question
+                )
                 state.investigations.append(investigation)
                 await self._record_procedural_outcome(top_question, investigation)
                 await self._persist_questions(state.inquiry_id, [top_question])
@@ -194,8 +292,9 @@ class InquiryEngine:
                 # 6. SYNTHESIZE
                 state.current_phase = "synthesize"
                 _t0 = time.monotonic()
-                insights = await self._phase_synthesize(
-                    state, top_question, investigation
+                insights = await self._run_phase_with_retry(
+                    "synthesize", self._phase_synthesize,
+                    state, top_question, investigation,
                 )
                 self._record_phase_timing(state, "synthesize", _t0)
                 all_insights.extend(insights)
@@ -215,7 +314,9 @@ class InquiryEngine:
                 # 7. REFLECT
                 state.current_phase = "reflect"
                 _t0 = time.monotonic()
-                reflection = await self._phase_reflect(state, iteration)
+                reflection = await self._run_phase_with_retry(
+                    "reflect", self._phase_reflect, state, iteration
+                )
                 self._record_phase_timing(state, "reflect", _t0)
                 state.reflections.append(reflection)
                 self._publish("inquiry.phase_completed", goal_id, {
@@ -241,6 +342,19 @@ class InquiryEngine:
                     termination_reason = "confidence_met"
                     break
 
+        except QEError:
+            log.exception(
+                "inquiry.structured_error inquiry_id=%s iteration=%d",
+                state.inquiry_id,
+                state.current_iteration,
+            )
+            self._publish("inquiry.failed", goal_id, {
+                "inquiry_id": state.inquiry_id,
+                "iteration": state.current_iteration,
+            })
+            return self._finalize(
+                state, "max_iterations", all_insights, start_time, status="failed"
+            )
         except Exception:
             log.exception(
                 "inquiry.iteration_error inquiry_id=%s iteration=%d",
@@ -691,6 +805,30 @@ class InquiryEngine:
         })
 
         return result
+
+    # -------------------------------------------------------------------
+    # Retry / Error recovery
+    # -------------------------------------------------------------------
+
+    async def _run_phase_with_retry(
+        self, phase_name: str, coro_fn: Any, *args: Any, max_retries: int = 2
+    ) -> Any:
+        """Run a phase coroutine with structured error retry."""
+        for attempt in range(max_retries + 1):
+            try:
+                return await coro_fn(*args)
+            except Exception as exc:
+                classified = classify_error(exc)
+                if not classified.is_retryable or attempt >= max_retries:
+                    raise classified from exc
+                log.warning(
+                    "inquiry.phase_retry phase=%s attempt=%d/%d delay_ms=%d",
+                    phase_name,
+                    attempt + 1,
+                    max_retries,
+                    classified.retry_delay_ms,
+                )
+                await asyncio.sleep(classified.retry_delay_ms / 1000.0)
 
     # -------------------------------------------------------------------
     # Helpers
