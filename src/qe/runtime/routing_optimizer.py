@@ -56,6 +56,37 @@ class ModelScore:
         return self.composite_score
 
 
+class BetaArm:
+    """Beta-Binomial conjugate prior for Thompson sampling."""
+
+    def __init__(
+        self, alpha: float = 1.0, beta: float = 1.0
+    ) -> None:
+        self.alpha = alpha
+        self.beta = beta
+
+    def update(self, success: bool) -> None:
+        """Update posterior with observation."""
+        if success:
+            self.alpha += 1.0
+        else:
+            self.beta += 1.0
+
+    def sample(self) -> float:
+        """Draw a sample from the Beta posterior."""
+        return random.betavariate(self.alpha, self.beta)
+
+    @property
+    def mean(self) -> float:
+        """Expected value of the Beta distribution."""
+        return self.alpha / (self.alpha + self.beta)
+
+    @property
+    def sample_count(self) -> int:
+        """Total observations (alpha + beta - 2 priors)."""
+        return int(self.alpha + self.beta - 2)
+
+
 class RoutingOptimizer:
     """Data-driven model selection with exploration."""
 
@@ -79,6 +110,10 @@ class RoutingOptimizer:
                 "total_cost": 0.0,
             }
         )
+        # Thompson sampling arms keyed by (model, task_type)
+        self._arms: dict[
+            tuple[str, str], BetaArm
+        ] = defaultdict(BetaArm)
 
     async def _ensure_table(self) -> None:
         if self._initialized or not self._db_path:
@@ -120,6 +155,9 @@ class RoutingOptimizer:
             stats["successes"] += 1
         stats["total_latency"] += latency_ms
         stats["total_cost"] += cost_usd
+
+        # Update Thompson arm
+        self._arms[key].update(success)
 
         if self._db_path:
             await self._ensure_table()
@@ -209,3 +247,29 @@ class RoutingOptimizer:
             reverse=True,
         )
         return scores[0].model
+
+    def thompson_select_model(
+        self,
+        task_type: str,
+        available_models: list[str],
+    ) -> str:
+        """Select a model using Thompson sampling.
+
+        Samples from each model's Beta posterior and picks
+        the model with the highest sample value.
+        """
+        if not available_models:
+            raise ValueError("No models available")
+
+        best_model = available_models[0]
+        best_sample = -1.0
+
+        for model in available_models:
+            key = (model, task_type)
+            arm = self._arms[key]
+            sample = arm.sample()
+            if sample > best_sample:
+                best_sample = sample
+                best_model = model
+
+        return best_model

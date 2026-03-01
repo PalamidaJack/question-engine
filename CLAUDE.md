@@ -31,19 +31,19 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ --timeout=60 -q    # ~1242 tests, all passing
+.venv/bin/pytest tests/ --timeout=60 -q    # ~1424 tests, all passing
 .venv/bin/ruff check src/ tests/            # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1242 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 wiring), ruff clean.
+~1448 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes), ruff clean.
 
 ### v2 Redesign — Architecture Plan
 
 Full plan at `.claude/plans/tranquil-hopping-harbor.md`. Key concepts:
 - **Three Loops**: Inquiry (seconds-minutes), Knowledge (minutes-hours), Strategy (hours-days)
-- **Four-Tier Memory**: Tier 0 Working (ContextCurator), Tier 1 Episodic (EpisodicMemory), Tier 2 Semantic (BayesianBeliefStore), Tier 3 Procedural (pending)
+- **Four-Tier Memory**: Tier 0 Working (ContextCurator), Tier 1 Episodic (EpisodicMemory), Tier 2 Semantic (BayesianBeliefStore), Tier 3 Procedural (ProceduralMemory)
 - **Cognitive Layer**: Metacognitor, Epistemic Reasoner, Dialectic Engine, Persistence Engine, Insight Crystallizer
 - **Engram Cache**: Three-band (exact/template/full) replacing LLMCache
 
@@ -73,10 +73,35 @@ All Phase 1 memory and Phase 2 cognitive components wired into the running syste
 - `src/qe/api/app.py` — All components initialized in lifespan, set on BaseService, cleaned up on shutdown
 - Tests: `tests/unit/test_wiring.py`
 
+### v2 Phase 3: Inquiry Loop + Knowledge Loop — COMPLETE
+All built, tested (94 tests across 8 test files), lint clean:
+- `src/qe/services/inquiry/schemas.py` — Pure Pydantic models: Question (tree structure), InvestigationResult, Reflection, InquiryConfig, InquiryState, InquiryResult
+- `src/qe/services/inquiry/question_generator.py` — LLM-powered question generation + algorithmic prioritization (info_gain*0.4 + relevance*0.35 + novelty*0.25)
+- `src/qe/services/inquiry/hypothesis.py` — HypothesisManager: POPPER-inspired hypothesis generation, falsification questions, Bayesian updating (belief store + local fallback), Bayes factor computation
+- `src/qe/services/inquiry/engine.py` — InquiryEngine: 7-phase loop (Observe→Orient→Question→Prioritize→Investigate→Synthesize→Reflect), budget checking, 5 termination conditions, full cognitive component integration
+- `src/qe/runtime/cognitive_agent.py` — CognitiveAgent model: agent identity, epistemic state, core memory (for Phase 4 multi-agent pools)
+- `src/qe/runtime/procedural_memory.py` — Tier 3 memory: QuestionTemplate + ToolSequence with running average success tracking, SQLite + in-memory backends
+- `src/qe/substrate/question_store.py` — SQLite question tree persistence: save, get, BFS tree ordering, status updates
+- `src/qe/bus/schemas.py` — 10 inquiry payload schemas (all topics covered)
+- `src/qe/bus/protocol.py` — 10 inquiry bus topics added (99 total)
+- `src/qe/runtime/self_correction.py` — `evaluate_with_bayes_factor()` method: Bayes factor with log10 thresholds
+- `src/qe/substrate/inference.py` — HypothesisTemplate: confirmed hypotheses boost claim confidence (1.3x), falsified weaken (0.5x)
+- `src/qe/api/app.py` — All Phase 3 components wired in lifespan; `inquiry_mode` feature flag routes POST /api/goals to InquiryEngine
+- Tests: `tests/unit/test_inquiry_schemas.py`, `test_question_generator.py`, `test_hypothesis_manager.py`, `test_inquiry_engine.py`, `test_cognitive_agent.py`, `test_procedural_memory.py`, `test_question_store.py`, `test_phase3_wiring.py`
+
+### v2 Phase 4: Elastic Scaling + Strategy Loop — COMPLETE
+All built, tested (88 tests across 6 test files), lint clean:
+- `src/qe/runtime/routing_optimizer.py` — Added `BetaArm` (Beta-Binomial conjugate prior) and `thompson_select_model()` for true Thompson sampling model selection. Existing `select_model()` preserved for backward compat
+- `src/qe/runtime/strategy_models.py` — Pydantic models: StrategyConfig, ScaleProfile, StrategyOutcome, StrategySnapshot. Predefined dicts: DEFAULT_STRATEGIES (breadth_first, depth_first, hypothesis_driven, iterative_refinement) and DEFAULT_PROFILES (minimal, balanced, aggressive)
+- `src/qe/runtime/cognitive_agent_pool.py` — CognitiveAgentPool: multi-agent parallel inquiry execution with AgentSlot lifecycle, asyncio.gather fan-out with Semaphore concurrency control, result merging (insight dedup, cost sum, best-of-N findings)
+- `src/qe/runtime/strategy_evolver.py` — StrategyEvolver: Thompson sampling strategy selection, outcome recording, background evaluation loop with automatic strategy switching on low performance. ElasticScaler: deterministic profile recommendation (budget/success-rate rules), spawn/retire to match target
+- `src/qe/bus/protocol.py` — 6 new strategy/pool bus topics added (105 total)
+- `src/qe/bus/schemas.py` — 6 new payload models (StrategySelected, StrategySwitchRequested, StrategyEvaluated, PoolScaleRecommended, PoolScaleExecuted, PoolHealthCheck) registered in TOPIC_SCHEMAS (31 total)
+- `src/qe/api/app.py` — CognitiveAgentPool + StrategyEvolver + ElasticScaler wired in lifespan with engine_factory closure; `multi_agent_mode` feature flag for parallel inquiry; cleanup on shutdown
+- Tests: `tests/unit/test_thompson_router.py`, `test_strategy_models.py`, `test_cognitive_agent_pool.py`, `test_strategy_evolver.py`, `test_elastic_scaler.py`, `test_phase4_wiring.py`
+
 ### Next Steps (in order)
-1. **Phase 3**: Inquiry Loop + Knowledge Loop — InquiryEngine (7-phase loop), question generator, HypothesisManager (POPPER), CognitiveAgent model, procedural memory
-2. **Phase 4**: Elastic Scaling + Strategy Loop — Thompson router, CognitiveAgentPool, StrategyEvolver, scale profiles
-3. **Phase 5**: Integration + Polish — E2E investment opportunity walkthrough, Mac M1 profiling
+1. **Phase 5**: Integration + Polish — E2E investment opportunity walkthrough, Mac M1 profiling
 
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
