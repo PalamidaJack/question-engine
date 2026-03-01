@@ -11,7 +11,8 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 - Python 3.14, FastAPI, Pydantic v2, aiosqlite, litellm, instructor
 - Virtual env: `.venv/bin/python`, `.venv/bin/pytest`, `.venv/bin/ruff`
 - LLM provider: Kilo Code (OpenRouter-compatible) at `https://kilo.ai/api/openrouter`
-- Models: `openai/anthropic/claude-sonnet-4` (balanced), `openai/google/gemini-2.0-flash` (fast)
+- Models: `openai/anthropic/claude-sonnet-4` (balanced), `openai/google/gemini-2.0-flash` (fast — note: Kilo Code model ID is now `google/gemini-2.0-flash-001`)
+- Integration test model: `openai/anthropic/claude-3.5-haiku` (cheap, reliable structured output — Gemini models fail with nested Pydantic schemas via instructor tool calling)
 
 ## Key Directories
 
@@ -31,13 +32,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ --timeout=60 -q    # ~1504 tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1503 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1504 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6), ruff clean.
+~1509 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -119,6 +121,11 @@ All built, tested (23 tests across 6 test files), lint clean:
 - `src/qe/api/app.py` — Profiling store wired; readiness updated after each inquiry run with status/timing
 - Tests: `tests/unit/test_benchmark_harness.py` (3), `test_inquiry_profiling.py` (4), `test_inquiry_rate_limiter.py` (4), `test_inquiry_error_recovery.py` (4), `test_inquiry_timeout.py` (3), `test_health_check_inquiry.py` (5)
 
+### Real LLM Integration Tests — COMPLETE
+6 tests calling real LLMs through Kilo Code, verifying instructor+litellm structured output end-to-end:
+- `src/qe/services/inquiry/engine.py` — Fixed two bugs in `_phase_synthesize`: `full_dialectic()` and `crystallize()` called without `goal_id`, and `evidence` passed as `list` instead of `str` (masked by mocks)
+- `tests/integration/test_real_llm_inquiry.py` — 5 Layer-1 component tests (QuestionGenerator, Metacognitor, DialecticEngine, HypothesisManager, InsightCrystallizer) + 1 Layer-2 full InquiryEngine test. Uses `openai/anthropic/claude-3.5-haiku`. Marked `@pytest.mark.slow`, skipped when `KILOCODE_API_KEY` absent
+
 ### Next Steps
 - v2 complete — all 6 phases implemented. Production-hardened with rate limiting, timeouts, error recovery, and health checks.
 
@@ -138,3 +145,5 @@ All built, tested (23 tests across 6 test files), lint clean:
 - LLM structured output pattern: `instructor.from_litellm(litellm.acompletion)` + Pydantic response_model (see any service or cognitive component)
 - Cognitive layer tests mock LLM via `patch("qe.runtime.metacognitor.instructor")` (or equivalent module path) + `AsyncMock` for `client.chat.completions.create`
 - All cognitive components accept optional `episodic_memory` and `model` params for dependency injection and testability
+- Gemini models (via Kilo Code/OpenRouter) fail with instructor tool calling on nested `list[PydanticModel]` schemas — use Claude models for real LLM integration tests
+- Real LLM integration tests use `@pytest.mark.slow` + `skipif(not KILOCODE_API_KEY)` — see `tests/integration/test_real_llm_inquiry.py`
