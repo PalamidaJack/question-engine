@@ -23,7 +23,7 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 - `src/qe/bus/` — MemoryBus, event log, bus metrics
 - `src/qe/substrate/` — Belief ledger (SQLite), cold storage, goal store, embeddings, BayesianBeliefStore
 - `src/qe/models/` — Pydantic models (Envelope, Claim, GoalState, Genome Blueprint, Cognition)
-- `src/qe/optimization/` — Prompt tuning (DSPy-based) + PromptRegistry (Thompson sampling over prompt variants)
+- `src/qe/optimization/` — Prompt tuning (DSPy-based) + PromptRegistry (Thompson sampling over prompt variants) + PromptMutator (LLM-powered variant generation)
 - `src/qe/runtime/` — Service base, context curator, episodic memory, engram cache, metacognitor, epistemic reasoner, persistence engine
 - `tests/unit/` — Unit tests (~50+ files)
 - `tests/integration/` — Integration + E2E tests
@@ -33,14 +33,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1550 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1599 unit/integration tests, all passing
 .venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1550 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~1599 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -142,11 +142,16 @@ All built, tested (47 tests across 2 test files), lint clean. Thompson sampling 
   - `question_generator.py` (1 slot: generate.system)
   - `hypothesis.py` (1 slot: generate.system)
 - `src/qe/api/app.py` — Registry initialized in lifespan, passed to all 7 components, `prompt_evolution` feature flag (disabled by default), `GET /api/prompts/stats` endpoint, shutdown persistence
-- Phase D (PromptMutator: LLM-powered auto-generation of variants via rephrase/elaborate/simplify/restructure + auto-rollback) deferred
 - Tests: `tests/unit/test_prompt_registry.py` (28 tests: models, disabled/enabled modes, Thompson sampling, rollout, deactivation, stats, SQLite round-trip, format fallback, bus events, baseline registration), `tests/unit/test_prompt_evolution_wiring.py` (19 tests: bus topics/schemas, per-component registry integration, feature flag)
 
-### Next Steps
-- Phase D: PromptMutator — LLM-powered auto-generation of prompt variants with auto-rollback on low performance
+### Prompt Evolution Phase D: PromptMutator — COMPLETE
+All built, tested (49 tests across 2 test files), lint clean. LLM-powered auto-generation of prompt variants with performance monitoring:
+- `src/qe/optimization/prompt_mutator.py` — `PromptMutator`: background evaluation loop (follows StrategyEvolver pattern) with three-phase per-slot logic: (1) auto-rollback low performers (mean < 0.3 after 20+ samples), (2) promote high performers (mean > 0.6, rollout 10%→50%), (3) mutate via LLM (instructor+litellm). Four mutation strategies: rephrase, elaborate, simplify, restructure (rotated). `MutatedPrompt` response model, format key validation (`{placeholder}` preservation), configurable thresholds. Gated by `prompt_evolution` feature flag
+- `src/qe/optimization/prompt_registry.py` — Extended: `add_variant()` now accepts `strategy` param (passes through to bus event), new `promote_variant()` method for rollout percentage increases
+- `src/qe/bus/protocol.py` — 2 new topics (141 total): `prompt.mutation_cycle_completed`, `prompt.variant_promoted`
+- `src/qe/bus/schemas.py` — 2 new payload schemas (37 total): `PromptMutationCyclePayload`, `PromptVariantPromotedPayload`
+- `src/qe/api/app.py` — PromptMutator wired in lifespan (start/stop), 2 new endpoints: `GET /api/prompts/mutator/status`, `GET /api/prompts/slots/{slot_key}`
+- Tests: `tests/unit/test_prompt_mutator.py` (37 tests: strategies, models, format key extraction/validation, init/lifecycle, rollback/promote/feature flag/max variants/max mutations, LLM mutation with mock instructor, bus events, full integration cycle), `tests/unit/test_prompt_mutator_wiring.py` (12 tests: bus topics, schemas, registry extensions, promote_variant)
 
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
@@ -167,3 +172,4 @@ All built, tested (47 tests across 2 test files), lint clean. Thompson sampling 
 - Prompt slot naming convention: `component.method.role` (e.g., `dialectic.challenge.user`, `insight.novelty.system`)
 - Gemini models (via Kilo Code/OpenRouter) fail with instructor tool calling on nested `list[PydanticModel]` schemas — use Claude models for real LLM integration tests
 - Real LLM integration tests use `@pytest.mark.slow` + `skipif(not KILOCODE_API_KEY)` — see `tests/integration/test_real_llm_inquiry.py`
+- PromptMutator tests mock LLM via `patch("qe.optimization.prompt_mutator.instructor")` + mock client with `AsyncMock` for `chat.completions.create` returning `MutatedPrompt`; feature flag gating via `patch("qe.optimization.prompt_mutator.get_flag_store")`
