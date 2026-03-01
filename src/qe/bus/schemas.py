@@ -50,6 +50,7 @@ class GoalCompletedPayload(BaseModel):
 
     goal_id: str
     subtask_count: int = 0
+    subtask_results_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class GoalFailedPayload(BaseModel):
@@ -407,6 +408,36 @@ class BridgeStrategyOutcomePayload(BaseModel):
     insights_count: int = 0
 
 
+# ── Goal Orchestration Pipeline payloads ─────────────────────────────────
+
+
+class TaskContractViolatedPayload(BaseModel):
+    """Payload for tasks.contract_violated topic."""
+
+    goal_id: str
+    subtask_id: str
+    violation_type: str = ""  # "precondition" / "postcondition"
+    condition: str = ""
+    reason: str = ""
+
+
+class GoalSynthesizedPayload(BaseModel):
+    """Payload for goals.synthesized topic."""
+
+    goal_id: str
+    summary: str = ""
+    confidence: float = 0.5
+    findings_count: int = 0
+    total_cost_usd: float = 0.0
+
+
+class GoalSynthesisFailedPayload(BaseModel):
+    """Payload for goals.synthesis_failed topic."""
+
+    goal_id: str
+    reason: str = ""
+
+
 # ── Schema Registry ────────────────────────────────────────────────────────
 
 # Maps topic -> payload model for validation
@@ -452,6 +483,9 @@ TOPIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "knowledge.belief_promoted": KnowledgeBeliefPromotedPayload,
     "knowledge.hypothesis_updated": KnowledgeHypothesisUpdatedPayload,
     "bridge.strategy_outcome_recorded": BridgeStrategyOutcomePayload,
+    "tasks.contract_violated": TaskContractViolatedPayload,
+    "goals.synthesized": GoalSynthesizedPayload,
+    "goals.synthesis_failed": GoalSynthesisFailedPayload,
 }
 
 

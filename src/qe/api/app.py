@@ -102,6 +102,10 @@ _knowledge_loop = None
 _inquiry_bridge = None
 _elastic_scaler = None
 _episodic_memory = None
+_synthesizer = None
+_tool_registry = None
+_tool_gate = None
+_workspace_manager = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
@@ -514,8 +518,9 @@ async def lifespan(app: FastAPI):
     global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
     global _memory_store, _extra_routes_registered, _inquiry_engine
     global _cognitive_pool, _strategy_evolver, _prompt_mutator, _knowledge_loop
-    global _inquiry_bridge
+    global _inquiry_bridge, _synthesizer
     global _elastic_scaler, _episodic_memory
+    global _tool_registry, _tool_gate, _workspace_manager
 
     configure_from_config(get_settings())
 
@@ -560,6 +565,23 @@ async def lifespan(app: FastAPI):
         balanced_model = get_current_tiers().get("balanced", "gpt-4o")
         fast_model = get_current_tiers().get("fast", "gpt-4o-mini")
         _db_path = _substrate.belief_ledger._db_path
+
+        # Tool Infrastructure
+        from qe.runtime.tool_bootstrap import create_default_gate, create_default_registry
+        from qe.runtime.tool_gate import SecurityPolicy
+        from qe.runtime.workspace import WorkspaceManager
+
+        _tool_registry = create_default_registry()
+        _tool_gate = create_default_gate(policies=[
+            SecurityPolicy(
+                name="default",
+                max_calls_per_goal=50,
+                blocked_domains=["localhost", "127.0.0.1"],
+            ),
+        ])
+        _workspace_manager = WorkspaceManager(base_dir="data/workspaces")
+        BaseService.set_tool_registry(_tool_registry)
+        BaseService.set_tool_gate(_tool_gate)
 
         # Phase 1 Memory
         _episodic_memory = EpisodicMemory(db_path=_db_path)
@@ -638,6 +660,7 @@ async def lifespan(app: FastAPI):
             hypothesis_manager=_hypothesis_manager,
             question_store=_question_store,
             procedural_memory=_procedural_memory,
+            tool_registry=_tool_registry,
             bus=bus,
         )
         flag_store = get_flag_store()
@@ -650,6 +673,11 @@ async def lifespan(app: FastAPI):
             "prompt_evolution",
             enabled=False,
             description="Enable Thompson sampling over prompt variants",
+        )
+        flag_store.define(
+            "goal_orchestration",
+            enabled=False,
+            description="Enable goal orchestration with tool loops and synthesis",
         )
         readiness.mark_ready("inquiry_engine_ready")
 
@@ -783,6 +811,9 @@ async def lifespan(app: FastAPI):
             budget_tracker=_supervisor.budget_tracker,
             model=balanced_model,
             agent_id="executor_default",
+            tool_registry=_tool_registry,
+            tool_gate=_tool_gate,
+            workspace_manager=_workspace_manager,
         )
         await _executor.start()
 
@@ -805,6 +836,18 @@ async def lifespan(app: FastAPI):
 
         bus.subscribe("tasks.verified", _on_verified_result)
         bus.subscribe("tasks.recovered", _on_verified_result)
+
+        # Goal Synthesizer: aggregates subtask results on goal completion
+        from qe.services.synthesizer import GoalSynthesizer
+
+        _synthesizer = GoalSynthesizer(
+            bus=bus,
+            goal_store=_goal_store,
+            dialectic_engine=_dialectic_engine,
+            model=balanced_model,
+            budget_tracker=_supervisor.budget_tracker,
+        )
+        await _synthesizer.start()
 
         # Register the default executor as an agent in the pool
         from qe.runtime.agent_pool import AgentRecord
@@ -924,7 +967,7 @@ async def lifespan(app: FastAPI):
         # Shutdown — clear Phase 3 refs
         _inquiry_engine = None
 
-        # Shutdown — clear cognitive layer refs
+        # Shutdown — clear cognitive layer + tool refs
         try:
             BaseService._shared_episodic_memory = None
             BaseService._shared_bayesian_belief = None
@@ -934,6 +977,8 @@ async def lifespan(app: FastAPI):
             BaseService._shared_dialectic_engine = None
             BaseService._shared_persistence_engine = None
             BaseService._shared_insight_crystallizer = None
+            BaseService._shared_tool_registry = None
+            BaseService._shared_tool_gate = None
         except Exception:
             log.debug("shutdown.clear_shared_refs_failed")
 
@@ -942,6 +987,14 @@ async def lifespan(app: FastAPI):
                 await adapter.stop()
             except Exception:
                 log.exception("channel.stop_failed adapter=%s", adapter.channel_name)
+
+        # Shutdown — Synthesizer
+        try:
+            if _synthesizer is not None:
+                await _synthesizer.stop()
+        except Exception:
+            log.debug("shutdown.synthesizer_stop_failed")
+        _synthesizer = None
 
         try:
             if _verification_gate:

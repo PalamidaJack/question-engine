@@ -145,6 +145,10 @@ TOPICS = {
     "knowledge.hypothesis_updated",
     # Inquiry Bridge
     "bridge.strategy_outcome_recorded",
+    # Goal Orchestration Pipeline
+    "tasks.contract_violated",
+    "goals.synthesized",
+    "goals.synthesis_failed",
 }
 
 

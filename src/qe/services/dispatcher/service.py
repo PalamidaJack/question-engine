@@ -168,6 +168,15 @@ class Dispatcher:
 
             log.info("dispatcher.goal_completed goal_id=%s", goal_id)
 
+            # Build subtask results summary for the synthesizer
+            subtask_results_summary: dict[str, Any] = {}
+            for sid, sr in state.subtask_results.items():
+                content = sr.output.get("content", "")
+                subtask_results_summary[sid] = {
+                    "status": sr.status,
+                    "content_preview": content[:200] if content else "",
+                }
+
             self.bus.publish(
                 Envelope(
                     topic="goals.completed",
@@ -176,19 +185,50 @@ class Dispatcher:
                     payload={
                         "goal_id": goal_id,
                         "subtask_count": len(state.subtask_states),
+                        "subtask_results_summary": subtask_results_summary,
                     },
                 )
             )
             return
 
-        # Check for failures
+        # Intelligent failure handling with retry
         if result.status == "failed":
+            retry_counts = state.metadata.setdefault("retry_counts", {})
+            subtask_retries = retry_counts.get(result.subtask_id, 0)
+
+            # Look up contract max_retries for this subtask
+            max_retries = 3
+            if state.decomposition:
+                for st in state.decomposition.subtasks:
+                    if st.subtask_id == result.subtask_id:
+                        max_retries = st.contract.max_retries
+                        break
+
+            if subtask_retries < max_retries and self._is_dispatchable(state, result.subtask_id):
+                # Retry: reset subtask to pending and redispatch
+                retry_counts[result.subtask_id] = subtask_retries + 1
+                state.subtask_states[result.subtask_id] = "pending"
+                log.info(
+                    "dispatcher.retry goal_id=%s subtask_id=%s attempt=%d/%d",
+                    goal_id, result.subtask_id,
+                    subtask_retries + 1, max_retries,
+                )
+                await self.goal_store.save_goal(state)
+                await self._dispatch_ready(state)
+                return
+
+            # Check overall failure ratio
             failed_count = sum(
-                1
-                for s in state.subtask_states.values()
-                if s == "failed"
+                1 for s in state.subtask_states.values() if s == "failed"
             )
-            if failed_count >= 3:
+            total = len(state.subtask_states)
+            has_dispatchable = any(
+                self._is_dispatchable(state, sid)
+                for sid, status in state.subtask_states.items()
+                if status == "pending"
+            )
+
+            if (total > 0 and failed_count / total > 0.5) or not has_dispatchable:
                 state.transition_to("failed")
                 await self.goal_store.save_goal(state)
                 del self._active_goals[goal_id]
@@ -197,9 +237,8 @@ class Dispatcher:
                     self.working_memory.clear_goal(goal_id)
 
                 log.error(
-                    "dispatcher.goal_failed goal_id=%s failures=%d",
-                    goal_id,
-                    failed_count,
+                    "dispatcher.goal_failed goal_id=%s failures=%d/%d",
+                    goal_id, failed_count, total,
                 )
 
                 self.bus.publish(
@@ -209,7 +248,7 @@ class Dispatcher:
                         correlation_id=goal_id,
                         payload={
                             "goal_id": goal_id,
-                            "reason": "too_many_failures",
+                            "reason": f"failure_threshold_exceeded ({failed_count}/{total})",
                         },
                     )
                 )
@@ -353,6 +392,18 @@ class Dispatcher:
                     payload=payload,
                 )
             )
+
+    def _is_dispatchable(self, state: GoalState, subtask_id: str) -> bool:
+        """Check if a subtask can be dispatched (dependencies met)."""
+        if state.decomposition is None:
+            return False
+        for subtask in state.decomposition.subtasks:
+            if subtask.subtask_id == subtask_id:
+                return all(
+                    state.subtask_states.get(dep) == "completed"
+                    for dep in subtask.depends_on
+                )
+        return False
 
     def _all_complete(self, state: GoalState) -> bool:
         """Check if all subtasks have completed successfully."""

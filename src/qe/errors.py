@@ -218,6 +218,19 @@ class GoalTimeoutError(QEError):
     is_retryable = False
 
 
+class ExecutorContractError(QEError):
+    code = "QE_EXECUTOR_CONTRACT_VIOLATION"
+    domain = ErrorDomain.GOAL
+    is_retryable = False
+
+
+class ExecutorToolError(QEError):
+    code = "QE_EXECUTOR_TOOL_FAILED"
+    domain = ErrorDomain.GOAL
+    is_retryable = True
+    retry_delay_ms = 2000
+
+
 # ── API errors ─────────────────────────────────────────────────────────────
 
 

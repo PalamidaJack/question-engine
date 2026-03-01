@@ -613,6 +613,8 @@ class TestEventVersioning:
             "knowledge.consolidation_completed", "knowledge.belief_promoted",
             "knowledge.hypothesis_updated",
             "bridge.strategy_outcome_recorded",
+            "tasks.contract_violated",
+            "goals.synthesized", "goals.synthesis_failed",
         }
         assert set(TOPIC_SCHEMAS.keys()) == expected
 
