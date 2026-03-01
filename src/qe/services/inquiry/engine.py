@@ -613,8 +613,9 @@ class InquiryEngine:
         if self._dialectic is not None and investigation.raw_findings:
             try:
                 report = await self._dialectic.full_dialectic(
+                    goal_id=state.goal_id,
                     conclusion=investigation.raw_findings[:500],
-                    evidence=[question.text],
+                    evidence=question.text,
                     domain=state.config.domain,
                 )
                 state.overall_confidence = max(
@@ -647,9 +648,10 @@ class InquiryEngine:
         if self._crystallizer is not None and investigation.raw_findings:
             try:
                 insight = await self._crystallizer.crystallize(
+                    goal_id=state.goal_id,
                     finding=investigation.raw_findings[:500],
                     domain=state.config.domain,
-                    evidence=[question.text],
+                    evidence=question.text,
                 )
                 if insight is not None:
                     insights.append(insight)
