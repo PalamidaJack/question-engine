@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -244,6 +245,68 @@ class SelfCorrectionEngine:
             id_b,
             score_a,
         )
+        return result
+
+    async def evaluate_with_bayes_factor(
+        self,
+        claim: dict,
+        challenge: dict,
+    ) -> CorrectionResult:
+        """Evaluate a challenge using Bayes factor analysis.
+
+        BF = challenge_conf / claim_conf
+        - log10(BF) > 1.0 (BF > 10) → superseded
+        - log10(BF) > 0.48 (BF > 3) → needs_investigation
+        - else → reinforced
+        """
+        claim_id = _claim_field(claim, "claim_id", "unknown")
+        claim_conf = float(_claim_field(claim, "confidence", 0.5))
+        challenge_conf = float(_claim_field(challenge, "confidence", 0.5))
+        combined_evidence = _gather_evidence(claim) + _gather_evidence(challenge)
+
+        # Prevent division by zero
+        safe_claim = max(claim_conf, 1e-10)
+        bf = challenge_conf / safe_claim
+        log_bf = math.log10(max(bf, 1e-10))
+
+        if log_bf > 1.0:  # BF > 10 — strong evidence for challenge
+            result = CorrectionResult(
+                original_claim_id=claim_id,
+                action="superseded",
+                new_confidence=challenge_conf,
+                evidence=combined_evidence,
+            )
+            self._stats["superseded"] += 1
+            log.info(
+                "bayes_factor.superseded claim=%s bf=%.2f log_bf=%.2f",
+                claim_id, bf, log_bf,
+            )
+        elif log_bf > 0.48:  # BF > 3 — substantial, needs investigation
+            result = CorrectionResult(
+                original_claim_id=claim_id,
+                action="needs_investigation",
+                new_confidence=None,
+                evidence=combined_evidence,
+            )
+            self._stats["needs_investigation"] += 1
+            log.info(
+                "bayes_factor.investigate claim=%s bf=%.2f log_bf=%.2f",
+                claim_id, bf, log_bf,
+            )
+        else:  # Inconclusive — reinforce
+            boosted = min(claim_conf + 0.05, 1.0)
+            result = CorrectionResult(
+                original_claim_id=claim_id,
+                action="reinforced",
+                new_confidence=boosted,
+                evidence=combined_evidence,
+            )
+            self._stats["reinforced"] += 1
+            log.info(
+                "bayes_factor.reinforced claim=%s bf=%.2f log_bf=%.2f",
+                claim_id, bf, log_bf,
+            )
+
         return result
 
     def get_correction_stats(self) -> dict:

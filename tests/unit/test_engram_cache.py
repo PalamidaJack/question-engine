@@ -1,10 +1,10 @@
 """Tests for EngramCache — Three-band cache inspired by DeepSeek Engram."""
 
-import time
+import asyncio
 
 import pytest
 
-from qe.runtime.engram_cache import BandStats, EngramCache, get_engram_cache
+from qe.runtime.engram_cache import BandStats, EngramCache
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ class TestExactBand:
         messages = [{"role": "user", "content": "Test"}]
         cache.store("gpt-4o", messages, "S", "response")
 
-        time.sleep(0.02)  # Wait for expiry
+        await asyncio.sleep(0.02)  # Wait for expiry
 
         band, response = await cache.lookup("gpt-4o", messages, "S")
         assert band == "full"

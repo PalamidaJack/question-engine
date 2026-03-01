@@ -114,6 +114,24 @@ TOPICS = {
     "cognitive.lesson_learned",
     "cognitive.insight_crystallized",
     "cognitive.capability_gap",
+    # Strategy Loop (Phase 4)
+    "strategy.selected",
+    "strategy.switch_requested",
+    "strategy.evaluated",
+    "pool.scale_recommended",
+    "pool.scale_executed",
+    "pool.health_check",
+    # Inquiry Loop (Phase 3)
+    "inquiry.started",
+    "inquiry.phase_completed",
+    "inquiry.question_generated",
+    "inquiry.investigation_completed",
+    "inquiry.hypothesis_generated",
+    "inquiry.hypothesis_updated",
+    "inquiry.insight_generated",
+    "inquiry.completed",
+    "inquiry.failed",
+    "inquiry.budget_warning",
 }
 
 

@@ -40,10 +40,12 @@ from qe.models.envelope import Envelope
 from qe.runtime.context_curator import ContextCurator
 from qe.runtime.episodic_memory import EpisodicMemory
 from qe.runtime.epistemic_reasoner import EpistemicReasoner
+from qe.runtime.feature_flags import get_flag_store
 from qe.runtime.logging_config import configure_from_config, update_log_level
 from qe.runtime.metacognitor import Metacognitor
 from qe.runtime.metrics import get_metrics
 from qe.runtime.persistence_engine import PersistenceEngine
+from qe.runtime.procedural_memory import ProceduralMemory
 from qe.runtime.readiness import get_readiness
 from qe.runtime.service import BaseService
 from qe.services.chat import ChatService
@@ -51,7 +53,10 @@ from qe.services.dispatcher import Dispatcher
 from qe.services.doctor import DoctorService
 from qe.services.executor import ExecutorService
 from qe.services.inquiry.dialectic import DialecticEngine
+from qe.services.inquiry.engine import InquiryEngine
+from qe.services.inquiry.hypothesis import HypothesisManager
 from qe.services.inquiry.insight import InsightCrystallizer
+from qe.services.inquiry.question_generator import QuestionGenerator
 from qe.services.planner import PlannerService
 from qe.services.query import answer_question
 from qe.services.recovery import RecoveryOrchestrator
@@ -61,6 +66,7 @@ from qe.substrate.bayesian_belief import BayesianBeliefStore
 from qe.substrate.failure_kb import FailureKnowledgeBase
 from qe.substrate.goal_store import GoalStore
 from qe.substrate.memory_store import MemoryStore
+from qe.substrate.question_store import QuestionStore
 
 load_dotenv()
 
@@ -84,6 +90,9 @@ _memory_store: MemoryStore | None = None
 _notification_router = None
 _active_adapters: list = []
 _extra_routes_registered = False
+_inquiry_engine: InquiryEngine | None = None
+_cognitive_pool = None
+_strategy_evolver = None
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -462,7 +471,8 @@ async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
     global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
     global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
-    global _memory_store, _extra_routes_registered
+    global _memory_store, _extra_routes_registered, _inquiry_engine
+    global _cognitive_pool, _strategy_evolver
 
     configure_from_config(get_settings())
 
@@ -534,6 +544,82 @@ async def lifespan(app: FastAPI):
         BaseService.set_insight_crystallizer(_insight_crystallizer)
 
         readiness.mark_ready("cognitive_layer_ready")
+
+        # Phase 3 Inquiry Engine
+        _question_generator = QuestionGenerator(model=fast_model)
+        _hypothesis_manager = HypothesisManager(
+            belief_store=_bayesian_belief, model=balanced_model
+        )
+        _question_store = QuestionStore(db_path=_substrate.belief_ledger._db_path)
+        await _question_store.initialize()
+        _procedural_memory = ProceduralMemory(db_path=_substrate.belief_ledger._db_path)
+        await _procedural_memory.initialize()
+        _inquiry_engine = InquiryEngine(
+            episodic_memory=_episodic_memory,
+            context_curator=_context_curator,
+            metacognitor=_metacognitor,
+            epistemic_reasoner=_epistemic_reasoner,
+            dialectic_engine=_dialectic_engine,
+            persistence_engine=_persistence_engine,
+            insight_crystallizer=_insight_crystallizer,
+            question_generator=_question_generator,
+            hypothesis_manager=_hypothesis_manager,
+            question_store=_question_store,
+            procedural_memory=_procedural_memory,
+            bus=bus,
+        )
+        flag_store = get_flag_store()
+        flag_store.define(
+            "inquiry_mode",
+            enabled=False,
+            description="Route POST /api/goals to InquiryEngine instead of v1 pipeline",
+        )
+        readiness.mark_ready("inquiry_engine_ready")
+
+        # Phase 4: Strategy Loop + Elastic Scaling
+        from qe.runtime.cognitive_agent_pool import CognitiveAgentPool
+        from qe.runtime.strategy_evolver import ElasticScaler, StrategyEvolver
+
+        def _engine_factory() -> InquiryEngine:
+            """Factory closure capturing all cognitive components."""
+            return InquiryEngine(
+                episodic_memory=_episodic_memory,
+                context_curator=_context_curator,
+                metacognitor=_metacognitor,
+                epistemic_reasoner=_epistemic_reasoner,
+                dialectic_engine=_dialectic_engine,
+                persistence_engine=_persistence_engine,
+                insight_crystallizer=_insight_crystallizer,
+                question_generator=QuestionGenerator(model=fast_model),
+                hypothesis_manager=HypothesisManager(
+                    belief_store=_bayesian_belief, model=balanced_model
+                ),
+                question_store=_question_store,
+                procedural_memory=_procedural_memory,
+                bus=bus,
+            )
+
+        _cognitive_pool = CognitiveAgentPool(
+            bus=bus,
+            max_agents=5,
+            engine_factory=_engine_factory,
+        )
+        _strategy_evolver = StrategyEvolver(
+            agent_pool=_cognitive_pool,
+            procedural_memory=_procedural_memory,
+            bus=bus,
+        )
+        _elastic_scaler = ElasticScaler(
+            agent_pool=_cognitive_pool,
+            budget_tracker=_supervisor.budget_tracker,
+        )
+        flag_store.define(
+            "multi_agent_mode",
+            enabled=False,
+            description="Use CognitiveAgentPool for parallel multi-agent inquiry",
+        )
+        await _strategy_evolver.start()
+        readiness.mark_ready("strategy_loop_ready")
 
         _chat_service = ChatService(
             substrate=_substrate,
@@ -642,6 +728,18 @@ async def lifespan(app: FastAPI):
         log.info("QE API server started (setup required — no API keys configured)")
 
     yield
+
+    # Shutdown — Phase 4 strategy loop
+    if _strategy_evolver is not None:
+        try:
+            await _strategy_evolver.stop()
+        except Exception:
+            log.debug("shutdown.strategy_evolver_stop_failed")
+    _cognitive_pool = None
+    _strategy_evolver = None
+
+    # Shutdown — clear Phase 3 refs
+    _inquiry_engine = None
 
     # Shutdown — clear cognitive layer refs
     BaseService._shared_episodic_memory = None
@@ -1322,15 +1420,64 @@ async def hil_reject(envelope_id: str, body: dict[str, Any] | None = None):
 
 @app.post("/api/goals")
 async def submit_goal(body: dict[str, Any]):
-    """Submit a new goal for decomposition and execution."""
-    if not _planner or not _dispatcher:
-        return JSONResponse({"error": "Engine not started"}, status_code=503)
+    """Submit a new goal for decomposition and execution.
 
+    When the inquiry_mode feature flag is enabled, routes through the
+    InquiryEngine (v2 7-phase loop) instead of the v1 pipeline.
+    """
     description = body.get("description", "").strip()
     if not description:
         return JSONResponse(
             {"error": "description is required"}, status_code=400
         )
+
+    # v2 Multi-agent path
+    flag_store = get_flag_store()
+    if flag_store.is_enabled("multi_agent_mode"):
+        try:
+            if _cognitive_pool is not None:
+                goal_id = f"goal_{uuid.uuid4().hex[:12]}"
+                results = await _cognitive_pool.run_parallel_inquiry(
+                    goal_id=goal_id,
+                    goal_description=description,
+                )
+                if results:
+                    merged = await _cognitive_pool.merge_results(results)
+                    return {
+                        "goal_id": merged.goal_id,
+                        "inquiry_id": merged.inquiry_id,
+                        "status": merged.status,
+                        "termination_reason": merged.termination_reason,
+                        "iterations": merged.iterations_completed,
+                        "questions_answered": merged.total_questions_answered,
+                        "insights_count": len(merged.insights),
+                        "findings_summary": merged.findings_summary[:1000],
+                        "mode": "multi_agent",
+                    }
+        except Exception:
+            log.debug("submit_goal.multi_agent_fallthrough")
+
+    # v2 Inquiry path (single agent)
+    if flag_store.is_enabled("inquiry_mode") and _inquiry_engine is not None:
+        goal_id = f"goal_{uuid.uuid4().hex[:12]}"
+        result = await _inquiry_engine.run_inquiry(
+            goal_id=goal_id,
+            goal_description=description,
+        )
+        return {
+            "goal_id": result.goal_id,
+            "inquiry_id": result.inquiry_id,
+            "status": result.status,
+            "termination_reason": result.termination_reason,
+            "iterations": result.iterations_completed,
+            "questions_answered": result.total_questions_answered,
+            "insights_count": len(result.insights),
+            "findings_summary": result.findings_summary[:1000],
+        }
+
+    # v1 Pipeline path
+    if not _planner or not _dispatcher:
+        return JSONResponse({"error": "Engine not started"}, status_code=503)
 
     state = await _planner.decompose(description)
     await _dispatcher.submit_goal(state)

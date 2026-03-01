@@ -5,8 +5,6 @@ import pytest
 from qe.runtime.context_curator import (
     ContextCurator,
     DriftReport,
-    WorkingMemorySlot,
-    WorkingMemoryState,
 )
 
 
@@ -224,7 +222,7 @@ class TestRefocus:
         curator.add_slot("g1", "s1", "Investment data analysis", "finding", 0.8)
         curator.add_slot("g1", "s2", "Completely unrelated noise", "finding", 0.01)
 
-        evicted = await curator.refocus("g1")
+        await curator.refocus("g1")
         # The very low relevance slot should have been evicted
         state = curator.get_or_create_state("g1", "")
         remaining_ids = {s.slot_id for s in state.slots}

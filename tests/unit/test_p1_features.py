@@ -598,6 +598,15 @@ class TestEventVersioning:
             "agents.registered",
             "coordination.vote_request", "coordination.vote_response",
             "tasks.delegated",
+            "inquiry.started", "inquiry.phase_completed",
+            "inquiry.question_generated", "inquiry.investigation_completed",
+            "inquiry.hypothesis_generated", "inquiry.hypothesis_updated",
+            "inquiry.insight_generated", "inquiry.completed",
+            "inquiry.failed", "inquiry.budget_warning",
+            "strategy.selected", "strategy.switch_requested",
+            "strategy.evaluated",
+            "pool.scale_recommended", "pool.scale_executed",
+            "pool.health_check",
         }
         assert set(TOPIC_SCHEMAS.keys()) == expected
 

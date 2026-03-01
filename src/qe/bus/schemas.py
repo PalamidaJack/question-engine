@@ -7,7 +7,7 @@ validation on publish/subscribe and schema versioning.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -163,6 +163,149 @@ class TaskDelegatedPayload(BaseModel):
     dependency_context: dict[str, Any] = Field(default_factory=dict)
 
 
+# ── Inquiry Loop payloads ──────────────────────────────────────────────────
+
+
+class InquiryStartedPayload(BaseModel):
+    """Payload for inquiry.started topic."""
+
+    inquiry_id: str
+    goal_id: str
+    goal: str = ""
+
+
+class InquiryPhaseCompletedPayload(BaseModel):
+    """Payload for inquiry.phase_completed topic."""
+
+    inquiry_id: str
+    goal_id: str
+    phase: Literal[
+        "observe", "orient", "question", "prioritize",
+        "investigate", "synthesize", "reflect",
+    ]
+    iteration: int = 0
+    decision: str = ""
+
+
+class InquiryCompletedPayload(BaseModel):
+    """Payload for inquiry.completed topic."""
+
+    inquiry_id: str
+    goal_id: str
+    status: str = "completed"
+    iterations: int = 0
+    insights: int = 0
+    questions_answered: int = 0
+
+
+class InquiryQuestionGeneratedPayload(BaseModel):
+    """Payload for inquiry.question_generated topic."""
+
+    inquiry_id: str
+    question_id: str
+    text: str = ""
+
+
+class InquiryInvestigationCompletedPayload(BaseModel):
+    """Payload for inquiry.investigation_completed topic."""
+
+    inquiry_id: str
+    question_id: str
+
+
+class InquiryHypothesisGeneratedPayload(BaseModel):
+    """Payload for inquiry.hypothesis_generated topic."""
+
+    inquiry_id: str
+    hypothesis_id: str
+    statement: str = ""
+
+
+class InquiryHypothesisUpdatedPayload(BaseModel):
+    """Payload for inquiry.hypothesis_updated topic."""
+
+    inquiry_id: str
+    hypothesis_id: str
+    probability: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class InquiryInsightGeneratedPayload(BaseModel):
+    """Payload for inquiry.insight_generated topic."""
+
+    inquiry_id: str
+    insight_id: str
+    headline: str = ""
+
+
+class InquiryFailedPayload(BaseModel):
+    """Payload for inquiry.failed topic."""
+
+    inquiry_id: str
+    iteration: int = 0
+
+
+class InquiryBudgetWarningPayload(BaseModel):
+    """Payload for inquiry.budget_warning topic."""
+
+    inquiry_id: str
+    iteration: int = 0
+
+
+# ── Strategy Loop payloads (Phase 4) ──────────────────────────────────────
+
+
+class StrategySelectedPayload(BaseModel):
+    """Payload for strategy.selected topic."""
+
+    strategy_name: str
+    agent_id: str = ""
+    reason: str = ""
+
+
+class StrategySwitchRequestedPayload(BaseModel):
+    """Payload for strategy.switch_requested topic."""
+
+    agent_id: str = ""
+    from_strategy: str
+    to_strategy: str
+    reason: str = ""
+
+
+class StrategyEvaluatedPayload(BaseModel):
+    """Payload for strategy.evaluated topic."""
+
+    strategy_name: str
+    alpha: float = 1.0
+    beta: float = 1.0
+    sample_count: int = 0
+
+
+class PoolScaleRecommendedPayload(BaseModel):
+    """Payload for pool.scale_recommended topic."""
+
+    profile_name: str
+    agents_count: int = 0
+    model_tier: str = "balanced"
+    reasoning: str = ""
+
+
+class PoolScaleExecutedPayload(BaseModel):
+    """Payload for pool.scale_executed topic."""
+
+    profile_name: str
+    agents_before: int = 0
+    agents_after: int = 0
+
+
+class PoolHealthCheckPayload(BaseModel):
+    """Payload for pool.health_check topic."""
+
+    total_agents: int = 0
+    active_agents: int = 0
+    avg_success_rate: float = 0.0
+    avg_load_pct: float = 0.0
+
+
 # ── Schema Registry ────────────────────────────────────────────────────────
 
 # Maps topic -> payload model for validation
@@ -182,6 +325,22 @@ TOPIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "coordination.vote_request": VoteRequestPayload,
     "coordination.vote_response": VoteResponsePayload,
     "tasks.delegated": TaskDelegatedPayload,
+    "strategy.selected": StrategySelectedPayload,
+    "strategy.switch_requested": StrategySwitchRequestedPayload,
+    "strategy.evaluated": StrategyEvaluatedPayload,
+    "pool.scale_recommended": PoolScaleRecommendedPayload,
+    "pool.scale_executed": PoolScaleExecutedPayload,
+    "pool.health_check": PoolHealthCheckPayload,
+    "inquiry.started": InquiryStartedPayload,
+    "inquiry.phase_completed": InquiryPhaseCompletedPayload,
+    "inquiry.question_generated": InquiryQuestionGeneratedPayload,
+    "inquiry.investigation_completed": InquiryInvestigationCompletedPayload,
+    "inquiry.hypothesis_generated": InquiryHypothesisGeneratedPayload,
+    "inquiry.hypothesis_updated": InquiryHypothesisUpdatedPayload,
+    "inquiry.insight_generated": InquiryInsightGeneratedPayload,
+    "inquiry.completed": InquiryCompletedPayload,
+    "inquiry.failed": InquiryFailedPayload,
+    "inquiry.budget_warning": InquiryBudgetWarningPayload,
 }
 
 

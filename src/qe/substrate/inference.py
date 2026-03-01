@@ -242,6 +242,77 @@ class TemporalTemplate(InferenceTemplate):
         return inferred
 
 
+class HypothesisTemplate(InferenceTemplate):
+    """Hypothesis-based inference: hypothesis status affects related claims.
+
+    - Claims with `hypothesis_id` metadata where hypothesis reached confirmed
+      (p >= 0.95) → infer high-confidence claim
+    - Claims with `hypothesis_id` where hypothesis falsified (p <= 0.05) →
+      weaken supporting claims
+    """
+
+    def __init__(self, hypotheses: list[dict] | None = None) -> None:
+        # hypotheses: list of dicts with hypothesis_id, current_probability, status
+        self._hypotheses = {
+            h["hypothesis_id"]: h
+            for h in (hypotheses or [])
+        }
+
+    def match(self, claims: list[dict]) -> list[InferredClaim]:
+        inferred: list[InferredClaim] = []
+
+        for claim in claims:
+            metadata = _claim_field(claim, "metadata", {})
+            if not isinstance(metadata, dict):
+                continue
+
+            hyp_id = metadata.get("hypothesis_id")
+            if not hyp_id or hyp_id not in self._hypotheses:
+                continue
+
+            hyp = self._hypotheses[hyp_id]
+            prob = float(hyp.get("current_probability", 0.5))
+            status = hyp.get("status", "active")
+            claim_id = _claim_field(claim, "claim_id")
+            subj = _claim_field(claim, "subject_entity_id")
+            pred = _claim_field(claim, "predicate")
+            obj = _claim_field(claim, "object_value")
+            claim_conf = float(_claim_field(claim, "confidence", 0.5))
+
+            if status == "confirmed" or prob >= 0.95:
+                # Hypothesis confirmed → boost claim confidence
+                boosted = min(claim_conf * 1.3, 0.99)
+                inferred.append(InferredClaim(
+                    subject=subj,
+                    predicate=pred,
+                    object_=obj,
+                    confidence=boosted,
+                    reasoning=(
+                        f"Hypothesis {hyp_id} confirmed (p={prob:.2f}). "
+                        f"Boosting claim confidence from {claim_conf:.2f} to {boosted:.2f}."
+                    ),
+                    source_claim_ids=[claim_id],
+                    inference_type="hypothesis_confirmed",
+                ))
+            elif status == "falsified" or prob <= 0.05:
+                # Hypothesis falsified → weaken claim
+                weakened = max(claim_conf * 0.5, 0.01)
+                inferred.append(InferredClaim(
+                    subject=subj,
+                    predicate=pred,
+                    object_=obj,
+                    confidence=weakened,
+                    reasoning=(
+                        f"Hypothesis {hyp_id} falsified (p={prob:.2f}). "
+                        f"Weakening claim confidence from {claim_conf:.2f} to {weakened:.2f}."
+                    ),
+                    source_claim_ids=[claim_id],
+                    inference_type="hypothesis_falsified",
+                ))
+
+        return inferred
+
+
 class SymbolicInferenceEngine:
     """Runs inference templates over claims to derive new knowledge and detect
     inconsistencies."""

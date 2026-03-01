@@ -176,7 +176,7 @@ class TestCrossStoreSearch:
         assert len(results) == 5
 
     async def test_clear_goal_clears_both(self, memory_with_db):
-        for i in range(5):
+        for _i in range(5):
             await memory_with_db.store(make_episode(goal_id="goal_1"))
 
         removed = await memory_with_db.clear_goal("goal_1")
