@@ -18,7 +18,7 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 
 - `src/qe/api/app.py` — Main FastAPI app, lifespan, channel wiring, all endpoints
 - `src/qe/channels/` — Channel adapters (telegram, slack, email, webhook) + notifications router
-- `src/qe/services/` — Planner, Dispatcher, Executor, VerificationGate, Recovery, Checkpoint, Doctor, Chat
+- `src/qe/services/` — Planner, Dispatcher, Executor, Synthesizer, VerificationGate, Recovery, Checkpoint, Doctor, Chat
 - `src/qe/services/inquiry/` — **NEW (v2)**: Dialectic Engine, Insight Crystallizer (Inquiry Loop components)
 - `src/qe/bus/` — MemoryBus, event log, bus metrics
 - `src/qe/substrate/` — Belief ledger (SQLite), cold storage, goal store, embeddings, BayesianBeliefStore
@@ -33,14 +33,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1724 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1845 unit/integration tests, all passing
 .venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
-## Current State (2026-03-01)
+## Current State (2026-03-02)
 
-~1724 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~1845 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring + 69 Goal Orchestration Pipeline), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -183,6 +183,17 @@ All built, tested (39 tests in 1 new test file), lint clean. Closes the forward 
 - `src/qe/runtime/inquiry_bridge.py` — Enriched `StrategyOutcome` with `duration_s`/`cost_usd` from bus event payload, completing the full feedback loop: InquiryEngine → bus → InquiryBridge → StrategyOutcome → StrategyEvolver
 - Tests: `tests/unit/test_strategy_wiring.py` (39 tests: strategy_to_inquiry_config mapping/clamping/defaults, select_strategy at 3 call sites, per-agent configs, elastic scaler wiring/profile change/budget tracker, auto-populate pool, outcome enrichment with duration/cost, full cycle integration)
 
+### Goal Orchestration Pipeline — COMPLETE
+All built, tested (69 tests across 5 new test files + 1 modified), lint clean. Connects the v2 cognitive architecture to end-to-end goal execution with tool loops, result synthesis, and intelligent retry:
+- **Phase A: Tool Infrastructure Wiring** — `src/qe/api/app.py` initializes `ToolRegistry` (6 built-in tools: web_search, web_fetch, file_read, file_write, code_execute, browser_navigate) and `ToolGate` (SecurityPolicy with rate limiting, domain blocking, capability checks) in lifespan. Set on `BaseService` shared refs. `goal_orchestration` feature flag added. `tool_registry` passed to `InquiryEngine`
+- **Phase B: ExecutorService Upgrade** — `src/qe/services/executor/service.py` upgraded with: (1) agentic `_run_tool_loop()` (10-iteration cap, LLM↔tool cycle following InquiryEngine._phase_investigate pattern), (2) `_validate_preconditions()`/`_validate_postconditions()` for contract enforcement (non_empty, data_available, min_length:N), (3) structured retry with `classify_error()` and `recovery_history` tracking, (4) task_type→capabilities mapping (web_search→{web_search}, code_execution→{code_execute}, research→{web_search}). New errors: `ExecutorContractError` (non-retryable), `ExecutorToolError` (retryable, 2s). New bus topic: `tasks.contract_violated`
+- **Phase C: GoalSynthesizer** — `src/qe/services/synthesizer/service.py` (new service): subscribes to `goals.completed`, aggregates subtask results via LLM synthesis (instructor+litellm with `SynthesisInput` response model), optional dialectic review (revises confidence), stores `GoalResult` in `state.metadata["goal_result"]`. Models: `GoalResult` (summary, findings, confidence, provenance, recommendations, cost/latency totals), `SynthesisInput` (LLM response). New bus topics: `goals.synthesized`, `goals.synthesis_failed`
+- **Phase D: End-to-End Wiring** — Synthesizer wired in app.py lifespan (after executor, before agent registration). ExecutorService receives `tool_registry`, `tool_gate`, `workspace_manager`. Two new API endpoints: `GET /api/goals/{goal_id}/progress` (subtask DAG with statuses, pct_complete), `GET /api/goals/{goal_id}/result` (GoalResult or 202 if pending). Dispatcher upgraded with intelligent retry: per-subtask retry counts from `contract.max_retries`, reset-to-pending-and-redispatch on failure, fail goal only when >50% subtasks failed or no dispatchable subtasks remain. Enriched `goals.completed` payload with `subtask_results_summary`
+- `src/qe/bus/protocol.py` — 3 new topics (148 total): `tasks.contract_violated`, `goals.synthesized`, `goals.synthesis_failed`
+- `src/qe/bus/schemas.py` — 3 new payload schemas (44 total): `TaskContractViolatedPayload`, `GoalSynthesizedPayload`, `GoalSynthesisFailedPayload`. `GoalCompletedPayload` extended with `subtask_results_summary`
+- `src/qe/errors.py` — 2 new error classes: `ExecutorContractError`, `ExecutorToolError`
+- Tests: `tests/unit/test_tool_wiring.py` (11), `tests/unit/test_executor_upgrade.py` (24), `tests/unit/test_goal_synthesizer.py` (19), `tests/unit/test_goal_orchestration_wiring.py` (11), `tests/integration/test_goal_pipeline_e2e.py` (4: full 2-subtask pipeline, retry→success, dialectic synthesis, metadata retrieval)
+
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
 - Multi-agent orchestration (planner, dispatcher, executor)
@@ -205,3 +216,6 @@ All built, tested (39 tests in 1 new test file), lint clean. Closes the forward 
 - PromptMutator tests mock LLM via `patch("qe.optimization.prompt_mutator.instructor")` + mock client with `AsyncMock` for `chat.completions.create` returning `MutatedPrompt`; feature flag gating via `patch("qe.optimization.prompt_mutator.get_flag_store")`
 - KnowledgeLoop tests mock LLM via `patch("qe.runtime.knowledge_loop.instructor")` + mock client; feature flag gating via `patch("qe.runtime.knowledge_loop.get_flag_store")`; `Claim` model requires `source_envelope_ids=[]` when constructing programmatically
 - InquiryBridge tests use `MagicMock` for bus (subscribe/unsubscribe/publish), `AsyncMock(spec=EpisodicMemory)` for episodic memory, `MagicMock` with `_current_strategy` attribute for strategy evolver, `AsyncMock` with `trigger_consolidation` for knowledge loop
+- ExecutorService tests mock LLM via `patch("qe.services.executor.service.litellm")` + `AsyncMock` for `acompletion`; tool registry/gate via `MagicMock` with `get_tool_schemas`/`execute`/`validate` methods; rate limiter via `patch("qe.services.executor.service.get_rate_limiter")`
+- GoalSynthesizer tests mock LLM via `patch("qe.services.synthesizer.service.instructor")` + `AsyncMock` client returning `SynthesisInput`; goal store via `AsyncMock` with `load_goal`/`save_goal`; dialectic engine via `AsyncMock` with `full_dialectic` returning mock report with `revised_confidence`
+- Goal pipeline E2E tests use `MemoryBus` (real) + `FakeGoalStore` (in-memory dict) + real `Dispatcher` + `ExecutorService`/`GoalSynthesizer` with mocked LLMs
