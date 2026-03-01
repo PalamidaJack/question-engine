@@ -39,6 +39,8 @@ class StrategyEvolver:
         strategies: dict[str, StrategyConfig] | None = None,
         update_interval_s: float = 60.0,
         success_threshold: float = 0.5,
+        elastic_scaler: Any = None,
+        budget_tracker: Any = None,
     ) -> None:
         strats = strategies or DEFAULT_STRATEGIES
         self._strategies = dict(strats)
@@ -50,6 +52,8 @@ class StrategyEvolver:
         self._bus = bus
         self._update_interval_s = update_interval_s
         self._success_threshold = success_threshold
+        self._elastic_scaler = elastic_scaler
+        self._budget_tracker = budget_tracker
         self._running = False
         self._loop_task: asyncio.Task[Any] | None = None
         self._current_strategy: str | None = None
@@ -187,6 +191,25 @@ class StrategyEvolver:
                     "to_strategy": new_strategy.name,
                     "reason": f"Success rate {arm.mean:.2f} < {self._success_threshold}",
                 })
+
+        # Elastic scaling
+        if self._elastic_scaler is not None and self._agent_pool is not None:
+            try:
+                pool_stats = self._agent_pool.pool_status()
+                budget_pct = 1.0  # default: full budget
+                if self._budget_tracker is not None:
+                    budget_pct = self._budget_tracker.remaining_pct()
+                profile = self._elastic_scaler.recommend_profile(pool_stats, budget_pct)
+                if profile.name != self._elastic_scaler.current_profile_name():
+                    old_profile = self._elastic_scaler.current_profile_name()
+                    await self._elastic_scaler.apply_profile(profile)
+                    self._publish("pool.scale_executed", {
+                        "from_profile": old_profile,
+                        "to_profile": profile.name,
+                        "target_agents": profile.max_agents,
+                    })
+            except Exception:
+                log.exception("strategy_evolver.elastic_scale_error")
 
     def _publish(self, topic: str, payload: dict[str, Any]) -> None:
         """Publish a bus event if bus is available."""

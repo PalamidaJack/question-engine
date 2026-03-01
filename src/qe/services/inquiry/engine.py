@@ -804,6 +804,8 @@ class InquiryEngine:
             "iterations": state.current_iteration + 1,
             "insights": len(insights),
             "questions_answered": answered,
+            "duration_s": duration,
+            "cost_usd": total_cost,
         })
 
         return result

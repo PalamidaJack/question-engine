@@ -6,7 +6,12 @@ and predefined defaults used by StrategyEvolver and ElasticScaler.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from qe.services.inquiry.schemas import InquiryConfig
 
 
 class StrategyConfig(BaseModel):
@@ -90,6 +95,25 @@ DEFAULT_STRATEGIES: dict[str, StrategyConfig] = {
         preferred_model_tier="fast",
     ),
 }
+
+
+def strategy_to_inquiry_config(strategy: StrategyConfig) -> InquiryConfig:
+    """Map a StrategyConfig to an InquiryConfig for the InquiryEngine."""
+    from qe.services.inquiry.schemas import InquiryConfig as _InquiryConfig
+
+    model_map = {
+        "fast": "openai/google/gemini-2.0-flash",
+        "balanced": "openai/anthropic/claude-sonnet-4",
+    }
+    model = model_map.get(strategy.preferred_model_tier, model_map["balanced"])
+
+    return _InquiryConfig(
+        questions_per_iteration=strategy.question_batch_size,
+        max_iterations=strategy.max_depth,
+        confidence_threshold=max(0.1, min(1.0, 1.0 - strategy.exploration_rate)),
+        model_balanced=model,
+        model_fast="openai/google/gemini-2.0-flash",
+    )
 
 
 # ── Predefined scale profiles ────────────────────────────────────────────

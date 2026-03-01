@@ -33,14 +33,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1685 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1724 unit/integration tests, all passing
 .venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1685 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~1724 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -171,6 +171,17 @@ All built, tested (38 tests across 2 new + 2 modified test files), lint clean. C
 - `src/qe/bus/schemas.py` — 1 new payload schema (41 total): `BridgeStrategyOutcomePayload`
 - `src/qe/api/app.py` — InquiryBridge wired in lifespan (after knowledge loop, before chat service), `knowledge_loop_ready` readiness mark, v2 channel routing (`inquiry_mode` flag routes channel messages to InquiryEngine before v1 fallback), `GET /api/bridge/status` endpoint, shutdown cleanup
 - Tests: `tests/unit/test_inquiry_bridge.py` (24 tests: init, lifecycle, all 4 event handlers, strategy outcome recording, knowledge consolidation trigger, bus events, status, full lifecycle integration), `tests/unit/test_inquiry_bridge_wiring.py` (12 tests: bus topic/schema registration, schema validation/defaults, readiness fields, trigger_consolidation), `tests/unit/test_knowledge_loop.py` (+2 tests: trigger_consolidation runs/noop), `tests/unit/test_p1_features.py` (+1 topic in expected set)
+
+### Strategy → Inquiry Wiring — COMPLETE
+All built, tested (39 tests in 1 new test file), lint clean. Closes the forward path: strategy selection → inquiry config → execution → outcome recording with duration/cost:
+- `src/qe/runtime/strategy_models.py` — Added `strategy_to_inquiry_config()`: maps StrategyConfig → InquiryConfig (question_batch_size→questions_per_iteration, max_depth→max_iterations, exploration_rate→inverse confidence_threshold, preferred_model_tier→model lookup)
+- `src/qe/api/app.py` — Wired `select_strategy()` at all 3 inquiry call sites (single-agent, multi-agent, channel routing) behind respective feature flags; auto-populate agent pool with diverse DEFAULT_STRATEGIES at startup (behind `multi_agent_mode` flag); pass `elastic_scaler` + `budget_tracker` to StrategyEvolver
+- `src/qe/runtime/cognitive_agent_pool.py` — Per-agent strategy-derived configs in `run_parallel_inquiry()`: each agent uses its slot's StrategyConfig converted to InquiryConfig when no shared config is passed
+- `src/qe/runtime/strategy_evolver.py` — Added `elastic_scaler`/`budget_tracker` params to `__init__`; elastic scaling in `_evaluate()` calls `recommend_profile()`, applies on change, publishes `pool.scale_executed` event
+- `src/qe/bus/schemas.py` — Added `duration_s` and `cost_usd` fields to `InquiryCompletedPayload`
+- `src/qe/services/inquiry/engine.py` — Added `duration_s`/`cost_usd` to `inquiry.completed` event payload in `_finalize()`
+- `src/qe/runtime/inquiry_bridge.py` — Enriched `StrategyOutcome` with `duration_s`/`cost_usd` from bus event payload, completing the full feedback loop: InquiryEngine → bus → InquiryBridge → StrategyOutcome → StrategyEvolver
+- Tests: `tests/unit/test_strategy_wiring.py` (39 tests: strategy_to_inquiry_config mapping/clamping/defaults, select_strategy at 3 call sites, per-agent configs, elastic scaler wiring/profile change/budget tracker, auto-populate pool, outcome enrichment with duration/cost, full cycle integration)
 
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager

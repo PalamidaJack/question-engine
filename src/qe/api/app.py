@@ -264,8 +264,17 @@ async def _init_channels() -> None:
         if get_flag_store().is_enabled("inquiry_mode") and _inquiry_engine is not None:
             try:
                 goal_id = f"goal_{uuid.uuid4().hex[:12]}"
+
+                # Select strategy via Thompson sampling
+                config = None
+                if _strategy_evolver is not None:
+                    from qe.runtime.strategy_models import strategy_to_inquiry_config
+                    strategy = _strategy_evolver.select_strategy()
+                    config = strategy_to_inquiry_config(strategy)
+
                 result = await _inquiry_engine.run_inquiry(
                     goal_id=goal_id, goal_description=text,
+                    config=config,
                 )
                 # Notify via channel if router available
                 if _notification_router is not None:
@@ -669,13 +678,15 @@ async def lifespan(app: FastAPI):
             max_agents=5,
             engine_factory=_engine_factory,
         )
+        _elastic_scaler = ElasticScaler(
+            agent_pool=_cognitive_pool,
+            budget_tracker=_supervisor.budget_tracker,
+        )
         _strategy_evolver = StrategyEvolver(
             agent_pool=_cognitive_pool,
             procedural_memory=_procedural_memory,
             bus=bus,
-        )
-        _elastic_scaler = ElasticScaler(
-            agent_pool=_cognitive_pool,
+            elastic_scaler=_elastic_scaler,
             budget_tracker=_supervisor.budget_tracker,
         )
         flag_store.define(
@@ -683,6 +694,21 @@ async def lifespan(app: FastAPI):
             enabled=False,
             description="Use CognitiveAgentPool for parallel multi-agent inquiry",
         )
+
+        # Auto-populate pool with diverse strategies (when multi-agent enabled)
+        if flag_store.is_enabled("multi_agent_mode") and _cognitive_pool is not None:
+            from qe.runtime.strategy_models import DEFAULT_STRATEGIES
+            strategies = list(DEFAULT_STRATEGIES.values())
+            for strat in strategies[:_cognitive_pool._max_agents]:
+                try:
+                    await _cognitive_pool.spawn_agent(
+                        specialization=strat.name,
+                        model_tier=strat.preferred_model_tier,
+                        strategy=strat,
+                    )
+                except RuntimeError:
+                    break  # Pool at capacity
+
         await _strategy_evolver.start()
         readiness.mark_ready("strategy_loop_ready")
 
@@ -1704,9 +1730,18 @@ async def submit_goal(body: dict[str, Any]):
         try:
             if _cognitive_pool is not None:
                 goal_id = f"goal_{uuid.uuid4().hex[:12]}"
+
+                # Select strategy for this inquiry
+                config = None
+                if _strategy_evolver is not None:
+                    from qe.runtime.strategy_models import strategy_to_inquiry_config
+                    strategy = _strategy_evolver.select_strategy()
+                    config = strategy_to_inquiry_config(strategy)
+
                 results = await _cognitive_pool.run_parallel_inquiry(
                     goal_id=goal_id,
                     goal_description=description,
+                    config=config,
                 )
                 if results:
                     merged = await _cognitive_pool.merge_results(results)
@@ -1728,9 +1763,18 @@ async def submit_goal(body: dict[str, Any]):
     if flag_store.is_enabled("inquiry_mode") and _inquiry_engine is not None:
         global _last_inquiry_profile
         goal_id = f"goal_{uuid.uuid4().hex[:12]}"
+
+        # Select strategy via Thompson sampling
+        config = None
+        if _strategy_evolver is not None:
+            from qe.runtime.strategy_models import strategy_to_inquiry_config
+            strategy = _strategy_evolver.select_strategy()
+            config = strategy_to_inquiry_config(strategy)
+
         result = await _inquiry_engine.run_inquiry(
             goal_id=goal_id,
             goal_description=description,
+            config=config,
         )
         _last_inquiry_profile = result.phase_timings
         _inquiry_profiling_store.record(result.phase_timings, result.duration_seconds)

@@ -132,6 +132,8 @@ class InquiryBridge:
                     goal_id=goal_id,
                     success=(status == "completed" and insights > 0),
                     insights_count=insights,
+                    duration_s=payload.get("duration_s", 0.0),
+                    cost_usd=payload.get("cost_usd", 0.0),
                 )
                 self._evolver.record_outcome(outcome)
                 self._outcomes_recorded += 1

@@ -150,12 +150,17 @@ class CognitiveAgentPool:
         if not ids:
             return []
 
-        cfg = config or InquiryConfig()
-
         async def _run_one(aid: str) -> InquiryResult | None:
             slot = self._slots.get(aid)
             if slot is None or slot.engine is None:
                 return None
+
+            # Use per-agent strategy-derived config when no shared config given
+            if config is not None:
+                cfg = config
+            else:
+                from qe.runtime.strategy_models import strategy_to_inquiry_config
+                cfg = strategy_to_inquiry_config(slot.strategy)
 
             async with self._semaphore:
                 slot.agent.status = "active"

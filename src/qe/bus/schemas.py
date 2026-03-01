@@ -196,6 +196,8 @@ class InquiryCompletedPayload(BaseModel):
     iterations: int = 0
     insights: int = 0
     questions_answered: int = 0
+    duration_s: float = 0.0
+    cost_usd: float = 0.0
 
 
 class InquiryQuestionGeneratedPayload(BaseModel):
