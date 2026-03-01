@@ -1,8 +1,5 @@
 """Tests for BayesianBeliefStore — Tier 2 semantic memory."""
 
-import json
-from datetime import UTC, datetime
-from pathlib import Path
 
 import aiosqlite
 import pytest
