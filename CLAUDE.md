@@ -2,11 +2,13 @@
 
 ## Project Overview
 
-Multi-agent orchestration system with a bus-driven architecture. Services communicate via `MemoryBus` with typed topics. Goals are decomposed by a planner, dispatched to executors, and results are delivered back through notification channels.
+Multi-agent orchestration system being redesigned from a pipeline into a **cognitive system** with three nested loops (Inquiry, Knowledge, Strategy), four-tier memory, and a Cognitive Layer for genuine insight generation.
+
+Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 
 ## Tech Stack
 
-- Python 3.14, FastAPI, Pydantic v2, aiosqlite, litellm
+- Python 3.14, FastAPI, Pydantic v2, aiosqlite, litellm, instructor
 - Virtual env: `.venv/bin/python`, `.venv/bin/pytest`, `.venv/bin/ruff`
 - LLM provider: Kilo Code (OpenRouter-compatible) at `https://kilo.ai/api/openrouter`
 - Models: `openai/anthropic/claude-sonnet-4` (balanced), `openai/google/gemini-2.0-flash` (fast)
@@ -16,10 +18,12 @@ Multi-agent orchestration system with a bus-driven architecture. Services commun
 - `src/qe/api/app.py` — Main FastAPI app, lifespan, channel wiring, all endpoints
 - `src/qe/channels/` — Channel adapters (telegram, slack, email, webhook) + notifications router
 - `src/qe/services/` — Planner, Dispatcher, Executor, VerificationGate, Recovery, Checkpoint, Doctor, Chat
+- `src/qe/services/inquiry/` — **NEW (v2)**: Dialectic Engine, Insight Crystallizer (Inquiry Loop components)
 - `src/qe/bus/` — MemoryBus, event log, bus metrics
-- `src/qe/substrate/` — Belief ledger (SQLite), cold storage, goal store, embeddings
-- `src/qe/models/` — Pydantic models (Envelope, Claim, GoalState, Genome Blueprint)
-- `tests/unit/` — Unit tests (~40 files)
+- `src/qe/substrate/` — Belief ledger (SQLite), cold storage, goal store, embeddings, BayesianBeliefStore
+- `src/qe/models/` — Pydantic models (Envelope, Claim, GoalState, Genome Blueprint, Cognition)
+- `src/qe/runtime/` — Service base, context curator, episodic memory, engram cache, metacognitor, epistemic reasoner, persistence engine
+- `tests/unit/` — Unit tests (~50+ files)
 - `tests/integration/` — Integration + E2E tests
 - `config.toml` — Runtime config (model tiers, budget, logging)
 - `.env` — API keys (gitignored)
@@ -27,38 +31,52 @@ Multi-agent orchestration system with a bus-driven architecture. Services commun
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ --timeout=60 -q    # 1038 tests, all passing
+.venv/bin/pytest tests/ --timeout=60 -q    # ~1228 tests, all passing
 .venv/bin/ruff check src/ tests/            # all clean
 ```
 
-## Current State (2026-02-28)
+## Current State (2026-03-01)
 
-1038 tests pass, ruff clean.
+~1228 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2), ruff clean.
 
-### Recently Completed
-- Phase 4: VerificationGate wired between Executor and Dispatcher — completed tasks pass structural/contract/anomaly verification before acceptance
-- Phase 4: RecoveryOrchestrator now executes strategies (retry with backoff, model escalation, simplified prompt, HIL) not just suggests them
-- Phase 4: CheckpointManager with graph-aware rollback over GoalStore checkpoints
-- Phase 4: 24 new tests in `tests/unit/test_verification_gate.py`
-- Phase 3 bug fixes: subtask_results deserialization, goal route registration order, drift_detected handler
-- Phase 3 tests: subtask_results round-trip, DAG validation (10 structures), diamond deps, crash recovery, schema enforcement, e2e lifecycle
+### v2 Redesign — Architecture Plan
+
+Full plan at `.claude/plans/tranquil-hopping-harbor.md`. Key concepts:
+- **Three Loops**: Inquiry (seconds-minutes), Knowledge (minutes-hours), Strategy (hours-days)
+- **Four-Tier Memory**: Tier 0 Working (ContextCurator), Tier 1 Episodic (EpisodicMemory), Tier 2 Semantic (BayesianBeliefStore), Tier 3 Procedural (pending)
+- **Cognitive Layer**: Metacognitor, Epistemic Reasoner, Dialectic Engine, Persistence Engine, Insight Crystallizer
+- **Engram Cache**: Three-band (exact/template/full) replacing LLMCache
+
+### v2 Phase 1: Memory Architecture — COMPLETE
+All built, tested (82 tests), lint clean:
+- `src/qe/substrate/bayesian_belief.py` — BayesianBeliefStore: Bayesian updating, evidence accumulation, knowledge graph, hypotheses. Migration: `src/qe/substrate/migrations/0012_bayesian_evidence.sql`
+- `src/qe/runtime/context_curator.py` — ContextCurator: relevance-scored, goal-anchored Tier 0 working memory with drift detection
+- `src/qe/runtime/episodic_memory.py` — EpisodicMemory: LRU in-memory hot store + SQLite warm overflow, recency-weighted search
+- `src/qe/runtime/engram_cache.py` — EngramCache: three-band cache (exact SHA-256 / template similarity / full reasoning)
+- Tests: `tests/unit/test_bayesian_belief.py`, `test_context_curator.py`, `test_episodic_memory.py`, `test_engram_cache.py`
+
+### v2 Phase 2: Cognitive Layer — COMPLETE (code + tests done, wiring pending)
+All built, tested (108 tests), lint clean. These components make the system think outside the box:
+- `src/qe/models/cognition.py` — ~25 Pydantic models for all cognitive reasoning outputs (ReasoningTrace, ApproachNode, EpistemicState, DialecticReport, CrystallizedInsight, etc.)
+- `src/qe/runtime/metacognitor.py` — Self-awareness: capability registry, approach tree (tree not list — backtracks to siblings on failure), LLM-powered creative approach suggestion and tool combination
+- `src/qe/runtime/epistemic_reasoner.py` — What we know vs. don't: absence detection, uncertainty assessment, known unknowns registry, surprise detection (integrates BayesianBeliefStore), blind spot warnings
+- `src/qe/services/inquiry/dialectic.py` — Adversarial self-critique: devil's advocate (MUST argue against), perspective rotation (domain-aware: financial/tech/scientific/general), assumption surfacing (hidden > explicit), red team, full dialectic pipeline with confidence revision
+- `src/qe/runtime/persistence_engine.py` — Determination: Why-Why-Why root cause (min 3 levels), 7 reframing strategies (inversion/proxy/stakeholder_shift/decompose_differently/implication/change_domain/temporal_shift), reframe cascade, lesson accumulation
+- `src/qe/services/inquiry/insight.py` — Insight crystallizer: strict novelty gate, specific mechanism extraction, actionability scoring, cross-domain connections, provenance chains. Only novel + dialectic-survived findings become insights
+- Tests: `tests/unit/test_cognition_models.py`, `test_metacognitor.py`, `test_epistemic_reasoner.py`, `test_dialectic_engine.py`, `test_persistence_engine.py`, `test_insight_crystallizer.py`
+
+### Next Steps (in order)
+1. **Phase 1 wiring**: Wire Phase 1 memory components (ContextCurator, EpisodicMemory, EngramCache, BayesianBeliefStore) into BaseService and app.py
+2. **Phase 2 wiring**: Add cognitive bus topics to `src/qe/bus/protocol.py`, wire cognitive layer into app.py lifespan
+3. **Phase 3**: Inquiry Loop + Knowledge Loop — InquiryEngine (7-phase loop), question generator, HypothesisManager (POPPER), CognitiveAgent model, procedural memory
+4. **Phase 4**: Elastic Scaling + Strategy Loop — Thompson router, CognitiveAgentPool, StrategyEvolver, scale profiles
+5. **Phase 5**: Integration + Polish — E2E investment opportunity walkthrough, Mac M1 profiling
+
+### v1 Recently Completed (pre-redesign)
+- Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
 - Multi-agent orchestration (planner, dispatcher, executor)
-- Kilo Code LLM provider integration with litellm
-- Channel adapters (Telegram, Slack, Email, Webhook)
-- Channel -> goal -> notification wiring in app.py
-- `message_callback` + `_forward_message()` on ChannelAdapter base class
-- Telegram/Slack/Email adapters forward messages with command classification (goal/ask/status)
-- Per-user notification routing via `GoalState.metadata["origin_user_id"]`
-- Command routing: ask -> `queries.asked`, status -> `system.health.check`, default -> `channel.message_received`
-- `_on_query_asked` handler (calls `answer_question()`, notifies user)
-- `_on_health_check` handler (builds status summary, notifies user)
-- 10 channel wiring unit tests in `tests/unit/test_channel_wiring.py`
-- Webhook `/api/webhooks/inbound` command routing (respects `command` field in payload)
-- Email adapter `message_callback` + `_classify_command()` for ask/status/goal routing
-- GoalStore metadata round-trip fix (was a silent bug — metadata column added, saved, and loaded)
-- Removed vestigial `genomes/planner.toml` (PlannerService is directly instantiated in app.py, not via supervisor)
-- 3 integration tests for webhook routing in `tests/integration/test_webhook_routing.py`
-- 2 metadata persistence unit tests in `tests/unit/test_goals.py`
+- Channel adapters (Telegram, Slack, Email, Webhook) with command routing
+- Kilo Code LLM provider integration
 
 ## Important Patterns
 
@@ -67,3 +85,6 @@ Multi-agent orchestration system with a bus-driven architecture. Services commun
 - Setting `OPENAI_API_BASE` at module import time in tests pollutes other tests — always use scoped fixtures with cleanup
 - SQLite float values need `pytest.approx()` for comparison
 - Bus topics are defined in `src/qe/bus/protocol.py`
+- LLM structured output pattern: `instructor.from_litellm(litellm.acompletion)` + Pydantic response_model (see any service or cognitive component)
+- Cognitive layer tests mock LLM via `patch("qe.runtime.metacognitor.instructor")` (or equivalent module path) + `AsyncMock` for `client.chat.completions.create`
+- All cognitive components accept optional `episodic_memory` and `model` params for dependency injection and testability
