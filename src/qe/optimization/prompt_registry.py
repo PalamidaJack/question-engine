@@ -177,6 +177,7 @@ class PromptRegistry:
         content: str,
         rollout_pct: float = 10.0,
         parent_variant_id: str | None = None,
+        strategy: str = "manual",
     ) -> PromptVariant:
         """Add a new prompt variant for a slot."""
         variant = PromptVariant(
@@ -195,7 +196,7 @@ class PromptRegistry:
                     "slot_key": slot_key,
                     "variant_id": variant.variant_id,
                     "parent_variant_id": parent_variant_id or "",
-                    "strategy": "manual",
+                    "strategy": strategy,
                 },
             )
 
@@ -350,6 +351,15 @@ class PromptRegistry:
                             },
                         )
                     return
+
+    def promote_variant(self, variant_id: str, new_rollout_pct: float) -> bool:
+        """Increase a variant's rollout percentage. Returns False if not found."""
+        for slot_variants in self._variants.values():
+            for v in slot_variants:
+                if v.variant_id == variant_id:
+                    v.rollout_pct = new_rollout_pct
+                    return True
+        return False
 
     def get_slot_stats(self, slot_key: str) -> list[dict[str, Any]]:
         """Get statistics for all variants in a slot."""

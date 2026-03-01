@@ -97,6 +97,7 @@ _inquiry_engine: InquiryEngine | None = None
 _cognitive_pool = None
 _strategy_evolver = None
 _prompt_registry: PromptRegistry | None = None
+_prompt_mutator = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
@@ -478,7 +479,7 @@ async def lifespan(app: FastAPI):
     global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
     global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
     global _memory_store, _extra_routes_registered, _inquiry_engine
-    global _cognitive_pool, _strategy_evolver
+    global _cognitive_pool, _strategy_evolver, _prompt_mutator
 
     configure_from_config(get_settings())
 
@@ -537,6 +538,16 @@ async def lifespan(app: FastAPI):
         _prompt_registry = PromptRegistry(db_path=_db_path, bus=bus, enabled=False)
         await _prompt_registry.initialize()
         register_all_baselines(_prompt_registry)
+
+        # Prompt Mutator (auto-generates variants when prompt_evolution flag enabled)
+        from qe.optimization.prompt_mutator import PromptMutator
+
+        _prompt_mutator = PromptMutator(
+            registry=_prompt_registry,
+            bus=bus,
+            model=fast_model,
+        )
+        _prompt_mutator.start()
 
         # Phase 2 Cognitive
         _metacognitor = Metacognitor(
@@ -793,6 +804,14 @@ async def lifespan(app: FastAPI):
 
         _cognitive_pool = None
         _strategy_evolver = None
+
+        # Shutdown — prompt mutator
+        try:
+            if _prompt_mutator is not None:
+                await _prompt_mutator.stop()
+        except Exception:
+            log.debug("shutdown.prompt_mutator_stop_failed")
+        _prompt_mutator = None
 
         # Shutdown — persist prompt registry
         try:
@@ -1215,6 +1234,25 @@ async def prompt_stats():
     if _prompt_registry is None:
         return {"enabled": False, "slots": 0}
     return _prompt_registry.status()
+
+
+@app.get("/api/prompts/mutator/status")
+async def prompt_mutator_status():
+    """Return prompt mutator status."""
+    if _prompt_mutator is None:
+        return {"running": False}
+    return _prompt_mutator.status()
+
+
+@app.get("/api/prompts/slots/{slot_key}")
+async def prompt_slot_detail(slot_key: str):
+    """Return detailed stats for a specific prompt slot."""
+    if _prompt_registry is None:
+        return {"error": "prompt registry not initialized"}
+    stats = _prompt_registry.get_slot_stats(slot_key)
+    if not stats:
+        return {"error": f"slot '{slot_key}' not found", "variants": []}
+    return {"slot_key": slot_key, "variants": stats}
 
 
 # ── Bus Stats ─────────────────────────────────────────────────────────────

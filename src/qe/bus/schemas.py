@@ -343,6 +343,24 @@ class PromptVariantDeactivatedPayload(BaseModel):
     reason: str = ""
 
 
+class PromptMutationCyclePayload(BaseModel):
+    """Payload for prompt.mutation_cycle_completed topic."""
+
+    slots_evaluated: int = 0
+    variants_created: int = 0
+    variants_rolled_back: int = 0
+    variants_promoted: int = 0
+
+
+class PromptVariantPromotedPayload(BaseModel):
+    """Payload for prompt.variant_promoted topic."""
+
+    slot_key: str
+    variant_id: str
+    old_rollout_pct: float = 10.0
+    new_rollout_pct: float = 50.0
+
+
 # ── Schema Registry ────────────────────────────────────────────────────────
 
 # Maps topic -> payload model for validation
@@ -382,6 +400,8 @@ TOPIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "prompt.outcome_recorded": PromptOutcomeRecordedPayload,
     "prompt.variant_created": PromptVariantCreatedPayload,
     "prompt.variant_deactivated": PromptVariantDeactivatedPayload,
+    "prompt.mutation_cycle_completed": PromptMutationCyclePayload,
+    "prompt.variant_promoted": PromptVariantPromotedPayload,
 }
 
 

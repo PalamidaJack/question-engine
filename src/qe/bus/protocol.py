@@ -137,6 +137,8 @@ TOPICS = {
     "prompt.outcome_recorded",
     "prompt.variant_created",
     "prompt.variant_deactivated",
+    "prompt.mutation_cycle_completed",
+    "prompt.variant_promoted",
 }
 
 
