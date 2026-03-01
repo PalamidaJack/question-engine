@@ -464,7 +464,11 @@ class BayesianBeliefStore:
         hypothesis_id: str,
         evidence: EvidenceRecord,
     ) -> Hypothesis:
-        """Apply Bayesian update to a hypothesis with new evidence."""
+        """Apply sequential Bayesian update to a hypothesis with new evidence.
+
+        Uses current_probability as the basis for the update (sequential Bayes).
+        Preserves the original prior_probability for auditability.
+        """
         async with aiosqlite.connect(self._db_path) as db:
             cursor = await db.execute(
                 "SELECT * FROM hypotheses WHERE hypothesis_id = ?",
@@ -474,9 +478,10 @@ class BayesianBeliefStore:
             if row is None:
                 raise ValueError(f"Hypothesis {hypothesis_id} not found")
 
-            prior = row[2]
+            original_prior = row[2]  # prior_probability — never overwritten
+            current = row[3]  # current_probability — used as sequential prior
             lr = self._compute_likelihood_ratio(evidence)
-            posterior = self._bayes_update(prior, lr)
+            posterior = self._bayes_update(current, lr)
             now = datetime.now(UTC)
 
             # Determine status based on posterior
@@ -486,21 +491,22 @@ class BayesianBeliefStore:
             elif posterior <= 0.05:
                 status = "falsified"
 
+            # Only update current_probability; prior_probability is immutable
             await db.execute(
                 """
                 UPDATE hypotheses
-                SET current_probability = ?, prior_probability = ?,
+                SET current_probability = ?,
                     status = ?, updated_at = ?
                 WHERE hypothesis_id = ?
                 """,
-                (posterior, posterior, status, now.isoformat(), hypothesis_id),
+                (posterior, status, now.isoformat(), hypothesis_id),
             )
             await db.commit()
 
         return Hypothesis(
             hypothesis_id=row[0],
             statement=row[1],
-            prior_probability=posterior,
+            prior_probability=original_prior,
             current_probability=posterior,
             falsification_criteria=json.loads(row[4]),
             experiments=json.loads(row[5]),

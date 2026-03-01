@@ -95,7 +95,7 @@ class InquiryBridge:
             await self._episodic.store(episode)
             self._episodes_stored += 1
         except Exception:
-            log.debug("inquiry_bridge.started_episode_failed")
+            log.warning("inquiry_bridge.started_episode_failed", exc_info=True)
 
     async def _on_inquiry_completed(self, envelope: Envelope) -> None:
         """Store synthesis episode, record strategy outcome, trigger consolidation."""
@@ -120,7 +120,7 @@ class InquiryBridge:
             await self._episodic.store(episode)
             self._episodes_stored += 1
         except Exception:
-            log.debug("inquiry_bridge.completed_episode_failed")
+            log.warning("inquiry_bridge.completed_episode_failed", exc_info=True)
 
         # 2. Record strategy outcome
         if self._evolver is not None and self._evolver._current_strategy:
@@ -145,7 +145,7 @@ class InquiryBridge:
                     "insights_count": insights,
                 })
             except Exception:
-                log.debug("inquiry_bridge.outcome_record_failed")
+                log.warning("inquiry_bridge.outcome_record_failed", exc_info=True)
 
         # 3. Trigger knowledge consolidation
         if self._knowledge_loop is not None:
@@ -153,7 +153,7 @@ class InquiryBridge:
                 await self._knowledge_loop.trigger_consolidation()
                 self._consolidations_triggered += 1
             except Exception:
-                log.debug("inquiry_bridge.consolidation_trigger_failed")
+                log.warning("inquiry_bridge.consolidation_trigger_failed", exc_info=True)
 
     async def _on_inquiry_failed(self, envelope: Envelope) -> None:
         """Store failure episode and record negative strategy outcome."""
@@ -172,7 +172,7 @@ class InquiryBridge:
             await self._episodic.store(episode)
             self._episodes_stored += 1
         except Exception:
-            log.debug("inquiry_bridge.failed_episode_failed")
+            log.warning("inquiry_bridge.failed_episode_failed", exc_info=True)
 
         # Record negative outcome
         if self._evolver is not None and self._evolver._current_strategy:
@@ -195,7 +195,7 @@ class InquiryBridge:
                     "insights_count": 0,
                 })
             except Exception:
-                log.debug("inquiry_bridge.failed_outcome_record_failed")
+                log.warning("inquiry_bridge.failed_outcome_record_failed", exc_info=True)
 
     async def _on_insight_generated(self, envelope: Envelope) -> None:
         """Store synthesis episode with insight headline."""
@@ -211,7 +211,7 @@ class InquiryBridge:
             await self._episodic.store(episode)
             self._episodes_stored += 1
         except Exception:
-            log.debug("inquiry_bridge.insight_episode_failed")
+            log.warning("inquiry_bridge.insight_episode_failed", exc_info=True)
 
     # ── Helpers ───────────────────────────────────────────────────────
 

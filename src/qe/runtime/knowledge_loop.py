@@ -221,7 +221,7 @@ class KnowledgeLoop:
                     "evidence_count": len(episode_group),
                 })
             except Exception:
-                log.debug("knowledge_loop.belief_promotion_failed")
+                log.warning("knowledge_loop.belief_promotion_failed", exc_info=True)
 
         # Phase 3 — Hypothesis Review
         try:
@@ -246,7 +246,7 @@ class KnowledgeLoop:
                         "probability": hyp.current_probability,
                     })
         except Exception:
-            log.debug("knowledge_loop.hypothesis_review_failed")
+            log.warning("knowledge_loop.hypothesis_review_failed", exc_info=True)
 
         # Phase 4 — Procedural Retirement
         try:
@@ -271,7 +271,7 @@ class KnowledgeLoop:
                         self._retired_sequence_ids.add(seq.sequence_id)
                         result.templates_retired += 1
         except Exception:
-            log.debug("knowledge_loop.procedural_retirement_failed")
+            log.warning("knowledge_loop.procedural_retirement_failed", exc_info=True)
 
         # Finalize
         result.cycle_duration_s = time.monotonic() - t0
@@ -339,7 +339,7 @@ class KnowledgeLoop:
                 return None
             return result
         except Exception:
-            log.debug("knowledge_loop.llm_extraction_failed")
+            log.warning("knowledge_loop.llm_extraction_failed", exc_info=True)
             return None
 
     def _publish(self, topic: str, payload: dict[str, Any]) -> None:

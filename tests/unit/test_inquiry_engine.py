@@ -310,6 +310,87 @@ class TestPhaseInvestigate:
             assert result.status == "completed"
 
 
+class TestInvestigationConfidence:
+    """Tests for _assess_investigation_confidence — evidence-quality-based scoring."""
+
+    def test_empty_findings_zero_confidence(self):
+        score = InquiryEngine._assess_investigation_confidence("", [], has_tools=True)
+        assert score == 0.0
+
+    def test_failure_findings_near_zero(self):
+        score = InquiryEngine._assess_investigation_confidence(
+            "Investigation failed due to tool error.", [], has_tools=True
+        )
+        assert score == 0.05
+
+    def test_all_tool_errors_low_confidence(self):
+        calls = [
+            {"tool": "web_search", "result": "Error: timeout"},
+            {"tool": "web_search", "result": "Error: connection refused"},
+        ]
+        score = InquiryEngine._assess_investigation_confidence(
+            "Some findings", calls, has_tools=True
+        )
+        assert score == 0.1
+
+    def test_mixed_tool_results_moderate_confidence(self):
+        calls = [
+            {"tool": "web_search", "result": "Error: timeout"},
+            {"tool": "web_search", "result": "Found relevant data about markets"},
+        ]
+        score = InquiryEngine._assess_investigation_confidence(
+            "Market data shows growth", calls, has_tools=True
+        )
+        # 1/2 success ratio → should be moderate, not high
+        assert 0.5 < score < 0.8
+
+    def test_all_tools_succeed_high_confidence(self):
+        calls = [
+            {"tool": "web_search", "result": "Strong evidence found"},
+            {"tool": "code_exec", "result": "Analysis confirms hypothesis"},
+        ]
+        score = InquiryEngine._assess_investigation_confidence(
+            "Comprehensive analysis confirms the finding with multiple sources",
+            calls, has_tools=True,
+        )
+        # All successful → high confidence
+        assert score > 0.8
+
+    def test_more_failed_calls_lower_confidence_than_fewer(self):
+        """5 failed + 1 success should NOT score higher than 1 success alone."""
+        many_failures = [
+            {"tool": "web_search", "result": "Error: fail"},
+            {"tool": "web_search", "result": "Error: fail"},
+            {"tool": "web_search", "result": "Error: fail"},
+            {"tool": "web_search", "result": "Error: fail"},
+            {"tool": "web_search", "result": "Error: fail"},
+            {"tool": "web_search", "result": "Found something"},
+        ]
+        one_success = [
+            {"tool": "web_search", "result": "Found something"},
+        ]
+        score_many = InquiryEngine._assess_investigation_confidence(
+            "Some findings", many_failures, has_tools=True
+        )
+        score_one = InquiryEngine._assess_investigation_confidence(
+            "Some findings", one_success, has_tools=True
+        )
+        # 1/6 success rate should score LOWER than 1/1 success rate
+        assert score_many < score_one
+
+    def test_direct_llm_answer_moderate(self):
+        score = InquiryEngine._assess_investigation_confidence(
+            "LLM provided a direct answer", [], has_tools=True
+        )
+        assert score == 0.5
+
+    def test_no_tools_low_baseline(self):
+        score = InquiryEngine._assess_investigation_confidence(
+            "Best guess without tools", [], has_tools=False
+        )
+        assert score == 0.3
+
+
 class TestPhaseSynthesize:
     @pytest.mark.asyncio
     async def test_synthesize_dialectic_flow(self):
@@ -322,6 +403,45 @@ class TestPhaseSynthesize:
         await engine.run_inquiry("g_1", "Test")
 
         de.full_dialectic.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_synthesize_confidence_can_decrease(self):
+        """Dialectic counterarguments must be able to LOWER confidence, not just raise it."""
+        call_count = 0
+
+        async def _dialectic_with_decreasing_confidence(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return DialecticReport(
+                    original_conclusion="test", revised_confidence=0.8
+                )
+            # Second call: strong counterargument lowers confidence
+            return DialecticReport(
+                original_conclusion="test", revised_confidence=0.3
+            )
+
+        de = MagicMock()
+        de.full_dialectic = AsyncMock(side_effect=_dialectic_with_decreasing_confidence)
+
+        qg = MagicMock()
+        qg.generate = AsyncMock(return_value=[
+            Question(text="Q1"), Question(text="Q2"), Question(text="Q3"),
+        ])
+        qg.prioritize = AsyncMock(side_effect=lambda g, qs: qs)
+
+        engine = _make_engine(
+            dialectic_engine=de,
+            question_generator=qg,
+            config=InquiryConfig(max_iterations=2, confidence_threshold=0.99),
+        )
+        result = await engine.run_inquiry("g_1", "Test")
+
+        # After iteration 2, confidence should be 0.3 (decreased from 0.8),
+        # NOT 0.8 (the old max() ratchet would have kept it at 0.8)
+        assert result.iterations_completed == 2
+        # Didn't early-terminate at 0.8 — confidence decreased, so threshold wasn't met
+        assert result.termination_reason == "max_iterations"
 
     @pytest.mark.asyncio
     async def test_synthesize_generates_hypotheses_on_surprise(self):

@@ -389,7 +389,7 @@ class InquiryEngine:
                 )
                 context["episodes"] = episodes
             except Exception:
-                log.debug("observe.episodic_recall_failed")
+                log.warning("observe.episodic_recall_failed", exc_info=True)
                 context["episodes"] = []
         else:
             context["episodes"] = []
@@ -399,7 +399,7 @@ class InquiryEngine:
             hypotheses = await self._hypothesis_mgr.get_active_hypotheses()
             context["hypotheses"] = hypotheses
         except Exception:
-            log.debug("observe.hypothesis_fetch_failed")
+            log.warning("observe.hypothesis_fetch_failed", exc_info=True)
             context["hypotheses"] = []
 
         return context
@@ -433,7 +433,7 @@ class InquiryEngine:
                 )
                 return assessment.recommended_approach
             except Exception:
-                log.debug("orient.metacognitor_failed")
+                log.warning("orient.metacognitor_failed", exc_info=True)
         return "Continue investigation with available tools."
 
     async def _phase_question(self, state: InquiryState) -> list[Question]:
@@ -456,7 +456,7 @@ class InquiryEngine:
                         "overall_confidence": ep_state.overall_confidence,
                     }
             except Exception:
-                log.debug("question.epistemic_state_failed")
+                log.warning("question.epistemic_state_failed", exc_info=True)
 
         return await self._question_gen.generate(
             goal=state.goal_description,
@@ -553,20 +553,12 @@ class InquiryEngine:
         else:
             raw_findings = "No tool registry configured."
 
-        # Mark question as answered with derived confidence
+        # Mark question as answered with confidence based on evidence quality
         question.status = "answered"
         question.answer = raw_findings[:2000]
-        if not raw_findings:
-            question.confidence_in_answer = 0.0
-        elif tool_calls:
-            # Tools were used — higher confidence based on # of successful calls
-            question.confidence_in_answer = min(0.5 + 0.1 * len(tool_calls), 0.9)
-        elif self._tool_registry is not None:
-            # Tools available but LLM answered directly
-            question.confidence_in_answer = 0.6
-        else:
-            # No tools — low confidence
-            question.confidence_in_answer = 0.3
+        question.confidence_in_answer = self._assess_investigation_confidence(
+            raw_findings, tool_calls, has_tools=self._tool_registry is not None
+        )
 
         return InvestigationResult(
             question_id=question.question_id,
@@ -607,7 +599,7 @@ class InquiryEngine:
                 if surprise and surprise.surprise_magnitude > 0.5:
                     contradictions.append(surprise.finding)
             except Exception:
-                log.debug("synthesize.epistemic_failed")
+                log.warning("synthesize.epistemic_failed", exc_info=True)
 
         # Dialectic challenge
         if self._dialectic is not None and investigation.raw_findings:
@@ -618,11 +610,12 @@ class InquiryEngine:
                     evidence=question.text,
                     domain=state.config.domain,
                 )
-                state.overall_confidence = max(
-                    state.overall_confidence, report.revised_confidence
-                )
+                # Direct assignment: the dialectic engine's revised confidence
+                # is authoritative. Confidence must be able to decrease when
+                # the dialectic finds counterarguments, not just increase.
+                state.overall_confidence = report.revised_confidence
             except Exception:
-                log.debug("synthesize.dialectic_failed")
+                log.warning("synthesize.dialectic_failed", exc_info=True)
 
         # Knowledge Loop: contradictions → hypotheses
         if contradictions:
@@ -642,7 +635,7 @@ class InquiryEngine:
                     falsification_qs = self._hypothesis_mgr.create_falsification_questions(h)
                     state.questions.extend(falsification_qs)
             except Exception:
-                log.debug("synthesize.hypothesis_generation_failed")
+                log.warning("synthesize.hypothesis_generation_failed", exc_info=True)
 
         # Crystallize insights
         if self._crystallizer is not None and investigation.raw_findings:
@@ -656,7 +649,7 @@ class InquiryEngine:
                 if insight is not None:
                     insights.append(insight)
             except Exception:
-                log.debug("synthesize.crystallize_failed")
+                log.warning("synthesize.crystallize_failed", exc_info=True)
 
         return insights
 
@@ -677,7 +670,7 @@ class InquiryEngine:
                 if drift is not None:
                     drift_score = drift.similarity
             except Exception:
-                log.debug("reflect.drift_detection_failed")
+                log.warning("reflect.drift_detection_failed", exc_info=True)
 
         # Blind spot warning
         if self._epistemic is not None:
@@ -690,7 +683,7 @@ class InquiryEngine:
                         warning[:100],
                     )
             except Exception:
-                log.debug("reflect.blind_spot_failed")
+                log.warning("reflect.blind_spot_failed", exc_info=True)
 
         # Decision
         on_track = drift_score > 0.5 or drift_score == 0.0
@@ -713,7 +706,7 @@ class InquiryEngine:
                     )
                     reasoning += f" Root cause: {root_cause.root_cause}"
                 except Exception:
-                    log.debug("reflect.persistence_root_cause_failed")
+                    log.warning("reflect.persistence_root_cause_failed", exc_info=True)
 
                 try:
                     reframed = await self._persistence.reframe(
@@ -726,7 +719,7 @@ class InquiryEngine:
                         Question(text=reframed.reframed_question)
                     )
                 except Exception:
-                    log.debug("reflect.persistence_reframe_failed")
+                    log.warning("reflect.persistence_reframe_failed", exc_info=True)
 
                 try:
                     lessons = self._persistence.get_relevant_lessons(
@@ -734,7 +727,7 @@ class InquiryEngine:
                     )
                     reasoning += f" ({len(lessons)} relevant lessons found)"
                 except Exception:
-                    log.debug("reflect.persistence_lessons_failed")
+                    log.warning("reflect.persistence_lessons_failed", exc_info=True)
         elif confidence >= state.config.confidence_threshold:
             decision = "terminate"
             reasoning += " Confidence threshold met."
@@ -885,6 +878,63 @@ class InquiryEngine:
                 )
         except Exception:
             log.debug("record_procedural.failed question_id=%s", question.question_id)
+
+    @staticmethod
+    def _assess_investigation_confidence(
+        raw_findings: str,
+        tool_calls: list[dict[str, Any]],
+        *,
+        has_tools: bool,
+    ) -> float:
+        """Score confidence in an investigation result based on evidence quality.
+
+        Unlike counting tool calls, this considers:
+        - Whether findings are empty or error messages
+        - The ratio of successful to failed tool calls
+        - Whether the answer is substantive (length as a rough proxy)
+        """
+        # No findings at all
+        if not raw_findings:
+            return 0.0
+
+        # Error/failure findings
+        failure_indicators = (
+            "Investigation failed",
+            "No tools available",
+            "No tool registry",
+        )
+        if any(raw_findings.startswith(f) for f in failure_indicators):
+            return 0.05
+
+        if tool_calls:
+            # Score based on successful vs failed tool calls
+            successful = sum(
+                1 for tc in tool_calls
+                if not tc.get("result", "").startswith("Error")
+            )
+            total = len(tool_calls)
+
+            if successful == 0:
+                # All tool calls failed — very low confidence
+                return 0.1
+
+            success_ratio = successful / total
+            # Base 0.4 + up to 0.45 for perfect success ratio
+            tool_confidence = 0.4 + 0.45 * success_ratio
+
+            # Bonus for substantive content (diminishing returns)
+            content_length = len(raw_findings.strip())
+            length_bonus = min(content_length / 1000.0, 1.0) * 0.1
+
+            return min(tool_confidence + length_bonus, 0.95)
+
+        if has_tools:
+            # Tools available but LLM answered directly (no tool calls needed)
+            # Moderate confidence — LLM felt confident enough to answer without tools
+            return 0.5
+
+        # No tools configured — lower baseline
+        return 0.3
 
     def _should_stop_budget(self, cfg: InquiryConfig) -> bool:
         """Check if remaining budget is below hard stop percentage."""

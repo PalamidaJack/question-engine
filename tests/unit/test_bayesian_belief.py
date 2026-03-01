@@ -363,3 +363,28 @@ class TestHypotheses:
         updated = await store.update_hypothesis(h.hypothesis_id, evidence)
 
         assert updated.status == "falsified"
+
+    async def test_hypothesis_sequential_updates_preserve_prior(self, store):
+        """Multiple updates must preserve the original prior_probability."""
+        h = Hypothesis(
+            statement="Sequential test",
+            prior_probability=0.5,
+            current_probability=0.5,
+        )
+        await store.store_hypothesis(h)
+
+        # First update: supporting evidence pushes probability up
+        e1 = EvidenceRecord(source="test", supports=True, strength=0.7)
+        after_first = await store.update_hypothesis(h.hypothesis_id, e1)
+
+        assert after_first.current_probability > 0.5
+        assert after_first.prior_probability == pytest.approx(0.5)
+
+        # Second update: contradicting evidence pushes probability back down
+        e2 = EvidenceRecord(source="test", supports=False, strength=0.8)
+        after_second = await store.update_hypothesis(h.hypothesis_id, e2)
+
+        # Prior must still be the original 0.5, NOT the first posterior
+        assert after_second.prior_probability == pytest.approx(0.5)
+        # Current should have moved down from the first posterior
+        assert after_second.current_probability < after_first.current_probability

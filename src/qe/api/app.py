@@ -100,6 +100,8 @@ _prompt_registry: PromptRegistry | None = None
 _prompt_mutator = None
 _knowledge_loop = None
 _inquiry_bridge = None
+_elastic_scaler = None
+_episodic_memory = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
@@ -510,6 +512,7 @@ async def lifespan(app: FastAPI):
     global _memory_store, _extra_routes_registered, _inquiry_engine
     global _cognitive_pool, _strategy_evolver, _prompt_mutator, _knowledge_loop
     global _inquiry_bridge
+    global _elastic_scaler, _episodic_memory
 
     configure_from_config(get_settings())
 
@@ -896,6 +899,8 @@ async def lifespan(app: FastAPI):
 
         _cognitive_pool = None
         _strategy_evolver = None
+        _elastic_scaler = None
+        _episodic_memory = None
 
         # Shutdown — prompt mutator
         try:
@@ -1363,6 +1368,141 @@ async def prompt_slot_detail(slot_key: str):
     return {"slot_key": slot_key, "variants": stats}
 
 
+# ── Operational Observability ──────────────────────────────────────────────
+
+
+@app.get("/api/pool/status")
+async def pool_status():
+    """Return cognitive agent pool status."""
+    if _cognitive_pool is None:
+        return JSONResponse({"error": "Cognitive pool not initialized"}, status_code=503)
+    return _cognitive_pool.pool_status()
+
+
+@app.get("/api/strategy/snapshots")
+async def strategy_snapshots():
+    """Return strategy evolver snapshots and current strategy."""
+    if _strategy_evolver is None:
+        return JSONResponse({"error": "Strategy evolver not initialized"}, status_code=503)
+    return {
+        "current_strategy": _strategy_evolver._current_strategy,
+        "scaling_profile": (
+            _elastic_scaler.current_profile_name() if _elastic_scaler else None
+        ),
+        "snapshots": [s.model_dump() for s in _strategy_evolver.get_snapshots()],
+    }
+
+
+@app.get("/api/flags")
+async def list_flags():
+    """List all feature flags and stats."""
+    store = get_flag_store()
+    return {
+        "flags": store.list_flags(),
+        "stats": store.stats(),
+    }
+
+
+@app.get("/api/flags/evaluations")
+async def flag_evaluations(limit: int = 100):
+    """Return recent flag evaluation log."""
+    store = get_flag_store()
+    evaluations = store.evaluation_log(limit=limit)
+    return {
+        "evaluations": evaluations,
+        "count": len(evaluations),
+    }
+
+
+@app.get("/api/flags/{flag_name}")
+async def get_flag(flag_name: str):
+    """Get a single feature flag state."""
+    flag = get_flag_store().get(flag_name)
+    if flag is None:
+        return JSONResponse({"error": f"Flag '{flag_name}' not found"}, status_code=404)
+    return flag.to_dict()
+
+
+@app.post("/api/flags/{flag_name}/enable")
+async def enable_flag(flag_name: str):
+    """Enable a feature flag at runtime."""
+    if not get_flag_store().enable(flag_name):
+        return JSONResponse({"error": f"Flag '{flag_name}' not found"}, status_code=404)
+    get_audit_log().record("flag.enabled", resource=f"flag/{flag_name}")
+    return {"status": "enabled", "flag_name": flag_name}
+
+
+@app.post("/api/flags/{flag_name}/disable")
+async def disable_flag(flag_name: str):
+    """Disable a feature flag at runtime."""
+    if not get_flag_store().disable(flag_name):
+        return JSONResponse({"error": f"Flag '{flag_name}' not found"}, status_code=404)
+    get_audit_log().record("flag.disabled", resource=f"flag/{flag_name}")
+    return {"status": "disabled", "flag_name": flag_name}
+
+
+@app.get("/api/episodic/status")
+async def episodic_status():
+    """Return episodic memory status overview."""
+    if _episodic_memory is None:
+        return JSONResponse({"error": "Episodic memory not initialized"}, status_code=503)
+    status = _episodic_memory.status()
+    warm = await _episodic_memory.warm_count()
+    return {
+        "hot_entries": status["hot_entries"],
+        "max_hot": status["max_hot"],
+        "warm_entries": warm,
+    }
+
+
+@app.get("/api/episodic/search")
+async def episodic_search(
+    query: str = "",
+    top_k: int = 10,
+    goal_id: str | None = None,
+    episode_type: str | None = None,
+    time_window_hours: float | None = None,
+):
+    """Search episodic memory by keyword + recency."""
+    if _episodic_memory is None:
+        return JSONResponse({"error": "Episodic memory not initialized"}, status_code=503)
+    if not query:
+        return JSONResponse({"error": "query parameter is required"}, status_code=400)
+    episodes = await _episodic_memory.recall(
+        query, top_k=top_k, time_window_hours=time_window_hours,
+        goal_id=goal_id, episode_type=episode_type,
+    )
+    return {
+        "episodes": [ep.model_dump(mode="json") for ep in episodes],
+        "count": len(episodes),
+    }
+
+
+@app.get("/api/episodic/goal/{goal_id}")
+async def episodic_goal(goal_id: str, top_k: int = 20):
+    """Return episodes for a specific goal."""
+    if _episodic_memory is None:
+        return JSONResponse({"error": "Episodic memory not initialized"}, status_code=503)
+    episodes = await _episodic_memory.recall_for_goal(goal_id, top_k=top_k)
+    return {
+        "goal_id": goal_id,
+        "episodes": [ep.model_dump(mode="json") for ep in episodes],
+        "count": len(episodes),
+    }
+
+
+@app.get("/api/episodic/latest")
+async def episodic_latest(limit: int = 20):
+    """Return most recent episodes from hot store."""
+    if _episodic_memory is None:
+        return JSONResponse({"error": "Episodic memory not initialized"}, status_code=503)
+    episodes = _episodic_memory.get_latest(limit=limit)
+    return {
+        "episodes": [ep.model_dump(mode="json") for ep in episodes],
+        "count": len(episodes),
+    }
+
+
 # ── Bus Stats ─────────────────────────────────────────────────────────────
 
 
@@ -1510,6 +1650,22 @@ async def status():
             "limit_usd": _supervisor.budget_tracker.monthly_limit_usd,
             "by_model": _supervisor.budget_tracker.spend_by_model(),
         },
+        "pool": _cognitive_pool.pool_status() if _cognitive_pool else None,
+        "strategy": {
+            "current_strategy": (
+                _strategy_evolver._current_strategy if _strategy_evolver else None
+            ),
+            "scaling_profile": (
+                _elastic_scaler.current_profile_name() if _elastic_scaler else None
+            ),
+            "snapshots": (
+                [s.model_dump() for s in _strategy_evolver.get_snapshots()]
+                if _strategy_evolver else []
+            ),
+        },
+        "flags": get_flag_store().stats(),
+        "bridge": _inquiry_bridge.status() if _inquiry_bridge else None,
+        "knowledge_loop": _knowledge_loop.status() if _knowledge_loop else None,
     }
 
 

@@ -229,6 +229,12 @@ class EpisodicMemory:
             "max_hot": self._max_hot,
         }
 
+    def get_latest(self, limit: int = 20) -> list[Episode]:
+        """Return the most recent episodes from the hot store."""
+        items = list(self._hot.values())
+        items.reverse()
+        return items[:limit]
+
     # -------------------------------------------------------------------
     # Internal helpers
     # -------------------------------------------------------------------
