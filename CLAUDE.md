@@ -33,14 +33,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1647 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1685 unit/integration tests, all passing
 .venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1647 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~1685 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -161,6 +161,17 @@ All built, tested (48 tests across 2 test files), lint clean. The missing middle
 - `src/qe/api/app.py` — KnowledgeLoop wired in lifespan (after strategy evolver), `knowledge_consolidation` feature flag, `GET /api/knowledge/status` endpoint, shutdown cleanup
 - Tests: `tests/unit/test_knowledge_loop.py` (36 tests: models, init, lifecycle, feature flag gating, episode scan/grouping, pattern detection with mock LLM, belief promotion, hypothesis review, procedural retirement, bus events, full integration cycle), `tests/unit/test_knowledge_loop_wiring.py` (12 tests: bus topics, schemas, TOPIC_SCHEMAS registration, payload validation, schema defaults)
 
+### Loop Integration — COMPLETE
+All built, tested (38 tests across 2 new + 2 modified test files), lint clean. Connects the three nested loops (Inquiry, Knowledge, Strategy) that were previously functionally disconnected:
+- `src/qe/runtime/inquiry_bridge.py` — `InquiryBridge`: lightweight cross-loop glue (~200 lines) that subscribes to 4 inquiry bus events and orchestrates feedback. On `inquiry.started`: stores observation episode. On `inquiry.completed`: stores synthesis episode, records `StrategyOutcome` on evolver (Thompson sampling arms update), triggers immediate knowledge consolidation. On `inquiry.failed`: stores failure episode, records negative outcome. On `inquiry.insight_generated`: stores synthesis episode with headline. Publishes `bridge.strategy_outcome_recorded` events. Lifecycle: `start()`/`stop()`/`status()`
+- `src/qe/runtime/knowledge_loop.py` — Added `trigger_consolidation()`: event-driven consolidation (coexists with timer-based loop), called by InquiryBridge on inquiry completion
+- `src/qe/services/inquiry/engine.py` — Fixed `recall_for_goal` bug: was passing `(goal_id, goal_description, limit=10)` but method signature is `(goal_id, top_k=20)`. Silently failed in try/except
+- `src/qe/runtime/readiness.py` — Added 3 informational loop readiness fields (`cognitive_layer_ready`, `strategy_loop_ready`, `knowledge_loop_ready`) + `"loops"` section in `to_dict()`. `is_ready` unchanged (only core 4 startup phases gate readiness)
+- `src/qe/bus/protocol.py` — 1 new topic (145 total): `bridge.strategy_outcome_recorded`
+- `src/qe/bus/schemas.py` — 1 new payload schema (41 total): `BridgeStrategyOutcomePayload`
+- `src/qe/api/app.py` — InquiryBridge wired in lifespan (after knowledge loop, before chat service), `knowledge_loop_ready` readiness mark, v2 channel routing (`inquiry_mode` flag routes channel messages to InquiryEngine before v1 fallback), `GET /api/bridge/status` endpoint, shutdown cleanup
+- Tests: `tests/unit/test_inquiry_bridge.py` (24 tests: init, lifecycle, all 4 event handlers, strategy outcome recording, knowledge consolidation trigger, bus events, status, full lifecycle integration), `tests/unit/test_inquiry_bridge_wiring.py` (12 tests: bus topic/schema registration, schema validation/defaults, readiness fields, trigger_consolidation), `tests/unit/test_knowledge_loop.py` (+2 tests: trigger_consolidation runs/noop), `tests/unit/test_p1_features.py` (+1 topic in expected set)
+
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
 - Multi-agent orchestration (planner, dispatcher, executor)
@@ -182,3 +193,4 @@ All built, tested (48 tests across 2 test files), lint clean. The missing middle
 - Real LLM integration tests use `@pytest.mark.slow` + `skipif(not KILOCODE_API_KEY)` — see `tests/integration/test_real_llm_inquiry.py`
 - PromptMutator tests mock LLM via `patch("qe.optimization.prompt_mutator.instructor")` + mock client with `AsyncMock` for `chat.completions.create` returning `MutatedPrompt`; feature flag gating via `patch("qe.optimization.prompt_mutator.get_flag_store")`
 - KnowledgeLoop tests mock LLM via `patch("qe.runtime.knowledge_loop.instructor")` + mock client; feature flag gating via `patch("qe.runtime.knowledge_loop.get_flag_store")`; `Claim` model requires `source_envelope_ids=[]` when constructing programmatically
+- InquiryBridge tests use `MagicMock` for bus (subscribe/unsubscribe/publish), `AsyncMock(spec=EpisodicMemory)` for episodic memory, `MagicMock` with `_current_strategy` attribute for strategy evolver, `AsyncMock` with `trigger_consolidation` for knowledge loop
