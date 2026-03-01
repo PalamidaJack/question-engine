@@ -13,6 +13,13 @@ from qe.services.inquiry.schemas import Question
 
 log = logging.getLogger(__name__)
 
+_QUESTION_GEN_SYSTEM = (
+    "You are a research question generator. Generate precise, "
+    "non-overlapping questions that maximize information gain. "
+    "Later iterations should focus on gaps and surprises. "
+    "If hypotheses are present, include falsification questions."
+)
+
 
 # ---------------------------------------------------------------------------
 # LLM response models
@@ -44,9 +51,28 @@ class GeneratedQuestions(BaseModel):
 class QuestionGenerator:
     """Generates and prioritizes questions using an LLM."""
 
-    def __init__(self, model: str = "openai/google/gemini-2.0-flash") -> None:
+    def __init__(
+        self,
+        model: str = "openai/google/gemini-2.0-flash",
+        prompt_registry: Any | None = None,
+    ) -> None:
         self._model = model
         self._client = instructor.from_litellm(litellm.acompletion)
+        self._registry = prompt_registry
+        self._fallbacks: dict[str, str] = {
+            "question_gen.generate.system": _QUESTION_GEN_SYSTEM,
+        }
+
+    def _get_prompt(self, slot_key: str, **fmt: Any) -> tuple[str, str]:
+        """Get prompt content, preferring registry variants when available."""
+        if self._registry is not None:
+            content, vid = self._registry.get_prompt(slot_key)
+            try:
+                return content.format(**fmt) if fmt else content, vid
+            except KeyError:
+                pass
+        fallback = self._fallbacks.get(slot_key, "")
+        return (fallback.format(**fmt) if fmt else fallback), "baseline"
 
     async def generate(
         self,
@@ -88,22 +114,27 @@ class QuestionGenerator:
             f"relevance_to_goal (0-1), and novelty_score (0-1)."
         )
 
-        result = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a research question generator. Generate precise, "
-                        "non-overlapping questions that maximize information gain. "
-                        "Later iterations should focus on gaps and surprises. "
-                        "If hypotheses are present, include falsification questions."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=GeneratedQuestions,
-        )
+        sys_content, sys_vid = self._get_prompt("question_gen.generate.system")
+
+        try:
+            result = await self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": prompt},
+                ],
+                response_model=GeneratedQuestions,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    sys_vid, "question_gen.generate.system", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                sys_vid, "question_gen.generate.system", success=True
+            )
 
         questions = []
         for gq in result.questions[:n_questions]:

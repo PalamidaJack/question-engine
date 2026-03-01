@@ -119,10 +119,40 @@ class InsightCrystallizer:
         episodic_memory: EpisodicMemory | None = None,
         belief_store: BayesianBeliefStore | None = None,
         model: str = "openai/anthropic/claude-sonnet-4",
+        prompt_registry: Any | None = None,
     ) -> None:
         self._episodic = episodic_memory
         self._belief_store = belief_store
         self._model = model
+        self._registry = prompt_registry
+        self._fallbacks: dict[str, str] = {
+            "insight.novelty.system": (
+                "You are a strict novelty assessor. "
+                "Most findings are NOT novel."
+            ),
+            "insight.novelty.user": _NOVELTY_PROMPT,
+            "insight.mechanism.system": (
+                "You are a causal reasoning module. Be specific."
+            ),
+            "insight.mechanism.user": _MECHANISM_PROMPT,
+            "insight.actionability.system": "You are an actionability assessor.",
+            "insight.actionability.user": _ACTIONABILITY_PROMPT,
+            "insight.cross_domain.system": (
+                "You find structural analogies across domains."
+            ),
+            "insight.cross_domain.user": _CROSS_DOMAIN_PROMPT,
+        }
+
+    def _get_prompt(self, slot_key: str, **fmt: Any) -> tuple[str, str]:
+        """Get prompt content, preferring registry variants when available."""
+        if self._registry is not None:
+            content, vid = self._registry.get_prompt(slot_key)
+            try:
+                return content.format(**fmt) if fmt else content, vid
+            except KeyError:
+                pass
+        fallback = self._fallbacks.get(slot_key, "")
+        return (fallback.format(**fmt) if fmt else fallback), "baseline"
 
     async def assess_novelty(
         self,
@@ -142,7 +172,9 @@ class InsightCrystallizer:
                 for b in beliefs
             )
 
-        prompt = _NOVELTY_PROMPT.format(
+        sys_content, _ = self._get_prompt("insight.novelty.system")
+        user_content, user_vid = self._get_prompt(
+            "insight.novelty.user",
             finding=finding,
             domain=domain,
             existing_knowledge=(
@@ -151,20 +183,26 @@ class InsightCrystallizer:
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        return await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a strict novelty assessor. "
-                        "Most findings are NOT novel."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=NoveltyAssessment,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=NoveltyAssessment,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "insight.novelty.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "insight.novelty.user", success=True
+            )
+        return result
 
     async def extract_mechanism(
         self,
@@ -172,25 +210,34 @@ class InsightCrystallizer:
         evidence: str = "",
     ) -> MechanismExplanation:
         """Extract the causal mechanism behind a finding."""
-        prompt = _MECHANISM_PROMPT.format(
+        sys_content, _ = self._get_prompt("insight.mechanism.system")
+        user_content, user_vid = self._get_prompt(
+            "insight.mechanism.user",
             finding=finding,
             evidence=evidence or "Not provided.",
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        return await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a causal reasoning module. Be specific."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=MechanismExplanation,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=MechanismExplanation,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "insight.mechanism.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "insight.mechanism.user", success=True
+            )
+        return result
 
     async def score_actionability(
         self,
@@ -198,23 +245,34 @@ class InsightCrystallizer:
         mechanism: str,
     ) -> ActionabilityResult:
         """Score how actionable an insight is."""
-        prompt = _ACTIONABILITY_PROMPT.format(
+        sys_content, _ = self._get_prompt("insight.actionability.system")
+        user_content, user_vid = self._get_prompt(
+            "insight.actionability.user",
             insight=insight,
             mechanism=mechanism,
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        return await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an actionability assessor.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=ActionabilityResult,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=ActionabilityResult,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "insight.actionability.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "insight.actionability.user", success=True
+            )
+        return result
 
     async def find_cross_domain_connections(
         self,
@@ -223,7 +281,9 @@ class InsightCrystallizer:
         graph_context: str = "",
     ) -> list[str]:
         """Find structural analogies across domains."""
-        prompt = _CROSS_DOMAIN_PROMPT.format(
+        sys_content, _ = self._get_prompt("insight.cross_domain.system")
+        user_content, user_vid = self._get_prompt(
+            "insight.cross_domain.user",
             finding=finding,
             domain=domain,
             graph_context=(
@@ -236,19 +296,25 @@ class InsightCrystallizer:
             connections: list[str] = Field(default_factory=list)
 
         client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You find structural analogies across domains."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=Connections,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=Connections,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "insight.cross_domain.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "insight.cross_domain.user", success=True
+            )
         return result.connections
 
     async def crystallize(

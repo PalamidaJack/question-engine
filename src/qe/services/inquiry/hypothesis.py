@@ -7,6 +7,7 @@ Integrates with BayesianBeliefStore for evidence accumulation.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import instructor
 import litellm
@@ -16,6 +17,13 @@ from qe.services.inquiry.schemas import Question
 from qe.substrate.bayesian_belief import BayesianBeliefStore, EvidenceRecord, Hypothesis
 
 log = logging.getLogger(__name__)
+
+_HYPOTHESIS_GEN_SYSTEM = (
+    "You are a hypothesis generator following Popperian "
+    "philosophy. Every hypothesis MUST be falsifiable. "
+    "Generate competing hypotheses that cover different "
+    "explanations for the same observations."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -50,12 +58,28 @@ class HypothesisManager:
         self,
         belief_store: BayesianBeliefStore | None = None,
         model: str = "openai/anthropic/claude-sonnet-4",
+        prompt_registry: Any | None = None,
     ) -> None:
         self._belief_store = belief_store
         self._model = model
         self._client = instructor.from_litellm(litellm.acompletion)
         # In-memory store for hypotheses when no belief_store
         self._local_hypotheses: dict[str, Hypothesis] = {}
+        self._registry = prompt_registry
+        self._fallbacks: dict[str, str] = {
+            "hypothesis.generate.system": _HYPOTHESIS_GEN_SYSTEM,
+        }
+
+    def _get_prompt(self, slot_key: str, **fmt: Any) -> tuple[str, str]:
+        """Get prompt content, preferring registry variants when available."""
+        if self._registry is not None:
+            content, vid = self._registry.get_prompt(slot_key)
+            try:
+                return content.format(**fmt) if fmt else content, vid
+            except KeyError:
+                pass
+        fallback = self._fallbacks.get(slot_key, "")
+        return (fallback.format(**fmt) if fmt else fallback), "baseline"
 
     async def generate_hypotheses(
         self,
@@ -81,22 +105,27 @@ class HypothesisManager:
             "Set prior_probability between 0.1 and 0.9."
         )
 
-        result = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a hypothesis generator following Popperian "
-                        "philosophy. Every hypothesis MUST be falsifiable. "
-                        "Generate competing hypotheses that cover different "
-                        "explanations for the same observations."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=GeneratedHypotheses,
-        )
+        sys_content, sys_vid = self._get_prompt("hypothesis.generate.system")
+
+        try:
+            result = await self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": prompt},
+                ],
+                response_model=GeneratedHypotheses,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    sys_vid, "hypothesis.generate.system", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                sys_vid, "hypothesis.generate.system", success=True
+            )
 
         hypotheses: list[Hypothesis] = []
         for spec in result.hypotheses:

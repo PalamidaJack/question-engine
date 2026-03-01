@@ -83,11 +83,32 @@ class PersistenceEngine:
         self,
         episodic_memory: EpisodicMemory | None = None,
         model: str = "openai/google/gemini-2.0-flash",
+        prompt_registry: Any | None = None,
     ) -> None:
         self._episodic = episodic_memory
         self._model = model
         self._reframe_history: dict[str, list[str]] = {}
         self._lessons: list[dict[str, str]] = []
+        self._registry = prompt_registry
+        self._fallbacks: dict[str, str] = {
+            "persistence.root_cause.system": "You are a root cause analysis expert.",
+            "persistence.root_cause.user": _ROOT_CAUSE_PROMPT,
+            "persistence.reframe.system": (
+                "You are a creative problem reframing module."
+            ),
+            "persistence.reframe.user": _REFRAME_PROMPT,
+        }
+
+    def _get_prompt(self, slot_key: str, **fmt: Any) -> tuple[str, str]:
+        """Get prompt content, preferring registry variants when available."""
+        if self._registry is not None:
+            content, vid = self._registry.get_prompt(slot_key)
+            try:
+                return content.format(**fmt) if fmt else content, vid
+            except KeyError:
+                pass
+        fallback = self._fallbacks.get(slot_key, "")
+        return (fallback.format(**fmt) if fmt else fallback), "baseline"
 
     # -------------------------------------------------------------------
     # Root Cause Analysis
@@ -100,23 +121,33 @@ class PersistenceEngine:
         context: str = "",
     ) -> RootCauseAnalysis:
         """Why-Why-Why analysis, minimum 3 levels deep."""
-        prompt = _ROOT_CAUSE_PROMPT.format(
+        sys_content, _ = self._get_prompt("persistence.root_cause.system")
+        user_content, user_vid = self._get_prompt(
+            "persistence.root_cause.user",
             failure_summary=failure_summary,
             context=context or "No additional context.",
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        analysis = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a root cause analysis expert.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=RootCauseAnalysis,
-        )
+        try:
+            analysis = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=RootCauseAnalysis,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "persistence.root_cause.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "persistence.root_cause.user", success=True
+            )
 
         if len(analysis.chain) < 3:
             log.warning(
@@ -178,7 +209,9 @@ class PersistenceEngine:
 
         history.append(strategy)
 
-        prompt = _REFRAME_PROMPT.format(
+        sys_content, _ = self._get_prompt("persistence.reframe.system")
+        user_content, user_vid = self._get_prompt(
+            "persistence.reframe.user",
             original=original_problem,
             tried=tried_approaches or "None specified.",
             failure=failure_reason or "Not specified.",
@@ -186,19 +219,25 @@ class PersistenceEngine:
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a creative problem reframing module."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=ReframingResult,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=ReframingResult,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "persistence.reframe.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "persistence.reframe.user", success=True
+            )
 
         if self._episodic:
             await self._episodic.store(

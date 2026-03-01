@@ -306,6 +306,43 @@ class PoolHealthCheckPayload(BaseModel):
     avg_load_pct: float = 0.0
 
 
+# ── Prompt Evolution payloads ─────────────────────────────────────────────
+
+
+class PromptVariantSelectedPayload(BaseModel):
+    """Payload for prompt.variant_selected topic."""
+
+    slot_key: str
+    variant_id: str
+    is_baseline: bool = False
+
+
+class PromptOutcomeRecordedPayload(BaseModel):
+    """Payload for prompt.outcome_recorded topic."""
+
+    slot_key: str
+    variant_id: str
+    success: bool
+    quality_score: float = 0.0
+
+
+class PromptVariantCreatedPayload(BaseModel):
+    """Payload for prompt.variant_created topic."""
+
+    slot_key: str
+    variant_id: str
+    parent_variant_id: str = ""
+    strategy: str = "manual"
+
+
+class PromptVariantDeactivatedPayload(BaseModel):
+    """Payload for prompt.variant_deactivated topic."""
+
+    slot_key: str
+    variant_id: str
+    reason: str = ""
+
+
 # ── Schema Registry ────────────────────────────────────────────────────────
 
 # Maps topic -> payload model for validation
@@ -341,6 +378,10 @@ TOPIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "inquiry.completed": InquiryCompletedPayload,
     "inquiry.failed": InquiryFailedPayload,
     "inquiry.budget_warning": InquiryBudgetWarningPayload,
+    "prompt.variant_selected": PromptVariantSelectedPayload,
+    "prompt.outcome_recorded": PromptOutcomeRecordedPayload,
+    "prompt.variant_created": PromptVariantCreatedPayload,
+    "prompt.variant_deactivated": PromptVariantDeactivatedPayload,
 }
 
 

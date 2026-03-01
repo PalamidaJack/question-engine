@@ -39,6 +39,7 @@ from qe.bus.bus_metrics import get_bus_metrics
 from qe.bus.event_log import EventLog
 from qe.kernel.supervisor import Supervisor
 from qe.models.envelope import Envelope
+from qe.optimization.prompt_registry import PromptRegistry, register_all_baselines
 from qe.runtime.context_curator import ContextCurator
 from qe.runtime.episodic_memory import EpisodicMemory
 from qe.runtime.epistemic_reasoner import EpistemicReasoner
@@ -95,6 +96,7 @@ _extra_routes_registered = False
 _inquiry_engine: InquiryEngine | None = None
 _cognitive_pool = None
 _strategy_evolver = None
+_prompt_registry: PromptRegistry | None = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
@@ -531,15 +533,31 @@ async def lifespan(app: FastAPI):
         BaseService.set_bayesian_belief(_bayesian_belief)
         BaseService.set_context_curator(_context_curator)
 
+        # Prompt Evolution Registry (disabled by default)
+        _prompt_registry = PromptRegistry(db_path=_db_path, bus=bus, enabled=False)
+        await _prompt_registry.initialize()
+        register_all_baselines(_prompt_registry)
+
         # Phase 2 Cognitive
-        _metacognitor = Metacognitor(episodic_memory=_episodic_memory, model=fast_model)
-        _epistemic_reasoner = EpistemicReasoner(
-            episodic_memory=_episodic_memory, belief_store=_bayesian_belief, model=fast_model
+        _metacognitor = Metacognitor(
+            episodic_memory=_episodic_memory, model=fast_model,
+            prompt_registry=_prompt_registry,
         )
-        _dialectic_engine = DialecticEngine(episodic_memory=_episodic_memory, model=balanced_model)
-        _persistence_engine = PersistenceEngine(episodic_memory=_episodic_memory, model=fast_model)
+        _epistemic_reasoner = EpistemicReasoner(
+            episodic_memory=_episodic_memory, belief_store=_bayesian_belief, model=fast_model,
+            prompt_registry=_prompt_registry,
+        )
+        _dialectic_engine = DialecticEngine(
+            episodic_memory=_episodic_memory, model=balanced_model,
+            prompt_registry=_prompt_registry,
+        )
+        _persistence_engine = PersistenceEngine(
+            episodic_memory=_episodic_memory, model=fast_model,
+            prompt_registry=_prompt_registry,
+        )
         _insight_crystallizer = InsightCrystallizer(
-            episodic_memory=_episodic_memory, belief_store=_bayesian_belief, model=balanced_model
+            episodic_memory=_episodic_memory, belief_store=_bayesian_belief, model=balanced_model,
+            prompt_registry=_prompt_registry,
         )
         BaseService.set_metacognitor(_metacognitor)
         BaseService.set_epistemic_reasoner(_epistemic_reasoner)
@@ -550,9 +568,12 @@ async def lifespan(app: FastAPI):
         readiness.mark_ready("cognitive_layer_ready")
 
         # Phase 3 Inquiry Engine
-        _question_generator = QuestionGenerator(model=fast_model)
+        _question_generator = QuestionGenerator(
+            model=fast_model, prompt_registry=_prompt_registry,
+        )
         _hypothesis_manager = HypothesisManager(
-            belief_store=_bayesian_belief, model=balanced_model
+            belief_store=_bayesian_belief, model=balanced_model,
+            prompt_registry=_prompt_registry,
         )
         _question_store = QuestionStore(db_path=_substrate.belief_ledger._db_path)
         await _question_store.initialize()
@@ -578,6 +599,11 @@ async def lifespan(app: FastAPI):
             enabled=False,
             description="Route POST /api/goals to InquiryEngine instead of v1 pipeline",
         )
+        flag_store.define(
+            "prompt_evolution",
+            enabled=False,
+            description="Enable Thompson sampling over prompt variants",
+        )
         readiness.mark_ready("inquiry_engine_ready")
 
         # Phase 4: Strategy Loop + Elastic Scaling
@@ -594,9 +620,12 @@ async def lifespan(app: FastAPI):
                 dialectic_engine=_dialectic_engine,
                 persistence_engine=_persistence_engine,
                 insight_crystallizer=_insight_crystallizer,
-                question_generator=QuestionGenerator(model=fast_model),
+                question_generator=QuestionGenerator(
+                    model=fast_model, prompt_registry=_prompt_registry,
+                ),
                 hypothesis_manager=HypothesisManager(
-                    belief_store=_bayesian_belief, model=balanced_model
+                    belief_store=_bayesian_belief, model=balanced_model,
+                    prompt_registry=_prompt_registry,
                 ),
                 question_store=_question_store,
                 procedural_memory=_procedural_memory,
@@ -764,6 +793,14 @@ async def lifespan(app: FastAPI):
 
         _cognitive_pool = None
         _strategy_evolver = None
+
+        # Shutdown — persist prompt registry
+        try:
+            if _prompt_registry is not None:
+                await _prompt_registry.persist()
+        except Exception:
+            log.debug("shutdown.prompt_registry_persist_failed")
+        _prompt_registry = None
 
         # Shutdown — clear Phase 3 refs
         _inquiry_engine = None
@@ -1167,6 +1204,17 @@ async def profiling_inquiry():
             "belief_store_status": belief_status,
         },
     }
+
+
+# ── Prompt Evolution ───────────────────────────────────────────────────────
+
+
+@app.get("/api/prompts/stats")
+async def prompt_stats():
+    """Return prompt evolution registry status and per-slot stats."""
+    if _prompt_registry is None:
+        return {"enabled": False, "slots": 0}
+    return _prompt_registry.status()
 
 
 # ── Bus Stats ─────────────────────────────────────────────────────────────

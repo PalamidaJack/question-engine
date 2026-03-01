@@ -132,6 +132,11 @@ TOPICS = {
     "inquiry.completed",
     "inquiry.failed",
     "inquiry.budget_warning",
+    # Prompt Evolution
+    "prompt.variant_selected",
+    "prompt.outcome_recorded",
+    "prompt.variant_created",
+    "prompt.variant_deactivated",
 }
 
 

@@ -91,11 +91,32 @@ class EpistemicReasoner:
         episodic_memory: EpisodicMemory | None = None,
         belief_store: BayesianBeliefStore | None = None,
         model: str = "openai/google/gemini-2.0-flash",
+        prompt_registry: Any | None = None,
     ) -> None:
         self._episodic = episodic_memory
         self._belief_store = belief_store
         self._model = model
         self._states: dict[str, EpistemicState] = {}
+        self._registry = prompt_registry
+        self._fallbacks: dict[str, str] = {
+            "epistemic.absence.system": "You are an epistemic reasoning module.",
+            "epistemic.absence.user": _ABSENCE_DETECTION_PROMPT,
+            "epistemic.uncertainty.system": "You are an epistemic reasoning module.",
+            "epistemic.uncertainty.user": _UNCERTAINTY_PROMPT,
+            "epistemic.surprise.system": "You are a surprise detection module.",
+            "epistemic.surprise.user": _SURPRISE_PROMPT,
+        }
+
+    def _get_prompt(self, slot_key: str, **fmt: Any) -> tuple[str, str]:
+        """Get prompt content, preferring registry variants when available."""
+        if self._registry is not None:
+            content, vid = self._registry.get_prompt(slot_key)
+            try:
+                return content.format(**fmt) if fmt else content, vid
+            except KeyError:
+                pass
+        fallback = self._fallbacks.get(slot_key, "")
+        return (fallback.format(**fmt) if fmt else fallback), "baseline"
 
     def get_or_create_state(self, goal_id: str) -> EpistemicState:
         """Get or create epistemic state for a goal."""
@@ -144,7 +165,9 @@ class EpistemicReasoner:
             else "No results obtained."
         )
 
-        prompt = _ABSENCE_DETECTION_PROMPT.format(
+        sys_content, _ = self._get_prompt("epistemic.absence.system")
+        user_content, user_vid = self._get_prompt(
+            "epistemic.absence.user",
             goal_description=goal_description,
             investigation_description=investigation_description,
             results_summary=results_summary,
@@ -154,17 +177,25 @@ class EpistemicReasoner:
             absences: list[AbsenceDetection]
 
         client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an epistemic reasoning module.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=AbsenceList,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=AbsenceList,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "epistemic.absence.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "epistemic.absence.user", success=True
+            )
 
         state.absences.extend(result.absences)
 
@@ -198,24 +229,34 @@ class EpistemicReasoner:
         evidence: str = "",
     ) -> UncertaintyAssessment:
         """Produce a structured uncertainty assessment for a finding."""
-        prompt = _UNCERTAINTY_PROMPT.format(
+        sys_content, _ = self._get_prompt("epistemic.uncertainty.system")
+        user_content, user_vid = self._get_prompt(
+            "epistemic.uncertainty.user",
             finding=finding,
             source=source or "unknown",
             evidence=evidence or "not specified",
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        assessment = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an epistemic reasoning module.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=UncertaintyAssessment,
-        )
+        try:
+            assessment = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=UncertaintyAssessment,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "epistemic.uncertainty.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "epistemic.uncertainty.user", success=True
+            )
 
         state = self.get_or_create_state(goal_id)
         state.known_facts.append(assessment)
@@ -245,24 +286,34 @@ class EpistemicReasoner:
             for b in beliefs
         )
 
-        prompt = _SURPRISE_PROMPT.format(
+        sys_content, _ = self._get_prompt("epistemic.surprise.system")
+        user_content, user_vid = self._get_prompt(
+            "epistemic.surprise.user",
             new_finding=new_finding,
             entity=entity_id,
             existing_beliefs=beliefs_summary,
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        surprise = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a surprise detection module.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=SurpriseDetection,
-        )
+        try:
+            surprise = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=SurpriseDetection,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "epistemic.surprise.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "epistemic.surprise.user", success=True
+            )
 
         if surprise.surprise_magnitude > 0.3:
             state = self.get_or_create_state(goal_id)

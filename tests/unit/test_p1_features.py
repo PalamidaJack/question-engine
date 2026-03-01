@@ -607,6 +607,8 @@ class TestEventVersioning:
             "strategy.evaluated",
             "pool.scale_recommended", "pool.scale_executed",
             "pool.health_check",
+            "prompt.variant_selected", "prompt.outcome_recorded",
+            "prompt.variant_created", "prompt.variant_deactivated",
         }
         assert set(TOPIC_SCHEMAS.keys()) == expected
 

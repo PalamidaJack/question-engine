@@ -85,9 +85,21 @@ class Metacognitor:
         self,
         episodic_memory: EpisodicMemory | None = None,
         model: str = "openai/google/gemini-2.0-flash",
+        prompt_registry: Any | None = None,
     ) -> None:
         self._episodic = episodic_memory
         self._model = model
+        self._registry = prompt_registry
+        self._fallbacks: dict[str, str] = {
+            "metacognitor.approach.system": (
+                "You are a metacognitive reasoning module."
+            ),
+            "metacognitor.approach.user": _APPROACH_PROMPT,
+            "metacognitor.tool_combo.system": (
+                "You are a creative problem-solving module."
+            ),
+            "metacognitor.tool_combo.user": _TOOL_COMBINATION_PROMPT,
+        }
 
         # Capability registry
         self._capabilities: dict[str, CapabilityProfile] = {}
@@ -97,6 +109,17 @@ class Metacognitor:
         self._approach_trees: dict[str, dict[str, ApproachNode]] = {}
         self._approach_roots: dict[str, str] = {}
         self._current_nodes: dict[str, str] = {}
+
+    def _get_prompt(self, slot_key: str, **fmt: Any) -> tuple[str, str]:
+        """Get prompt content, preferring registry variants when available."""
+        if self._registry is not None:
+            content, vid = self._registry.get_prompt(slot_key)
+            try:
+                return content.format(**fmt) if fmt else content, vid
+            except KeyError:
+                pass
+        fallback = self._fallbacks.get(slot_key, "")
+        return (fallback.format(**fmt) if fmt else fallback), "baseline"
 
     # -------------------------------------------------------------------
     # Capability Management
@@ -285,7 +308,9 @@ class Metacognitor:
         current_failure: str = "",
     ) -> ApproachAssessment:
         """Use LLM to reason about the next approach to try."""
-        prompt = _APPROACH_PROMPT.format(
+        sys_content, _ = self._get_prompt("metacognitor.approach.system")
+        user_content, user_vid = self._get_prompt(
+            "metacognitor.approach.user",
             goal_description=goal_description,
             capabilities_summary=self.get_capabilities_summary(),
             gaps_summary=self.get_gaps_summary(),
@@ -294,17 +319,25 @@ class Metacognitor:
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        assessment = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a metacognitive reasoning module.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=ApproachAssessment,
-        )
+        try:
+            assessment = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=ApproachAssessment,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "metacognitor.approach.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "metacognitor.approach.user", success=True
+            )
 
         if self._episodic:
             await self._episodic.store(
@@ -334,7 +367,9 @@ class Metacognitor:
             f"- {name}: {cap.description}"
             for name, cap in self._capabilities.items()
         )
-        prompt = _TOOL_COMBINATION_PROMPT.format(
+        sys_content, _ = self._get_prompt("metacognitor.tool_combo.system")
+        user_content, user_vid = self._get_prompt(
+            "metacognitor.tool_combo.user",
             problem=problem,
             tools=tools_str,
         )
@@ -343,17 +378,25 @@ class Metacognitor:
             suggestions: list[ToolCombinationSuggestion]
 
         client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a creative problem-solving module.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=ToolCombinations,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=ToolCombinations,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "metacognitor.tool_combo.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "metacognitor.tool_combo.user", success=True
+            )
         return result.suggestions
 
     # -------------------------------------------------------------------

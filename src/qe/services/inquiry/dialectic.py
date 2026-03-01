@@ -140,9 +140,42 @@ class DialecticEngine:
         self,
         episodic_memory: EpisodicMemory | None = None,
         model: str = "openai/anthropic/claude-sonnet-4",
+        prompt_registry: Any | None = None,
     ) -> None:
         self._episodic = episodic_memory
         self._model = model
+        self._registry = prompt_registry
+        self._fallbacks: dict[str, str] = {
+            "dialectic.challenge.system": (
+                "You are a devil's advocate. "
+                "You MUST argue against the conclusion."
+            ),
+            "dialectic.challenge.user": _DEVILS_ADVOCATE_PROMPT,
+            "dialectic.perspectives.system": (
+                "You are a {perspective_name}. Stay in character."
+            ),
+            "dialectic.perspectives.user": _PERSPECTIVE_PROMPT,
+            "dialectic.assumptions.system": (
+                "You are an assumption-detection module."
+            ),
+            "dialectic.assumptions.user": _ASSUMPTION_SURFACING_PROMPT,
+            "dialectic.red_team.system": (
+                "You are a red team analyst. "
+                "You MUST attack the finding."
+            ),
+            "dialectic.red_team.user": _RED_TEAM_PROMPT,
+        }
+
+    def _get_prompt(self, slot_key: str, **fmt: Any) -> tuple[str, str]:
+        """Get prompt content, preferring registry variants when available."""
+        if self._registry is not None:
+            content, vid = self._registry.get_prompt(slot_key)
+            try:
+                return content.format(**fmt) if fmt else content, vid
+            except KeyError:
+                pass  # Variant has wrong format keys — fall back
+        fallback = self._fallbacks.get(slot_key, "")
+        return (fallback.format(**fmt) if fmt else fallback), "baseline"
 
     async def challenge(
         self,
@@ -151,7 +184,9 @@ class DialecticEngine:
         evidence: str = "",
     ) -> list[Counterargument]:
         """Generate devil's advocate counterarguments."""
-        prompt = _DEVILS_ADVOCATE_PROMPT.format(
+        sys_content, _ = self._get_prompt("dialectic.challenge.system")
+        user_content, user_vid = self._get_prompt(
+            "dialectic.challenge.user",
             conclusion=conclusion,
             evidence=evidence or "Not explicitly provided.",
         )
@@ -160,20 +195,25 @@ class DialecticEngine:
             counterarguments: list[Counterargument]
 
         client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a devil's advocate. "
-                        "You MUST argue against the conclusion."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=CounterargumentList,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=CounterargumentList,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "dialectic.challenge.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "dialectic.challenge.user", success=True
+            )
 
         if self._episodic:
             await self._episodic.store(
@@ -210,26 +250,37 @@ class DialecticEngine:
         analyses: list[PerspectiveAnalysis] = []
 
         for perspective in perspectives:
-            prompt = _PERSPECTIVE_PROMPT.format(
+            sys_content, _ = self._get_prompt(
+                "dialectic.perspectives.system",
+                perspective_name=perspective,
+            )
+            user_content, user_vid = self._get_prompt(
+                "dialectic.perspectives.user",
                 perspective_name=perspective,
                 situation=situation,
                 evidence=evidence or "General knowledge.",
             )
 
             client = instructor.from_litellm(litellm.acompletion)
-            analysis = await client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            f"You are a {perspective}. Stay in character."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_model=PerspectiveAnalysis,
-            )
+            try:
+                analysis = await client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": sys_content},
+                        {"role": "user", "content": user_content},
+                    ],
+                    response_model=PerspectiveAnalysis,
+                )
+            except Exception:
+                if self._registry:
+                    self._registry.record_outcome(
+                        user_vid, "dialectic.perspectives.user", success=False
+                    )
+                raise
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "dialectic.perspectives.user", success=True
+                )
             analysis.perspective_name = perspective
             analyses.append(analysis)
 
@@ -246,7 +297,9 @@ class DialecticEngine:
             "\n".join(f"- {a}" for a in (explicit_assumptions or []))
             or "None stated."
         )
-        prompt = _ASSUMPTION_SURFACING_PROMPT.format(
+        sys_content, _ = self._get_prompt("dialectic.assumptions.system")
+        user_content, user_vid = self._get_prompt(
+            "dialectic.assumptions.user",
             analysis=analysis,
             explicit_assumptions=assumptions_str,
         )
@@ -255,17 +308,25 @@ class DialecticEngine:
             assumptions: list[AssumptionChallenge]
 
         client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an assumption-detection module.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=AssumptionList,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=AssumptionList,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "dialectic.assumptions.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "dialectic.assumptions.user", success=True
+            )
         return result.assumptions
 
     async def red_team(
@@ -275,26 +336,33 @@ class DialecticEngine:
         evidence: str = "",
     ) -> Counterargument:
         """Construct the strongest possible case AGAINST a finding."""
-        prompt = _RED_TEAM_PROMPT.format(
+        sys_content, _ = self._get_prompt("dialectic.red_team.system")
+        user_content, user_vid = self._get_prompt(
+            "dialectic.red_team.user",
             finding=finding,
             evidence=evidence or "Not explicitly provided.",
         )
 
         client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a red team analyst. "
-                        "You MUST attack the finding."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_model=Counterargument,
-        )
+        try:
+            result = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_model=Counterargument,
+            )
+        except Exception:
+            if self._registry:
+                self._registry.record_outcome(
+                    user_vid, "dialectic.red_team.user", success=False
+                )
+            raise
+        if self._registry:
+            self._registry.record_outcome(
+                user_vid, "dialectic.red_team.user", success=True
+            )
         return result
 
     async def full_dialectic(
