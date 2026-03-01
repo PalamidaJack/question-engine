@@ -23,6 +23,7 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 - `src/qe/bus/` — MemoryBus, event log, bus metrics
 - `src/qe/substrate/` — Belief ledger (SQLite), cold storage, goal store, embeddings, BayesianBeliefStore
 - `src/qe/models/` — Pydantic models (Envelope, Claim, GoalState, Genome Blueprint, Cognition)
+- `src/qe/optimization/` — Prompt tuning (DSPy-based) + PromptRegistry (Thompson sampling over prompt variants)
 - `src/qe/runtime/` — Service base, context curator, episodic memory, engram cache, metacognitor, epistemic reasoner, persistence engine
 - `tests/unit/` — Unit tests (~50+ files)
 - `tests/integration/` — Integration + E2E tests
@@ -32,14 +33,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1503 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1550 unit/integration tests, all passing
 .venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-01)
 
-~1509 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~1550 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -126,8 +127,26 @@ All built, tested (23 tests across 6 test files), lint clean:
 - `src/qe/services/inquiry/engine.py` — Fixed two bugs in `_phase_synthesize`: `full_dialectic()` and `crystallize()` called without `goal_id`, and `evidence` passed as `list` instead of `str` (masked by mocks)
 - `tests/integration/test_real_llm_inquiry.py` — 5 Layer-1 component tests (QuestionGenerator, Metacognitor, DialecticEngine, HypothesisManager, InsightCrystallizer) + 1 Layer-2 full InquiryEngine test. Uses `openai/anthropic/claude-3.5-haiku`. Marked `@pytest.mark.slow`, skipped when `KILOCODE_API_KEY` absent
 
+### Prompt Evolution (Phases A-C) — COMPLETE
+All built, tested (47 tests across 2 test files), lint clean. Thompson sampling over prompt variants for A/B testing and automated prompt evolution:
+- `src/qe/substrate/migrations/0013_prompt_variants.sql` — SQLite schema: `prompt_variants` (variant_id, slot_key, content, alpha/beta arms, rollout_pct) + `prompt_outcomes` (success, quality_score, latency_ms)
+- `src/qe/optimization/prompt_registry.py` — `PromptRegistry`: Thompson-samples among variants via `BetaArm`, `get_prompt()` hot path (no I/O), `record_outcome()` updates posteriors, SQLite persistence, `register_all_baselines()` registers 32 slots from all 7 components
+- `src/qe/bus/protocol.py` — 4 new prompt topics (139 total): `prompt.variant_selected`, `prompt.outcome_recorded`, `prompt.variant_created`, `prompt.variant_deactivated`
+- `src/qe/bus/schemas.py` — 4 new payload schemas (35 total) registered in `TOPIC_SCHEMAS`
+- All 7 cognitive components updated with `prompt_registry` param, `_fallbacks` dict, `_get_prompt()` helper, and `record_outcome()` calls on LLM success/failure:
+  - `dialectic.py` (8 slots: challenge, perspectives, assumptions, red_team × system/user)
+  - `insight.py` (8 slots: novelty, mechanism, actionability, cross_domain × system/user)
+  - `metacognitor.py` (4 slots: approach, tool_combo × system/user)
+  - `epistemic_reasoner.py` (6 slots: absence, uncertainty, surprise × system/user)
+  - `persistence_engine.py` (4 slots: root_cause, reframe × system/user)
+  - `question_generator.py` (1 slot: generate.system)
+  - `hypothesis.py` (1 slot: generate.system)
+- `src/qe/api/app.py` — Registry initialized in lifespan, passed to all 7 components, `prompt_evolution` feature flag (disabled by default), `GET /api/prompts/stats` endpoint, shutdown persistence
+- Phase D (PromptMutator: LLM-powered auto-generation of variants via rephrase/elaborate/simplify/restructure + auto-rollback) deferred
+- Tests: `tests/unit/test_prompt_registry.py` (28 tests: models, disabled/enabled modes, Thompson sampling, rollout, deactivation, stats, SQLite round-trip, format fallback, bus events, baseline registration), `tests/unit/test_prompt_evolution_wiring.py` (19 tests: bus topics/schemas, per-component registry integration, feature flag)
+
 ### Next Steps
-- v2 complete — all 6 phases implemented. Production-hardened with rate limiting, timeouts, error recovery, and health checks.
+- Phase D: PromptMutator — LLM-powered auto-generation of prompt variants with auto-rollback on low performance
 
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
@@ -144,6 +163,7 @@ All built, tested (23 tests across 6 test files), lint clean:
 - Bus topics are defined in `src/qe/bus/protocol.py`
 - LLM structured output pattern: `instructor.from_litellm(litellm.acompletion)` + Pydantic response_model (see any service or cognitive component)
 - Cognitive layer tests mock LLM via `patch("qe.runtime.metacognitor.instructor")` (or equivalent module path) + `AsyncMock` for `client.chat.completions.create`
-- All cognitive components accept optional `episodic_memory` and `model` params for dependency injection and testability
+- All cognitive components accept optional `episodic_memory`, `model`, and `prompt_registry` params for dependency injection and testability
+- Prompt slot naming convention: `component.method.role` (e.g., `dialectic.challenge.user`, `insight.novelty.system`)
 - Gemini models (via Kilo Code/OpenRouter) fail with instructor tool calling on nested `list[PydanticModel]` schemas — use Claude models for real LLM integration tests
 - Real LLM integration tests use `@pytest.mark.slow` + `skipif(not KILOCODE_API_KEY)` — see `tests/integration/test_real_llm_inquiry.py`
