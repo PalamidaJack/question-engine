@@ -73,10 +73,26 @@ def _reset_shared_state():
     BaseService._shared_tool_registry = None
     BaseService._shared_tool_gate = None
     BaseService._shared_budget = None
+    BaseService._shared_episodic_memory = None
+    BaseService._shared_bayesian_belief = None
+    BaseService._shared_context_curator = None
+    BaseService._shared_metacognitor = None
+    BaseService._shared_epistemic_reasoner = None
+    BaseService._shared_dialectic_engine = None
+    BaseService._shared_persistence_engine = None
+    BaseService._shared_insight_crystallizer = None
     yield
     BaseService._shared_tool_registry = None
     BaseService._shared_tool_gate = None
     BaseService._shared_budget = None
+    BaseService._shared_episodic_memory = None
+    BaseService._shared_bayesian_belief = None
+    BaseService._shared_context_curator = None
+    BaseService._shared_metacognitor = None
+    BaseService._shared_epistemic_reasoner = None
+    BaseService._shared_dialectic_engine = None
+    BaseService._shared_persistence_engine = None
+    BaseService._shared_insight_crystallizer = None
 
 
 def _setup_registry_with_test_tool() -> ToolRegistry:

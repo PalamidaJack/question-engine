@@ -37,18 +37,27 @@ from qe.bus.bus_metrics import get_bus_metrics
 from qe.bus.event_log import EventLog
 from qe.kernel.supervisor import Supervisor
 from qe.models.envelope import Envelope
+from qe.runtime.context_curator import ContextCurator
+from qe.runtime.episodic_memory import EpisodicMemory
+from qe.runtime.epistemic_reasoner import EpistemicReasoner
 from qe.runtime.logging_config import configure_from_config, update_log_level
+from qe.runtime.metacognitor import Metacognitor
 from qe.runtime.metrics import get_metrics
+from qe.runtime.persistence_engine import PersistenceEngine
 from qe.runtime.readiness import get_readiness
+from qe.runtime.service import BaseService
 from qe.services.chat import ChatService
 from qe.services.dispatcher import Dispatcher
 from qe.services.doctor import DoctorService
 from qe.services.executor import ExecutorService
+from qe.services.inquiry.dialectic import DialecticEngine
+from qe.services.inquiry.insight import InsightCrystallizer
 from qe.services.planner import PlannerService
 from qe.services.query import answer_question
 from qe.services.recovery import RecoveryOrchestrator
 from qe.services.verification import VerificationGate, VerificationService
 from qe.substrate import Substrate
+from qe.substrate.bayesian_belief import BayesianBeliefStore
 from qe.substrate.failure_kb import FailureKnowledgeBase
 from qe.substrate.goal_store import GoalStore
 from qe.substrate.memory_store import MemoryStore
@@ -496,6 +505,36 @@ async def lifespan(app: FastAPI):
             _supervisor.start(_genome_paths())
         )
         balanced_model = get_current_tiers().get("balanced", "gpt-4o")
+        fast_model = get_current_tiers().get("fast", "gpt-4o-mini")
+        _db_path = _substrate.belief_ledger._db_path
+
+        # Phase 1 Memory
+        _episodic_memory = EpisodicMemory(db_path=_db_path)
+        await _episodic_memory.initialize()
+        _bayesian_belief = BayesianBeliefStore(db_path=_db_path)
+        _context_curator = ContextCurator()
+        BaseService.set_episodic_memory(_episodic_memory)
+        BaseService.set_bayesian_belief(_bayesian_belief)
+        BaseService.set_context_curator(_context_curator)
+
+        # Phase 2 Cognitive
+        _metacognitor = Metacognitor(episodic_memory=_episodic_memory, model=fast_model)
+        _epistemic_reasoner = EpistemicReasoner(
+            episodic_memory=_episodic_memory, belief_store=_bayesian_belief, model=fast_model
+        )
+        _dialectic_engine = DialecticEngine(episodic_memory=_episodic_memory, model=balanced_model)
+        _persistence_engine = PersistenceEngine(episodic_memory=_episodic_memory, model=fast_model)
+        _insight_crystallizer = InsightCrystallizer(
+            episodic_memory=_episodic_memory, belief_store=_bayesian_belief, model=balanced_model
+        )
+        BaseService.set_metacognitor(_metacognitor)
+        BaseService.set_epistemic_reasoner(_epistemic_reasoner)
+        BaseService.set_dialectic_engine(_dialectic_engine)
+        BaseService.set_persistence_engine(_persistence_engine)
+        BaseService.set_insight_crystallizer(_insight_crystallizer)
+
+        readiness.mark_ready("cognitive_layer_ready")
+
         _chat_service = ChatService(
             substrate=_substrate,
             bus=bus,
@@ -604,7 +643,16 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown — clear cognitive layer refs
+    BaseService._shared_episodic_memory = None
+    BaseService._shared_bayesian_belief = None
+    BaseService._shared_context_curator = None
+    BaseService._shared_metacognitor = None
+    BaseService._shared_epistemic_reasoner = None
+    BaseService._shared_dialectic_engine = None
+    BaseService._shared_persistence_engine = None
+    BaseService._shared_insight_crystallizer = None
+
     for adapter in _active_adapters:
         try:
             await adapter.stop()

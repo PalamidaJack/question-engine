@@ -101,6 +101,19 @@ TOPICS = {
     "coordination.consensus",
     "tasks.delegated",
     "tasks.delegation_result",
+    # Cognitive Layer (v2)
+    "cognitive.approach_selected",
+    "cognitive.approach_exhausted",
+    "cognitive.absence_detected",
+    "cognitive.surprise_detected",
+    "cognitive.uncertainty_assessed",
+    "cognitive.dialectic_completed",
+    "cognitive.assumption_surfaced",
+    "cognitive.root_cause_analyzed",
+    "cognitive.reframe_suggested",
+    "cognitive.lesson_learned",
+    "cognitive.insight_crystallized",
+    "cognitive.capability_gap",
 }
 
 

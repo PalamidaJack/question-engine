@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from qe.substrate.bayesian_belief import BayesianBeliefStore
 from qe.substrate.belief_ledger import BeliefLedger
 from qe.substrate.cold_storage import ColdStorage
 from qe.substrate.embeddings import EmbeddingStore
@@ -177,6 +178,12 @@ class Substrate:
             entity_resolver=self.entity_resolver,
             memory_store=memory_store,
         )
+
+    @property
+    def bayesian_belief(self) -> BayesianBeliefStore:
+        if not hasattr(self, "_bayesian_belief"):
+            self._bayesian_belief = BayesianBeliefStore(db_path=self.belief_ledger._db_path)
+        return self._bayesian_belief
 
     async def multi_query(self, query: str, **kwargs):
         """MAGMA multi-graph query: fan out across semantic, temporal, entity, causal."""

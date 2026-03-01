@@ -14,18 +14,26 @@ from pydantic import BaseModel
 from qe.models.envelope import Envelope
 from qe.models.genome import Blueprint
 from qe.runtime.budget import BudgetTracker
+from qe.runtime.context_curator import ContextCurator
 from qe.runtime.context_manager import ContextManager
-from qe.runtime.llm_cache import get_llm_cache
+from qe.runtime.engram_cache import get_engram_cache
+from qe.runtime.episodic_memory import EpisodicMemory
+from qe.runtime.epistemic_reasoner import EpistemicReasoner
 from qe.runtime.logging_config import (
     ctx_correlation_id,
     ctx_envelope_id,
     ctx_service_id,
 )
+from qe.runtime.metacognitor import Metacognitor
+from qe.runtime.persistence_engine import PersistenceEngine
 from qe.runtime.rate_limiter import get_rate_limiter
 from qe.runtime.router import AutoRouter
 from qe.runtime.sanitizer import InputSanitizer, SanitizeResult
 from qe.runtime.tool_gate import GateDecision, ToolGate
 from qe.runtime.tools import ToolRegistry
+from qe.services.inquiry.dialectic import DialecticEngine
+from qe.services.inquiry.insight import InsightCrystallizer
+from qe.substrate.bayesian_belief import BayesianBeliefStore
 
 load_dotenv()
 
@@ -41,6 +49,18 @@ class BaseService:
     _shared_tool_registry: ToolRegistry | None = None
     _shared_tool_gate: ToolGate | None = None
 
+    # Phase 1 Memory
+    _shared_episodic_memory: EpisodicMemory | None = None
+    _shared_bayesian_belief: BayesianBeliefStore | None = None
+    _shared_context_curator: ContextCurator | None = None
+
+    # Phase 2 Cognitive
+    _shared_metacognitor: Metacognitor | None = None
+    _shared_epistemic_reasoner: EpistemicReasoner | None = None
+    _shared_dialectic_engine: DialecticEngine | None = None
+    _shared_persistence_engine: PersistenceEngine | None = None
+    _shared_insight_crystallizer: InsightCrystallizer | None = None
+
     @classmethod
     def set_budget_tracker(cls, tracker: BudgetTracker) -> None:
         cls._shared_budget = tracker
@@ -52,6 +72,38 @@ class BaseService:
     @classmethod
     def set_tool_gate(cls, gate: ToolGate) -> None:
         cls._shared_tool_gate = gate
+
+    @classmethod
+    def set_episodic_memory(cls, memory: EpisodicMemory) -> None:
+        cls._shared_episodic_memory = memory
+
+    @classmethod
+    def set_bayesian_belief(cls, store: BayesianBeliefStore) -> None:
+        cls._shared_bayesian_belief = store
+
+    @classmethod
+    def set_context_curator(cls, curator: ContextCurator) -> None:
+        cls._shared_context_curator = curator
+
+    @classmethod
+    def set_metacognitor(cls, metacognitor: Metacognitor) -> None:
+        cls._shared_metacognitor = metacognitor
+
+    @classmethod
+    def set_epistemic_reasoner(cls, reasoner: EpistemicReasoner) -> None:
+        cls._shared_epistemic_reasoner = reasoner
+
+    @classmethod
+    def set_dialectic_engine(cls, engine: DialecticEngine) -> None:
+        cls._shared_dialectic_engine = engine
+
+    @classmethod
+    def set_persistence_engine(cls, engine: PersistenceEngine) -> None:
+        cls._shared_persistence_engine = engine
+
+    @classmethod
+    def set_insight_crystallizer(cls, crystallizer: InsightCrystallizer) -> None:
+        cls._shared_insight_crystallizer = crystallizer
 
     def __init__(self, blueprint: Blueprint, bus: Any, substrate: Any) -> None:
         self.blueprint = blueprint
@@ -168,9 +220,9 @@ class BaseService:
 
     async def _call_llm(self, model: str, messages: list[dict], schema: type[BaseModel]) -> Any:
         # ── Cache lookup ──
-        cache = get_llm_cache()
+        cache = get_engram_cache()
         cache_key = cache.make_key(model, messages, schema.__name__)
-        cached = cache.get(cache_key)
+        cached = cache.get_exact(cache_key)
         if cached is not None:
             log.debug(
                 "llm.cache_hit model=%s service_id=%s schema=%s",
@@ -194,7 +246,7 @@ class BaseService:
         latency_ms = (time.monotonic() - start) * 1000
 
         # ── Store in cache ──
-        cache.put(cache_key, response, model)
+        cache.put_exact(cache_key, response, model)
 
         # Record cost if budget tracking is active
         if self._shared_budget is not None:
