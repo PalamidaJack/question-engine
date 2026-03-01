@@ -46,7 +46,7 @@ class WorkspaceManager:
         resolved = (workspace / relative_path).resolve()
         workspace_resolved = workspace.resolve()
 
-        if not str(resolved).startswith(str(workspace_resolved)):
+        if not resolved.is_relative_to(workspace_resolved):
             raise ValueError(
                 f"Path escapes workspace sandbox: {relative_path}"
             )

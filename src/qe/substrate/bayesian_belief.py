@@ -118,6 +118,9 @@ class BayesianBeliefStore:
         now = datetime.now(UTC)
 
         async with aiosqlite.connect(self._db_path) as db:
+            # Acquire write lock before read-modify-write to prevent race conditions
+            await db.execute("BEGIN IMMEDIATE")
+
             # Check for existing claim with same (subject, predicate)
             cursor = await db.execute(
                 """
@@ -140,7 +143,7 @@ class BayesianBeliefStore:
 
                 # Compute likelihood ratio for this evidence
                 lr = self._compute_likelihood_ratio(evidence)
-                cumulative_lr = old_lr * lr
+                cumulative_lr = max(1e-6, min(1e6, old_lr * lr))
 
                 # Bayesian update: posterior = prior * LR / (prior * LR + (1-prior))
                 posterior = self._bayes_update(prior, cumulative_lr)
@@ -223,6 +226,9 @@ class BayesianBeliefStore:
         now = datetime.now(UTC)
 
         async with aiosqlite.connect(self._db_path) as db:
+            # Acquire write lock before read-modify-write to prevent race conditions
+            await db.execute("BEGIN IMMEDIATE")
+
             cursor = await db.execute(
                 """
                 SELECT confidence, prior, posterior, evidence_count, likelihood_ratio
@@ -239,7 +245,7 @@ class BayesianBeliefStore:
             old_lr = row[4] if row[4] is not None else 1.0
 
             lr = self._compute_likelihood_ratio(evidence)
-            cumulative_lr = old_lr * lr
+            cumulative_lr = max(1e-6, min(1e6, old_lr * lr))
             posterior = self._bayes_update(prior, cumulative_lr)
 
             await db.execute(
@@ -470,6 +476,9 @@ class BayesianBeliefStore:
         Preserves the original prior_probability for auditability.
         """
         async with aiosqlite.connect(self._db_path) as db:
+            # Acquire write lock before read-modify-write to prevent race conditions
+            await db.execute("BEGIN IMMEDIATE")
+
             cursor = await db.execute(
                 "SELECT * FROM hypotheses WHERE hypothesis_id = ?",
                 (hypothesis_id,),

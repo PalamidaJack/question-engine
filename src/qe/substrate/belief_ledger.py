@@ -65,6 +65,9 @@ class BeliefLedger:
         - If new confidence <= old confidence: store as alternative (no supersession)
         """
         async with aiosqlite.connect(self._db_path) as db:
+            # Acquire write lock before read-modify-write to prevent race conditions
+            await db.execute("BEGIN IMMEDIATE")
+
             # Check for existing claims with same subject and predicate
             cursor = await db.execute(
                 """
@@ -83,7 +86,7 @@ class BeliefLedger:
                     "UPDATE claims SET superseded_by = ? WHERE claim_id = ?",
                     (claim.claim_id, old_claim_id)
                 )
-                log.info(f"Superseded claim {old_claim_id} with {claim.claim_id}")
+                log.info("Superseded claim %s with %s", old_claim_id, claim.claim_id)
 
             # Insert the new claim
             await db.execute(
@@ -206,8 +209,7 @@ class BeliefLedger:
             )
             await db.commit()
 
-        # Fetch and return the updated prediction
-        async with aiosqlite.connect(self._db_path) as db:
+            # Fetch within the same connection for atomicity
             cursor = await db.execute(
                 "SELECT * FROM predictions WHERE prediction_id = ?",
                 (prediction_id,)

@@ -8,6 +8,7 @@ counterarguments.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -378,14 +379,10 @@ class DialecticEngine:
         Runs: challenge + perspective rotation + assumption surfacing.
         Computes revised confidence and flags investigation questions.
         """
-        counterarguments = await self.challenge(
-            goal_id, conclusion, evidence
-        )
-        perspectives = await self.rotate_perspectives(
-            goal_id, conclusion, evidence, domain
-        )
-        assumptions = await self.surface_assumptions(
-            goal_id, conclusion, explicit_assumptions
+        counterarguments, perspectives, assumptions = await asyncio.gather(
+            self.challenge(goal_id, conclusion, evidence),
+            self.rotate_perspectives(goal_id, conclusion, evidence, domain),
+            self.surface_assumptions(goal_id, conclusion, explicit_assumptions),
         )
 
         # Revised confidence based on dialectic results

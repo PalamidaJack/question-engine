@@ -48,6 +48,7 @@ class ConnectionPool:
         self._size = 0
         self._closed = False
         self._lock = asyncio.Lock()
+        self._in_use: set[aiosqlite.Connection] = set()
         self._total_acquired = 0
         self._total_created = 0
 
@@ -97,10 +98,12 @@ class ConnectionPool:
             conn = await self._pool.get()
 
         self._total_acquired += 1
+        self._in_use.add(conn)
 
         try:
             yield conn
         except Exception:
+            self._in_use.discard(conn)
             # On error, try to return the connection; if broken, discard
             try:
                 await self._pool.put(conn)
@@ -108,6 +111,7 @@ class ConnectionPool:
                 self._size -= 1
             raise
         else:
+            self._in_use.discard(conn)
             # Return healthy connection to pool
             try:
                 self._pool.put_nowait(conn)
@@ -117,9 +121,18 @@ class ConnectionPool:
                 self._size -= 1
 
     async def close(self) -> None:
-        """Close all connections in the pool."""
+        """Close all connections in the pool, including in-use ones."""
         self._closed = True
         closed = 0
+        # Close in-use connections first
+        for conn in list(self._in_use):
+            try:
+                await conn.close()
+                closed += 1
+            except Exception:
+                pass
+        self._in_use.clear()
+        # Close queued connections
         while not self._pool.empty():
             try:
                 conn = self._pool.get_nowait()

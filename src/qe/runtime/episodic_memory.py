@@ -7,6 +7,7 @@ Supports semantic + recency-weighted search for recall.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -64,6 +65,7 @@ class EpisodicMemory:
         self._max_warm = max_warm_entries
         self._db_path = db_path
         self._initialized = False
+        self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Create the warm store table if using SQLite."""
@@ -100,14 +102,20 @@ class EpisodicMemory:
 
     async def store(self, episode: Episode) -> None:
         """Store an episode. Evicts from hot to warm on overflow."""
-        # Add to hot store
-        self._hot[episode.episode_id] = episode
-        self._hot.move_to_end(episode.episode_id)
+        async with self._lock:
+            # Add to hot store
+            self._hot[episode.episode_id] = episode
+            self._hot.move_to_end(episode.episode_id)
 
-        # Evict oldest from hot to warm if over capacity
-        while len(self._hot) > self._max_hot:
-            oldest_id, oldest = self._hot.popitem(last=False)
-            await self._spill_to_warm(oldest)
+            # Evict oldest from hot to warm if over capacity
+            evicted: list[Episode] = []
+            while len(self._hot) > self._max_hot:
+                _oldest_id, oldest = self._hot.popitem(last=False)
+                evicted.append(oldest)
+
+        # Spill outside the lock to avoid holding it during I/O
+        for ep in evicted:
+            await self._spill_to_warm(ep)
 
     async def recall(
         self,

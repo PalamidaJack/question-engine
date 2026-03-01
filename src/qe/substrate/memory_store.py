@@ -91,6 +91,9 @@ class MemoryStore:
         memory_id = f"mem_{uuid.uuid4().hex[:12]}"
 
         async with aiosqlite.connect(self._db_path) as db:
+            # Acquire write lock before read-modify-write to prevent race conditions
+            await db.execute("BEGIN IMMEDIATE")
+
             # Check for existing entry with same category+key
             cursor = await db.execute(
                 "SELECT memory_id FROM memory_entries "

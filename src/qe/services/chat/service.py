@@ -71,9 +71,21 @@ class ChatService:
         self.model = model
         self._sessions: dict[str, ChatSession] = {}
 
+    _MAX_SESSIONS = 1000
+
     def get_or_create_session(self, session_id: str | None = None) -> ChatSession:
+        # Periodically clean stale sessions when approaching capacity
+        if len(self._sessions) > self._MAX_SESSIONS // 2:
+            self.cleanup_stale_sessions()
         if session_id and session_id in self._sessions:
             return self._sessions[session_id]
+        # Evict oldest if at capacity
+        if len(self._sessions) >= self._MAX_SESSIONS:
+            oldest_sid = min(
+                self._sessions,
+                key=lambda s: self._sessions[s].last_active,
+            )
+            del self._sessions[oldest_sid]
         sid = session_id or str(uuid.uuid4())
         session = ChatSession(sid)
         self._sessions[sid] = session

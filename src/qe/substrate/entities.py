@@ -30,6 +30,20 @@ class EntityResolver:
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
+        self._alias_index_ready = False
+
+    async def _ensure_alias_index(self, db: aiosqlite.Connection) -> None:
+        """Create the entity_aliases index table if it doesn't exist."""
+        if self._alias_index_ready:
+            return
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS entity_aliases (
+                alias TEXT PRIMARY KEY,
+                canonical_name TEXT NOT NULL
+            )
+        """)
+        await db.commit()
+        self._alias_index_ready = True
 
     async def resolve(self, raw_name: str) -> str:
         """Return the canonical name for *raw_name*, or its normalized form."""
@@ -45,12 +59,34 @@ class EntityResolver:
             if row:
                 return row[0]
 
-            # Search aliases
-            cursor = await db.execute("SELECT canonical_name, aliases FROM entities")
+            # Fast indexed alias lookup
+            await self._ensure_alias_index(db)
+            cursor = await db.execute(
+                "SELECT canonical_name FROM entity_aliases WHERE alias = ?",
+                (normalized,),
+            )
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+
+            # Fallback: scan JSON aliases (for entries not yet in index)
+            cursor = await db.execute(
+                "SELECT canonical_name, aliases FROM entities"
+            )
             rows = await cursor.fetchall()
             for canonical, aliases_json in rows:
                 aliases: list[str] = json.loads(aliases_json)
                 if normalized in aliases:
+                    # Back-fill the index for future lookups
+                    try:
+                        await db.execute(
+                            "INSERT OR IGNORE INTO entity_aliases"
+                            " (alias, canonical_name) VALUES (?, ?)",
+                            (normalized, canonical),
+                        )
+                        await db.commit()
+                    except Exception:
+                        pass
                     return canonical
 
         return normalized
@@ -76,6 +112,13 @@ class EntityResolver:
                         "UPDATE entities SET aliases = ?, updated_at = ? WHERE canonical_name = ?",
                         (json.dumps(aliases), now, normalized_canonical),
                     )
+                # Keep alias index in sync
+                await self._ensure_alias_index(db)
+                await db.execute(
+                    "INSERT OR IGNORE INTO entity_aliases"
+                    " (alias, canonical_name) VALUES (?, ?)",
+                    (normalized_alias, normalized_canonical),
+                )
             else:
                 await db.execute(
                     "INSERT INTO entities "

@@ -199,8 +199,20 @@ def test_setup_providers_endpoint(client):
 
 
 def test_setup_save_requires_body(client):
-    resp = client.post("/api/setup/save", json={})
+    from unittest.mock import patch
+
+    with patch("qe.api.app.is_setup_complete", return_value=False):
+        resp = client.post("/api/setup/save", json={})
     assert resp.status_code == 400
+
+
+def test_setup_save_blocked_after_complete(client):
+    from unittest.mock import patch
+
+    with patch("qe.api.app.is_setup_complete", return_value=True):
+        resp = client.post("/api/setup/save", json={"providers": {"k": "v"}})
+    assert resp.status_code == 403
+    assert "already complete" in resp.json()["error"].lower()
 
 
 def test_setup_status_never_returns_full_keys(client):

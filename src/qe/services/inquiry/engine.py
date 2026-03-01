@@ -42,14 +42,16 @@ class _InquiryRateLimiter:
         self._max_tokens = float(rpm)
         self._refill_rate = rpm / 60.0  # tokens per second
         self._last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
 
-    def try_acquire_rate(self) -> bool:
+    async def try_acquire_rate(self) -> bool:
         """Non-blocking rate check. Returns True if a token is available."""
-        self._refill()
-        if self._tokens >= 1.0:
-            self._tokens -= 1.0
-            return True
-        return False
+        async with self._lock:
+            self._refill()
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True
+            return False
 
     def _refill(self) -> None:
         now = time.monotonic()
@@ -122,7 +124,7 @@ class InquiryEngine:
 
         # Rate limiting check
         if self._rate_limiter is not None:
-            if not self._rate_limiter.try_acquire_rate():
+            if not await self._rate_limiter.try_acquire_rate():
                 return InquiryResult(
                     inquiry_id=f"inq_rl_{goal_id}",
                     goal_id=goal_id,
@@ -353,7 +355,7 @@ class InquiryEngine:
                 "iteration": state.current_iteration,
             })
             return self._finalize(
-                state, "max_iterations", all_insights, start_time, status="failed"
+                state, "error", all_insights, start_time, status="failed"
             )
         except Exception:
             log.exception(
@@ -366,7 +368,7 @@ class InquiryEngine:
                 "iteration": state.current_iteration,
             })
             return self._finalize(
-                state, "max_iterations", all_insights, start_time, status="failed"
+                state, "error", all_insights, start_time, status="failed"
             )
 
         return self._finalize(
@@ -483,6 +485,8 @@ class InquiryEngine:
         """Phase 5: Investigate a question using tools."""
         tool_calls: list[dict[str, Any]] = []
         raw_findings = ""
+        total_tokens = 0
+        total_cost = 0.0
 
         if self._tool_registry is not None:
             try:
@@ -512,6 +516,13 @@ class InquiryEngine:
                             tools=tools,
                             tool_choice="auto",
                         )
+                        # Track token usage and cost
+                        if hasattr(response, "usage") and response.usage:
+                            total_tokens += getattr(response.usage, "total_tokens", 0) or 0
+                            try:
+                                total_cost += _litellm.completion_cost(completion_response=response)
+                            except Exception:
+                                pass
                         choice = response.choices[0]
                         if not choice.message.tool_calls:
                             raw_findings = choice.message.content or ""
@@ -564,6 +575,8 @@ class InquiryEngine:
             question_id=question.question_id,
             tool_calls=tool_calls,
             raw_findings=raw_findings,
+            tokens_used=total_tokens,
+            cost_usd=total_cost,
         )
 
     async def _phase_synthesize(
@@ -616,6 +629,12 @@ class InquiryEngine:
                 state.overall_confidence = report.revised_confidence
             except Exception:
                 log.warning("synthesize.dialectic_failed", exc_info=True)
+        elif investigation.raw_findings:
+            # No dialectic engine — use investigation confidence as fallback
+            state.overall_confidence = max(
+                state.overall_confidence,
+                question.confidence_in_answer,
+            )
 
         # Knowledge Loop: contradictions → hypotheses
         if contradictions:
@@ -940,8 +959,7 @@ class InquiryEngine:
         """Check if remaining budget is below hard stop percentage."""
         if self._budget is None:
             return False
-        limit = max(self._budget.monthly_limit_usd, 0.01)
-        remaining_pct = 1.0 - (self._budget._total_spend / limit)
+        remaining_pct = self._budget.remaining_pct()
         return remaining_pct < cfg.budget_hard_stop_pct
 
     def _publish(self, topic: str, goal_id: str, payload: dict[str, Any]) -> None:

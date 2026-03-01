@@ -11,7 +11,7 @@ class Claim(BaseModel):
     subject_entity_id: str
     predicate: str
     object_value: str
-    confidence: float
+    confidence: float = Field(ge=0.0, le=1.0)
     source_service_id: str
     source_envelope_ids: list[str]
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

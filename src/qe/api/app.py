@@ -280,9 +280,11 @@ async def _init_channels() -> None:
                 )
                 # Notify via channel if router available
                 if _notification_router is not None:
-                    await _notification_router.send(
-                        channel=channel, user_id=user_id,
+                    await _notification_router.notify(
+                        user_id=user_id,
+                        event_type="inquiry_result",
                         message=f"Inquiry complete: {result.findings_summary[:500]}",
+                        urgency="high",
                     )
                 return
             except Exception:
@@ -478,8 +480,9 @@ async def _inbox_relay_loop() -> None:
                 payload = json.loads(item.read_text(encoding="utf-8"))
                 env = Envelope.model_validate(payload)
                 bus.publish(env)
-            finally:
                 item.unlink(missing_ok=True)
+            except Exception:
+                log.warning("inbox.relay_failed file=%s", item.name, exc_info=True)
         await asyncio.sleep(0.5)
 
 
@@ -1013,7 +1016,12 @@ if _static_dir.exists():
 @app.get("/")
 async def dashboard():
     """Serve the dashboard UI."""
-    return FileResponse(str(_static_dir / "index.html"))
+    index = _static_dir / "index.html"
+    if not index.exists():
+        return JSONResponse(
+            {"status": "ok", "message": "Question Engine is running. No dashboard UI found."},
+        )
+    return FileResponse(str(index))
 
 
 # ── Setup Endpoints ─────────────────────────────────────────────────────────
@@ -1059,6 +1067,13 @@ async def setup_save(body: dict[str, Any]):
             }
         }
     """
+    # Block setup changes after initial setup is complete
+    if is_setup_complete():
+        return JSONResponse(
+            {"error": "Setup already complete. Reconfigure via config.toml or .env."},
+            status_code=403,
+        )
+
     providers = body.get("providers", {})
     tiers = body.get("tiers", {})
 

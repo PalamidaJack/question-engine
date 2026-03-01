@@ -109,10 +109,12 @@ class QuestionStore:
             by_parent.setdefault(c.parent_id, []).append(c)  # type: ignore[arg-type]
 
         # BFS ordering
+        from collections import deque
+
         ordered: list[Question] = []
-        queue = list(roots)
+        queue = deque(roots)
         while queue:
-            node = queue.pop(0)
+            node = queue.popleft()
             ordered.append(node)
             for child in by_parent.get(node.question_id, []):
                 queue.append(child)

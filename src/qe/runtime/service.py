@@ -584,11 +584,14 @@ class BaseService:
 
     async def _heartbeat_loop(self) -> None:
         while self._running:
-            self.bus.publish(
-                Envelope(
-                    topic="system.heartbeat",
-                    source_service_id=self.blueprint.service_id,
-                    payload={"turn_count": self._turn_count, "status": "alive"},
+            try:
+                self.bus.publish(
+                    Envelope(
+                        topic="system.heartbeat",
+                        source_service_id=self.blueprint.service_id,
+                        payload={"turn_count": self._turn_count, "status": "alive"},
+                    )
                 )
-            )
+            except Exception:
+                log.debug("heartbeat.publish_failed", exc_info=True)
             await asyncio.sleep(30)

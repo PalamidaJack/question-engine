@@ -142,8 +142,7 @@ class TestInquiryEngineBasicFlow:
     @pytest.mark.asyncio
     async def test_budget_exhausted(self):
         budget = MagicMock()
-        budget._total_spend = 49.0
-        budget.monthly_limit_usd = 50.0
+        budget.remaining_pct.return_value = 0.02  # 2% remaining
 
         engine = _make_engine(
             budget_tracker=budget,

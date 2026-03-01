@@ -212,8 +212,7 @@ class TestInvestmentWalkthrough:
     ):
         """Tight budget should cause budget_exhausted termination."""
         budget = MagicMock()
-        budget._total_spend = 49.0
-        budget.monthly_limit_usd = 50.0
+        budget.remaining_pct.return_value = 0.02  # 2% remaining
 
         engine = InquiryEngine(
             episodic_memory=cognitive_stack["episodic_memory"],

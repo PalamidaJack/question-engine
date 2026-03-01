@@ -84,35 +84,38 @@ def _make_engine(rate_limiter=None, **overrides):
 
 
 class TestInquiryRateLimiter:
-    def test_rate_limiter_allows_under_limit(self):
+    @pytest.mark.asyncio
+    async def test_rate_limiter_allows_under_limit(self):
         """Rate limiter allows requests under the limit."""
         rl = _InquiryRateLimiter(max_concurrent=3, rpm=10)
         # Should allow 10 requests
         for _ in range(10):
-            assert rl.try_acquire_rate() is True
+            assert await rl.try_acquire_rate() is True
 
-    def test_rate_limiter_blocks_over_limit(self):
+    @pytest.mark.asyncio
+    async def test_rate_limiter_blocks_over_limit(self):
         """Rate limiter blocks when tokens exhausted."""
         rl = _InquiryRateLimiter(max_concurrent=3, rpm=5)
         # Exhaust all 5 tokens
         for _ in range(5):
-            assert rl.try_acquire_rate() is True
+            assert await rl.try_acquire_rate() is True
         # 6th should fail
-        assert rl.try_acquire_rate() is False
+        assert await rl.try_acquire_rate() is False
 
-    def test_rate_limiter_refills_over_time(self):
+    @pytest.mark.asyncio
+    async def test_rate_limiter_refills_over_time(self):
         """Tokens refill over time."""
         import time
 
         rl = _InquiryRateLimiter(max_concurrent=3, rpm=60)  # 1 token/sec
         # Exhaust all tokens
         for _ in range(60):
-            rl.try_acquire_rate()
-        assert rl.try_acquire_rate() is False
+            await rl.try_acquire_rate()
+        assert await rl.try_acquire_rate() is False
 
         # Simulate time passing by manipulating _last_refill
         rl._last_refill = time.monotonic() - 2.0  # 2 seconds ago = 2 tokens
-        assert rl.try_acquire_rate() is True
+        assert await rl.try_acquire_rate() is True
 
     @pytest.mark.asyncio
     async def test_concurrent_inquiry_semaphore(self):

@@ -183,6 +183,19 @@ class MemoryBus:
 
         return tasks
 
+    def publish_sync(self, topic: str, payload: dict[str, Any]) -> None:
+        """Convenience method for fire-and-forget publishing with just topic + payload.
+
+        Wraps the data in an Envelope and calls publish(). Used by optimization
+        components (PromptRegistry, PromptMutator) that don't have an Envelope handy.
+        """
+        envelope = Envelope(
+            topic=topic,
+            source_service_id="optimization",
+            payload=payload,
+        )
+        self.publish(envelope)
+
     async def publish_and_wait(self, envelope: Envelope) -> list[Any]:
         """Publish an envelope and await all handler completions.
 

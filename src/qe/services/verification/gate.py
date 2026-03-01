@@ -7,6 +7,7 @@ Runs verification on completed results and routes failures to recovery.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from typing import Any
 
 from qe.models.envelope import Envelope
@@ -38,8 +39,9 @@ class VerificationGate:
         self._failure_kb = failure_kb
         self._max_recovery_attempts = max_recovery_attempts
 
-        # Cached dispatch payloads keyed by (goal_id, subtask_id)
-        self._dispatch_contexts: dict[tuple[str, str], dict[str, Any]] = {}
+        # Cached dispatch payloads keyed by (goal_id, subtask_id) — bounded LRU
+        self._dispatch_contexts: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+        self._max_context_cache = 500
         # Recovery attempt counters keyed by (goal_id, subtask_id)
         self._retry_counts: dict[tuple[str, str], int] = {}
 
@@ -62,6 +64,9 @@ class VerificationGate:
         payload = envelope.payload
         key = (payload.get("goal_id", ""), payload.get("subtask_id", ""))
         self._dispatch_contexts[key] = payload
+        self._dispatch_contexts.move_to_end(key)
+        while len(self._dispatch_contexts) > self._max_context_cache:
+            self._dispatch_contexts.popitem(last=False)
         log.debug("verification_gate.cached_context key=%s", key)
 
     async def _on_task_completed(self, envelope: Envelope) -> None:
@@ -90,8 +95,9 @@ class VerificationGate:
         result.verification_result = report.model_dump(mode="json")
 
         if report.overall in (CheckResult.PASS, CheckResult.WARN):
-            # Clear retry count on success
+            # Clear retry count and dispatch context on success
             self._retry_counts.pop(key, None)
+            self._dispatch_contexts.pop(key, None)
             self.bus.publish(
                 Envelope(
                     topic="tasks.verified",
@@ -163,6 +169,9 @@ class VerificationGate:
                 goal_id=goal_id,
                 subtask_id=subtask_id,
             )
+            # Clean up on exhaustion to prevent leak
+            self._dispatch_contexts.pop(key, None)
+            self._retry_counts.pop(key, None)
             hil_envelope = self._recovery._build_hil_envelope(dispatch_ctx)
             self.bus.publish(hil_envelope)
             return

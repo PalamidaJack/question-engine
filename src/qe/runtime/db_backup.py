@@ -50,7 +50,11 @@ def backup_database(
     dest_p.parent.mkdir(parents=True, exist_ok=True)
 
     source_conn = sqlite3.connect(source_path)
-    dest_conn = sqlite3.connect(dest_path)
+    try:
+        dest_conn = sqlite3.connect(dest_path)
+    except Exception:
+        source_conn.close()
+        raise
 
     try:
         source_conn.backup(dest_conn)

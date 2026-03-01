@@ -26,7 +26,7 @@ InquiryPhase = Literal[
 TerminationReason = Literal[
     "max_iterations", "budget_exhausted", "confidence_met",
     "all_questions_answered", "approaches_exhausted", "user_cancelled",
-    "rate_limited", "timeout",
+    "rate_limited", "timeout", "error",
 ]
 
 

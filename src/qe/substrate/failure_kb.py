@@ -147,7 +147,7 @@ class FailureKnowledgeBase:
                        COUNT(*) as occurrences
                 FROM failure_records
                 WHERE task_type = ? AND NOT recovery_succeeded
-                GROUP BY context_fingerprint
+                GROUP BY failure_class, error_summary
                 HAVING COUNT(*) >= 2
                 ORDER BY occurrences DESC
                 LIMIT 10
