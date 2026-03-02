@@ -157,6 +157,7 @@ def _make_service(**kwargs) -> ChatService:
         bus=kwargs.get("bus", MagicMock()),
         budget_tracker=kwargs.get("budget_tracker", None),
         model="gpt-4o-mini",
+        fast_model=kwargs.get("fast_model", None),
         inquiry_engine=kwargs.get("inquiry_engine", None),
         tool_registry=kwargs.get("tool_registry", None),
         tool_gate=kwargs.get("tool_gate", None),
@@ -170,6 +171,7 @@ def _make_service(**kwargs) -> ChatService:
         dialectic_engine=kwargs.get("dialectic_engine", None),
         insight_crystallizer=kwargs.get("insight_crystallizer", None),
         knowledge_loop=kwargs.get("knowledge_loop", None),
+        procedural_memory=kwargs.get("procedural_memory", None),
     )
 
 
@@ -238,7 +240,7 @@ class TestAgentLoop:
 
             messages = await svc._build_messages(svc.get_or_create_session("s1"))
             tool_schemas = svc._get_chat_tools()
-            reply, audit = await svc._chat_tool_loop(
+            reply, audit, _cost = await svc._chat_tool_loop(
                 messages, tool_schemas, max_iterations=3
             )
 
@@ -860,7 +862,7 @@ class TestProgressEvents:
             mock_litellm.completion_cost = MagicMock(return_value=0.001)
             messages = await svc._build_messages(svc.get_or_create_session("s1"))
             tool_schemas = svc._get_chat_tools()
-            reply, audit = await svc._chat_tool_loop(
+            reply, audit, _cost = await svc._chat_tool_loop(
                 messages, tool_schemas, max_iterations=5,
                 progress_queue=queue,
             )
@@ -902,7 +904,7 @@ class TestProgressEvents:
             mock_litellm.completion_cost = MagicMock(return_value=0.001)
             messages = await svc._build_messages(svc.get_or_create_session("s1"))
             tool_schemas = svc._get_chat_tools()
-            reply, audit = await svc._chat_tool_loop(
+            reply, audit, _cost = await svc._chat_tool_loop(
                 messages, tool_schemas, max_iterations=5,
                 progress_queue=queue,
             )
@@ -936,7 +938,7 @@ class TestProgressEvents:
             mock_litellm.completion_cost = MagicMock(return_value=0.001)
             messages = await svc._build_messages(svc.get_or_create_session("s1"))
             tool_schemas = svc._get_chat_tools()
-            reply, audit = await svc._chat_tool_loop(
+            reply, audit, _cost = await svc._chat_tool_loop(
                 messages, tool_schemas, max_iterations=5,
                 progress_queue=None,
             )
@@ -986,3 +988,407 @@ class TestRecordCost:
         mock_budget.record_cost.assert_called_once_with(
             svc.model, 0.005, service_id="chat",
         )
+
+
+# ── Improvement 1: Plan State Injection ──────────────────────────────────
+
+
+class TestPlanStateInjection:
+    @pytest.mark.asyncio
+    async def test_state_message_injected_on_second_call(self):
+        """After first tool round, a system message with agent state is injected."""
+        svc = _make_service()
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+        text_resp = _mock_llm_text_response("Done.")
+
+        call_count = 0
+        captured_messages = []
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            captured_messages.append(list(kwargs["messages"]))
+            return tool_resp if call_count == 1 else text_resp
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            await svc._chat_tool_loop(messages, tool_schemas, max_iterations=5)
+
+        # Second LLM call should have the agent state system message
+        second_call_msgs = captured_messages[1]
+        state_msgs = [
+            m for m in second_call_msgs
+            if isinstance(m, dict) and m.get("role") == "system"
+            and "AGENT STATE" in m.get("content", "")
+        ]
+        assert len(state_msgs) == 1
+        assert "Iteration 1/" in state_msgs[0]["content"]
+        assert "query_beliefs" in state_msgs[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_state_message_correct_iteration(self):
+        """Agent state shows correct iteration numbers across multiple rounds."""
+        svc = _make_service()
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+        text_resp = _mock_llm_text_response("Done.")
+
+        call_count = 0
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return tool_resp if call_count <= 2 else text_resp
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            reply, audit, _cost = await svc._chat_tool_loop(
+                messages, tool_schemas, max_iterations=5,
+            )
+
+        assert len(audit) == 2  # Two tool call rounds
+
+
+# ── Improvement 2: Smart Context Compaction ──────────────────────────────
+
+
+class TestContextCompaction:
+    @pytest.mark.asyncio
+    async def test_triggers_at_threshold(self):
+        """Compaction triggers when history exceeds threshold."""
+        svc = _make_service()
+        session = svc.get_or_create_session("s1")
+
+        # Add enough messages to exceed _COMPACTION_THRESHOLD (24)
+        for i in range(30):
+            session.history.append({"role": "user", "content": f"msg {i}"})
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "Summary of conversation."
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            await svc._compact_history(session)
+
+        assert session.context_summary == "Summary of conversation."
+        assert len(session.history) == 16  # _MAX_CONTEXT_MESSAGES
+
+    @pytest.mark.asyncio
+    async def test_skips_below_threshold(self):
+        """Compaction does not trigger below threshold."""
+        svc = _make_service()
+        session = svc.get_or_create_session("s1")
+
+        for i in range(10):
+            session.history.append({"role": "user", "content": f"msg {i}"})
+
+        await svc._compact_history(session)
+
+        assert session.context_summary is None
+        assert len(session.history) == 10
+
+    @pytest.mark.asyncio
+    async def test_preserves_recent_messages(self):
+        """After compaction, the most recent 16 messages are preserved."""
+        svc = _make_service()
+        session = svc.get_or_create_session("s1")
+
+        for i in range(30):
+            session.history.append({"role": "user", "content": f"msg {i}"})
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "Summary"
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            await svc._compact_history(session)
+
+        # Most recent message should be "msg 29"
+        assert session.history[-1]["content"] == "msg 29"
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_llm_failure(self):
+        """On LLM failure, falls back to FIFO trim without summary."""
+        svc = _make_service()
+        session = svc.get_or_create_session("s1")
+
+        for i in range(30):
+            session.history.append({"role": "user", "content": f"msg {i}"})
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=Exception("LLM error"))
+            await svc._compact_history(session)
+
+        assert session.context_summary is None
+        assert len(session.history) == 16
+
+    @pytest.mark.asyncio
+    async def test_summary_in_built_messages(self):
+        """Context summary appears in messages built for LLM."""
+        svc = _make_service()
+        session = svc.get_or_create_session("s1")
+        session.context_summary = "User asked about Mars exploration."
+        session.add_user_message("tell me more")
+
+        messages = await svc._build_messages(session)
+
+        system_msg = messages[0]["content"]
+        assert "Mars exploration" in system_msg
+        assert "Conversation context (summarized)" in system_msg
+
+    def test_default_context_summary_is_none(self):
+        """New sessions have context_summary=None."""
+        session = ChatSession("test-1")
+        assert session.context_summary is None
+
+
+# ── Improvement 3: Dual-Model Routing ────────────────────────────────────
+
+
+class TestDualModelRouting:
+    def test_first_iteration_uses_balanced(self):
+        """Iteration 0 always uses the balanced model."""
+        svc = _make_service(fast_model="gpt-4o-mini")
+        svc.model = "gpt-4o"
+        model = svc._select_model_for_iteration(0, False, 10)
+        assert model == "gpt-4o"
+
+    def test_mid_chain_uses_fast(self):
+        """After tool results, mid-chain iterations use fast model."""
+        svc = _make_service(fast_model="gpt-4o-mini")
+        svc.model = "gpt-4o"
+        model = svc._select_model_for_iteration(2, True, 10)
+        assert model == "gpt-4o-mini"
+
+    def test_fallback_when_no_fast_model(self):
+        """Without fast_model, always returns balanced."""
+        svc = _make_service(fast_model=None)
+        svc.model = "gpt-4o"
+        model = svc._select_model_for_iteration(2, True, 10)
+        assert model == "gpt-4o"
+
+    @pytest.mark.asyncio
+    async def test_tool_loop_uses_fast_after_tools(self):
+        """After first tool call, LLM is called with fast model."""
+        svc = _make_service(fast_model="gpt-4o-mini")
+        svc.model = "gpt-4o"
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+        text_resp = _mock_llm_text_response("Done.")
+
+        call_count = 0
+        used_models = []
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            used_models.append(kwargs["model"])
+            return tool_resp if call_count == 1 else text_resp
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            await svc._chat_tool_loop(messages, tool_schemas, max_iterations=5)
+
+        assert used_models[0] == "gpt-4o"  # First call: balanced
+        assert used_models[1] == "gpt-4o-mini"  # After tools: fast
+
+
+# ── Improvement 4: Mid-Execution Interjection ────────────────────────────
+
+
+class TestInterjection:
+    @pytest.mark.asyncio
+    async def test_interjection_injected_into_messages(self):
+        """User interjection is injected as system message."""
+        import asyncio
+
+        svc = _make_service()
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+        text_resp = _mock_llm_text_response("Adjusted.")
+
+        call_count = 0
+        captured_messages = []
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            captured_messages.append(list(kwargs["messages"]))
+            return tool_resp if call_count == 1 else text_resp
+
+        interjection_queue: asyncio.Queue[str] = asyncio.Queue()
+        await interjection_queue.put("Actually, search for Mars instead")
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            await svc._chat_tool_loop(
+                messages, tool_schemas, max_iterations=5,
+                interjection_queue=interjection_queue,
+            )
+
+        # Second call should contain the interjection
+        second_call_msgs = captured_messages[1]
+        interjection_msgs = [
+            m for m in second_call_msgs
+            if isinstance(m, dict) and "USER INTERJECTION" in (m.get("content") or "")
+        ]
+        assert len(interjection_msgs) == 1
+        assert "Mars" in interjection_msgs[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_empty_queue_is_noop(self):
+        """Empty interjection queue doesn't affect the loop."""
+        import asyncio
+
+        svc = _make_service()
+        mock_resp = _mock_llm_text_response("Hello!")
+
+        interjection_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            reply, audit, _cost = await svc._chat_tool_loop(
+                messages, tool_schemas, max_iterations=5,
+                interjection_queue=interjection_queue,
+            )
+
+        assert reply == "Hello!"
+
+    @pytest.mark.asyncio
+    async def test_interjection_emits_progress_event(self):
+        """Interjection triggers a progress event."""
+        import asyncio
+
+        svc = _make_service()
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+        text_resp = _mock_llm_text_response("Adjusted.")
+
+        call_count = 0
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return tool_resp if call_count == 1 else text_resp
+
+        interjection_queue: asyncio.Queue[str] = asyncio.Queue()
+        await interjection_queue.put("Change direction")
+
+        progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            await svc._chat_tool_loop(
+                messages, tool_schemas, max_iterations=5,
+                progress_queue=progress_queue,
+                interjection_queue=interjection_queue,
+            )
+
+        events = []
+        while not progress_queue.empty():
+            events.append(progress_queue.get_nowait())
+
+        phases = [e["phase"] for e in events]
+        assert "interjection_received" in phases
+        inj_event = next(e for e in events if e["phase"] == "interjection_received")
+        assert "Change direction" in inj_event["interjection"]
+
+
+# ── Improvement 5: Session Pattern Extraction ────────────────────────────
+
+
+class TestSessionPatterns:
+    @pytest.mark.asyncio
+    async def test_records_sequence(self):
+        """Successful tool use records pattern in procedural memory."""
+        mock_pm = MagicMock()
+        mock_pm.record_sequence_outcome = AsyncMock()
+
+        svc = _make_service(procedural_memory=mock_pm)
+        audit = [
+            {"tool": "query_beliefs", "params": {}, "result": "Found 3 claims.", "blocked": False},
+            {"tool": "deep_research", "params": {}, "result": "Research done.", "blocked": False},
+        ]
+        await svc._extract_session_patterns(audit, 0.005)
+
+        mock_pm.record_sequence_outcome.assert_awaited_once()
+        call_kwargs = mock_pm.record_sequence_outcome.call_args[1]
+        assert call_kwargs["tool_names"] == ["query_beliefs", "deep_research"]
+        assert call_kwargs["success"] is True
+        assert call_kwargs["cost_usd"] == 0.005
+        assert call_kwargs["domain"] == "chat"
+
+    @pytest.mark.asyncio
+    async def test_skips_blocked_tools(self):
+        """Blocked tools are excluded from the recorded sequence."""
+        mock_pm = MagicMock()
+        mock_pm.record_sequence_outcome = AsyncMock()
+
+        svc = _make_service(procedural_memory=mock_pm)
+        audit = [
+            {"tool": "query_beliefs", "params": {}, "result": "OK", "blocked": False},
+            {"tool": "submit_observation", "params": {}, "result": "blocked", "blocked": True},
+        ]
+        await svc._extract_session_patterns(audit, 0.001)
+
+        call_kwargs = mock_pm.record_sequence_outcome.call_args[1]
+        assert call_kwargs["tool_names"] == ["query_beliefs"]
+
+    @pytest.mark.asyncio
+    async def test_noop_without_procedural_memory(self):
+        """No error when procedural_memory is None."""
+        svc = _make_service(procedural_memory=None)
+        audit = [{"tool": "query_beliefs", "params": {}, "result": "OK", "blocked": False}]
+        # Should not raise
+        await svc._extract_session_patterns(audit, 0.001)
+
+    @pytest.mark.asyncio
+    async def test_detects_errors_as_failure(self):
+        """Tool results containing 'error' mark the sequence as failed."""
+        mock_pm = MagicMock()
+        mock_pm.record_sequence_outcome = AsyncMock()
+
+        svc = _make_service(procedural_memory=mock_pm)
+        audit = [
+            {"tool": "deep_research", "params": {}, "result": "Tool error: timeout", "blocked": False},
+        ]
+        await svc._extract_session_patterns(audit, 0.002)
+
+        call_kwargs = mock_pm.record_sequence_outcome.call_args[1]
+        assert call_kwargs["success"] is False

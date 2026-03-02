@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 _MAX_HISTORY = 50
 _HISTORY_TRIM_TO = 30
 _MAX_CONTEXT_MESSAGES = 16
+_COMPACTION_THRESHOLD = 24
 
 _CHAT_INQUIRY_CONFIG = InquiryConfig(
     max_iterations=5,
@@ -284,6 +285,7 @@ class ChatSession:
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
         self.history: list[dict[str, str]] = []
+        self.context_summary: str | None = None
         self.created_at = datetime.now(UTC)
         self.last_active = datetime.now(UTC)
 
@@ -315,6 +317,7 @@ class ChatService:
         bus: Any,
         budget_tracker: BudgetTracker | None = None,
         model: str = "gpt-4o-mini",
+        fast_model: str | None = None,
         inquiry_engine: Any | None = None,
         tool_registry: Any | None = None,
         tool_gate: Any | None = None,
@@ -328,11 +331,13 @@ class ChatService:
         dialectic_engine: Any | None = None,
         insight_crystallizer: Any | None = None,
         knowledge_loop: Any | None = None,
+        procedural_memory: Any | None = None,
     ) -> None:
         self.substrate = substrate
         self.bus = bus
         self.budget_tracker = budget_tracker
         self.model = model
+        self._fast_model = fast_model
         self._inquiry_engine = inquiry_engine
         self._tool_registry = tool_registry
         self._tool_gate = tool_gate
@@ -346,6 +351,7 @@ class ChatService:
         self._dialectic_engine = dialectic_engine
         self._insight_crystallizer = insight_crystallizer
         self._knowledge_loop = knowledge_loop
+        self._procedural_memory = procedural_memory
         self._sessions: dict[str, ChatSession] = {}
 
     _MAX_SESSIONS = 1000
@@ -385,6 +391,7 @@ class ChatService:
     async def handle_message(
         self, session_id: str, user_message: str,
         progress_queue: asyncio.Queue[dict] | None = None,
+        interjection_queue: asyncio.Queue[str] | None = None,
     ) -> ChatResponsePayload:
         """Main entry point: receive user message, return structured response."""
         session = self.get_or_create_session(session_id)
@@ -402,16 +409,18 @@ class ChatService:
         try:
             messages = await self._build_messages(session)
             tool_schemas = self._get_chat_tools()
-            reply_text, tool_audit = await asyncio.wait_for(
+            reply_text, tool_audit, cumulative_cost = await asyncio.wait_for(
                 self._chat_tool_loop(
                     messages, tool_schemas, max_iterations=20,
                     progress_queue=progress_queue,
+                    interjection_queue=interjection_queue,
                 ),
                 timeout=300.0,
             )
             response = self._build_response(
                 message_id, reply_text, tool_audit
             )
+            await self._extract_session_patterns(tool_audit, cumulative_cost)
         except TimeoutError:
             log.warning(
                 "Agent loop timed out for session %s", session_id,
@@ -588,9 +597,52 @@ class ChatService:
             log.debug("Failed to build memory context", exc_info=True)
             return ""
 
+    async def _compact_history(self, session: ChatSession) -> None:
+        """Summarize older messages into a context summary, keep recent ones."""
+        if len(session.history) <= _COMPACTION_THRESHOLD:
+            return
+        compact_model = self._fast_model or self.model
+        older = session.history[:-_MAX_CONTEXT_MESSAGES]
+        recent = session.history[-_MAX_CONTEXT_MESSAGES:]
+        try:
+            prompt = (
+                "Summarize the following conversation history concisely. "
+                "Preserve: the user's original request, key decisions made, "
+                "tools used, entities discussed, and current state.\n\n"
+            )
+            for msg in older:
+                prompt += f"[{msg['role']}]: {msg['content'][:200]}\n"
+            resp = await asyncio.wait_for(
+                litellm.acompletion(
+                    model=compact_model,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                timeout=30.0,
+            )
+            summary = getattr(resp.choices[0].message, "content", "") or ""
+            if summary:
+                session.context_summary = summary
+                session.history = recent
+                log.info(
+                    "chat.compacted session=%s older=%d summary_len=%d",
+                    session.session_id, len(older), len(summary),
+                )
+                return
+        except Exception:
+            log.debug("Context compaction failed, falling back to FIFO trim", exc_info=True)
+        # Fallback: plain FIFO trim
+        session.history = recent
+
     async def _build_messages(self, session: ChatSession) -> list[dict]:
         """Assemble full message list for the LLM call."""
+        await self._compact_history(session)
+
         system_parts = [self._build_system_prompt()]
+
+        if session.context_summary:
+            system_parts.append(
+                f"\n## Conversation context (summarized)\n{session.context_summary}"
+            )
 
         knowledge_ctx = await self._build_knowledge_context()
         if knowledge_ctx:
@@ -971,6 +1023,25 @@ class ChatService:
             log.exception("Knowledge consolidation failed")
             return f"Consolidation error: {e}"
 
+    # ── Model selection ─────────────────────────────────────────────────
+
+    def _select_model_for_iteration(
+        self, iteration: int, has_tool_results: bool, max_iterations: int,
+    ) -> str:
+        """Choose balanced or fast model based on iteration context."""
+        if not self._fast_model:
+            return self.model
+        # First iteration (initial reasoning) → balanced
+        if iteration == 0:
+            return self.model
+        # Near max iterations → balanced for best final answer
+        if iteration >= max_iterations - 1:
+            return self.model
+        # Mid-chain after tool results → fast
+        if has_tool_results:
+            return self._fast_model
+        return self.model
+
     # ── Agent loop ──────────────────────────────────────────────────────
 
     async def _chat_tool_loop(
@@ -979,10 +1050,11 @@ class ChatService:
         tool_schemas: list[dict],
         max_iterations: int = 8,
         progress_queue: asyncio.Queue[dict] | None = None,
-    ) -> tuple[str, list[dict]]:
+        interjection_queue: asyncio.Queue[str] | None = None,
+    ) -> tuple[str, list[dict], float]:
         """Simple ReAct loop: call LLM, execute tools, repeat.
 
-        Returns (reply_text, tool_audit_log).
+        Returns (reply_text, tool_audit_log, cumulative_cost_usd).
         """
         tool_audit: list[dict] = []
         working_messages = list(messages)
@@ -1006,8 +1078,12 @@ class ChatService:
                 pass
 
         for _iteration in range(max_iterations):
+            has_tool_results = _total_tool_calls > 0
+            selected_model = self._select_model_for_iteration(
+                _iteration, has_tool_results, max_iterations,
+            )
             kwargs: dict[str, Any] = {
-                "model": self.model,
+                "model": selected_model,
                 "messages": working_messages,
             }
             if tool_schemas:
@@ -1017,7 +1093,7 @@ class ChatService:
                 "phase": "llm_start",
                 "iteration": _iteration,
                 "max_iterations": max_iterations,
-                "model": self.model,
+                "model": selected_model,
             })
 
             try:
@@ -1036,7 +1112,8 @@ class ChatService:
                     "final_tokens": dict(_cumulative_tokens),
                     "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
                 })
-                return "Sorry, the model took too long to respond. Please try again.", tool_audit
+                msg = "Sorry, the model took too long to respond. Please try again."
+                return msg, tool_audit, _cumulative_cost
             except Exception as e:
                 log.exception("chat_tool_loop.llm_error iteration=%d", _iteration)
                 _emit({
@@ -1049,7 +1126,7 @@ class ChatService:
                     "final_tokens": dict(_cumulative_tokens),
                     "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
                 })
-                return f"LLM call failed: {e}", tool_audit
+                return f"LLM call failed: {e}", tool_audit, _cumulative_cost
 
             # Extract token usage and cost from response
             call_tokens = {"prompt": 0, "completion": 0, "total": 0}
@@ -1076,7 +1153,7 @@ class ChatService:
                 "phase": "llm_complete",
                 "iteration": _iteration,
                 "max_iterations": max_iterations,
-                "model": self.model,
+                "model": selected_model,
                 "call_tokens": call_tokens,
                 "call_cost_usd": round(call_cost, 6),
                 "has_tool_calls": has_tool_calls,
@@ -1097,7 +1174,7 @@ class ChatService:
                     "final_tokens": dict(_cumulative_tokens),
                     "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
                 })
-                return reply_text, tool_audit
+                return reply_text, tool_audit, _cumulative_cost
 
             # Append the assistant message with tool calls
             working_messages.append(message.model_dump())
@@ -1185,6 +1262,38 @@ class ChatService:
 
             self._record_cost(response)
 
+            # Inject agent state so the LLM knows what it's already done
+            tools_used = [e["tool"] for e in tool_audit]
+            blocked = sum(1 for e in tool_audit if e.get("blocked"))
+            working_messages.append({
+                "role": "system",
+                "content": (
+                    f"[AGENT STATE — Iteration {_iteration + 1}/{max_iterations}]\n"
+                    f"Tools used: {', '.join(tools_used) or 'none'}\n"
+                    f"Total calls: {_total_tool_calls} ({blocked} blocked)\n"
+                    f"Cost: ${_cumulative_cost:.4f} | Tokens: {_cumulative_tokens['total']}"
+                ),
+            })
+
+            # Check for user interjections between iterations
+            if interjection_queue is not None:
+                try:
+                    interjection = interjection_queue.get_nowait()
+                    working_messages.append({
+                        "role": "system",
+                        "content": (
+                            f"USER INTERJECTION: {interjection}\n"
+                            "Acknowledge this and adjust your approach."
+                        ),
+                    })
+                    _emit({
+                        "phase": "interjection_received",
+                        "iteration": _iteration,
+                        "interjection": interjection[:200],
+                    })
+                except asyncio.QueueEmpty:
+                    pass
+
         # Max iterations reached — return whatever text we have
         last_text = ""
         for msg in reversed(working_messages):
@@ -1208,7 +1317,7 @@ class ChatService:
             "final_tokens": dict(_cumulative_tokens),
             "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
         })
-        return last_text, tool_audit
+        return last_text, tool_audit, _cumulative_cost
 
     # Capabilities the chat agent declares for tool gate validation.
     _CHAT_CAPABILITIES: set[str] = {
@@ -1321,6 +1430,35 @@ class ChatService:
         )
 
     # ── Helpers ─────────────────────────────────────────────────────────
+
+    async def _extract_session_patterns(
+        self, tool_audit: list[dict], cost_usd: float,
+    ) -> None:
+        """Record tool sequence outcome in procedural memory."""
+        if not self._procedural_memory:
+            return
+        tool_names = [
+            e["tool"] for e in tool_audit if not e.get("blocked")
+        ]
+        if not tool_names:
+            return
+        has_error = any(
+            "error" in (e.get("result", "") or "").lower()
+            or "failed" in (e.get("result", "") or "").lower()
+            or "timed out" in (e.get("result", "") or "").lower()
+            for e in tool_audit
+            if not e.get("blocked")
+        )
+        try:
+            await self._procedural_memory.record_sequence_outcome(
+                sequence_id=None,
+                tool_names=tool_names,
+                success=not has_error,
+                cost_usd=cost_usd,
+                domain="chat",
+            )
+        except Exception:
+            log.debug("Failed to record session patterns", exc_info=True)
 
     def _record_cost(self, response: Any) -> None:
         """Record LLM cost to budget tracker using actual response."""

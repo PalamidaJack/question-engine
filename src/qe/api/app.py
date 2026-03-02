@@ -889,11 +889,29 @@ async def lifespan(app: FastAPI):
         )
         await _synthesizer.start()
 
+        # MCP Bridge: connect to external tool servers
+        from qe.runtime.mcp_bridge import MCPBridge, MCPServerConfig
+
+        _mcp_configs: list[MCPServerConfig] = []
+        _mcp_config_file = "mcp_servers.json"
+        if os.path.exists(_mcp_config_file):  # noqa: ASYNC240
+            try:
+                with open(_mcp_config_file) as _f:  # noqa: ASYNC230
+                    _mcp_raw = json.load(_f)
+                _mcp_configs = [MCPServerConfig(**c) for c in _mcp_raw]
+            except Exception:
+                log.warning("mcp_bridge.config_parse_failed", exc_info=True)
+        _mcp_bridge = MCPBridge(configs=_mcp_configs, tool_registry=_tool_registry)
+        if _mcp_configs:
+            _mcp_tool_count = await _mcp_bridge.start()
+            log.info("mcp_bridge.started servers=%d tools=%d", len(_mcp_configs), _mcp_tool_count)
+
         _chat_service = ChatService(
             substrate=_substrate,
             bus=bus,
             budget_tracker=_supervisor.budget_tracker,
             model=balanced_model,
+            fast_model=fast_model,
             inquiry_engine=_inquiry_engine,
             tool_registry=_tool_registry,
             tool_gate=_tool_gate,
@@ -907,6 +925,7 @@ async def lifespan(app: FastAPI):
             dialectic_engine=_dialectic_engine,
             insight_crystallizer=_insight_crystallizer,
             knowledge_loop=_knowledge_loop,
+            procedural_memory=_procedural_memory,
         )
 
         # Register the default executor as an agent in the pool
@@ -979,6 +998,13 @@ async def lifespan(app: FastAPI):
             log.info("engram_cache.cleared count=%d", cleared)
         except Exception:
             log.debug("shutdown.engram_cache_clear_failed")
+
+        # Shutdown — MCP Bridge
+        try:
+            if "_mcp_bridge" in dir() and _mcp_bridge is not None:
+                _mcp_bridge.stop()
+        except Exception:
+            log.debug("shutdown.mcp_bridge_stop_failed")
 
         # Shutdown — Model Discovery
         try:
@@ -2644,6 +2670,8 @@ async def chat_websocket(websocket: WebSocket):
                 await websocket.send_json({"type": "typing", "active": True})
 
                 progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+                interjection_queue: asyncio.Queue[str] = asyncio.Queue()
+                _mid_execution = [True]
 
                 async def _forward_progress(_q=progress_queue):
                     while True:
@@ -2655,13 +2683,36 @@ async def chat_websocket(websocket: WebSocket):
                         except Exception:
                             break
 
+                async def _receive_interjections(
+                    _iq=interjection_queue, _flag=_mid_execution,
+                ):
+                    """Read messages during execution, route as interjections."""
+                    try:
+                        while _flag[0]:
+                            inj_data = await asyncio.wait_for(
+                                websocket.receive_json(), timeout=1.0,
+                            )
+                            inj_type = inj_data.get("type", "message")
+                            if inj_type in ("interjection", "message"):
+                                text = inj_data.get("content", "").strip()
+                                if text:
+                                    await _iq.put(text)
+                    except TimeoutError:
+                        pass
+                    except Exception:
+                        pass
+
                 forwarder_task = asyncio.create_task(_forward_progress())
+                receiver_task = asyncio.create_task(_receive_interjections())
                 try:
                     response = await _chat_service.handle_message(
                         session_id, user_text,
                         progress_queue=progress_queue,
+                        interjection_queue=interjection_queue,
                     )
                 finally:
+                    _mid_execution[0] = False
+                    receiver_task.cancel()
                     await progress_queue.put(None)
                     await forwarder_task
 
