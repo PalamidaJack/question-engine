@@ -27,10 +27,10 @@ _HISTORY_TRIM_TO = 30
 _MAX_CONTEXT_MESSAGES = 16
 
 _CHAT_INQUIRY_CONFIG = InquiryConfig(
-    max_iterations=2,
+    max_iterations=5,
     confidence_threshold=0.6,
     questions_per_iteration=2,
-    inquiry_timeout_seconds=30.0,
+    inquiry_timeout_seconds=120.0,
 )
 
 # ── Chat tool schemas ───────────────────────────────────────────────────────
@@ -161,6 +161,119 @@ _CHAT_TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "swarm_research",
+            "description": (
+                "Deploy a swarm of cognitive agents to research a question in parallel. "
+                "Each agent investigates independently, then results are merged. "
+                "Optionally runs a competitive tournament for cross-examination. "
+                "Use this for complex questions that benefit from multiple perspectives."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The research question for the swarm to investigate.",
+                    },
+                    "num_agents": {
+                        "type": "integer",
+                        "description": "Number of agents to spawn (2-5). Default 3.",
+                        "minimum": 2,
+                        "maximum": 5,
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "plan_and_execute",
+            "description": (
+                "Decompose a complex goal into a DAG of subtasks, dispatch them to agents, "
+                "and synthesize the results. Use this for goals that require multiple steps "
+                "or coordinated investigation across different aspects."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "The goal to decompose and execute.",
+                    },
+                },
+                "required": ["goal"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reason_about",
+            "description": (
+                "Apply epistemic reasoning and dialectic analysis to a claim. "
+                "Assesses uncertainty, detects surprising elements, surfaces hidden assumptions, "
+                "generates counterarguments, and rotates perspectives. "
+                "Use this when the user wants critical analysis of a claim or finding."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "claim": {
+                        "type": "string",
+                        "description": "The claim or finding to reason about.",
+                    },
+                },
+                "required": ["claim"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "crystallize_insights",
+            "description": (
+                "Extract and crystallize novel insights from a finding. "
+                "Evaluates novelty, extracts causal mechanisms, scores actionability, "
+                "and finds cross-domain connections. Returns structured insight or 'not novel'. "
+                "Use this to distill research findings into actionable knowledge."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "finding": {
+                        "type": "string",
+                        "description": "The finding or result to crystallize.",
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": (
+                            "The domain context (e.g. 'science', 'business'). "
+                            "Default 'general'."
+                        ),
+                    },
+                },
+                "required": ["finding"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "consolidate_knowledge",
+            "description": (
+                "Trigger background knowledge consolidation: scans recent episodes, "
+                "detects patterns, promotes beliefs, reviews hypotheses, "
+                "and resolves contradictions. "
+                "Use this when the user wants to consolidate and organize accumulated knowledge."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -205,6 +318,15 @@ class ChatService:
         tool_registry: Any | None = None,
         tool_gate: Any | None = None,
         episodic_memory: Any | None = None,
+        cognitive_pool: Any | None = None,
+        competitive_arena: Any | None = None,
+        planner: Any | None = None,
+        dispatcher: Any | None = None,
+        goal_store: Any | None = None,
+        epistemic_reasoner: Any | None = None,
+        dialectic_engine: Any | None = None,
+        insight_crystallizer: Any | None = None,
+        knowledge_loop: Any | None = None,
     ) -> None:
         self.substrate = substrate
         self.bus = bus
@@ -214,6 +336,15 @@ class ChatService:
         self._tool_registry = tool_registry
         self._tool_gate = tool_gate
         self._episodic_memory = episodic_memory
+        self._cognitive_pool = cognitive_pool
+        self._competitive_arena = competitive_arena
+        self._planner = planner
+        self._dispatcher = dispatcher
+        self._goal_store = goal_store
+        self._epistemic_reasoner = epistemic_reasoner
+        self._dialectic_engine = dialectic_engine
+        self._insight_crystallizer = insight_crystallizer
+        self._knowledge_loop = knowledge_loop
         self._sessions: dict[str, ChatSession] = {}
 
     _MAX_SESSIONS = 1000
@@ -310,12 +441,14 @@ class ChatService:
         """Static identity and behavioral instructions."""
         return (
             "You are the Question Engine assistant — an AI agent with a "
-            "cognitive architecture that includes a belief ledger, episodic "
-            "memory, and a multi-phase research engine.\n\n"
+            "full cognitive architecture: belief ledger, episodic memory, "
+            "multi-phase research engine, agent swarms, goal orchestration, "
+            "epistemic reasoning, dialectic analysis, insight crystallization, "
+            "and knowledge consolidation.\n\n"
             f"## About you\n"
             f"- You are powered by model: {self.model}\n"
             "- You are NOT a generic chatbot — you are a knowledge "
-            "management and research agent.\n"
+            "management and cognitive research agent.\n"
             "- When asked what you are or what model you run, "
             "identify yourself as the Question Engine assistant "
             f"running on {self.model}.\n\n"
@@ -331,7 +464,23 @@ class ChatService:
             "- Search the web for current information "
             "(web_search, web_fetch)\n"
             "- Perform deep multi-phase research on complex "
-            "questions (deep_research)\n\n"
+            "questions (deep_research) — 5-iteration cognitive loop "
+            "with hypothesis testing and evidence synthesis\n"
+            "- Deploy a swarm of parallel cognitive agents to research "
+            "a question from multiple perspectives, with optional "
+            "competitive tournament scoring (swarm_research)\n"
+            "- Decompose complex goals into subtask DAGs, dispatch "
+            "to agents, and synthesize results (plan_and_execute)\n"
+            "- Apply epistemic reasoning: uncertainty assessment, "
+            "surprise detection, dialectic challenges, assumption "
+            "surfacing, counterarguments, and perspective rotation "
+            "(reason_about)\n"
+            "- Crystallize research findings into novel insights "
+            "with mechanism extraction, actionability scoring, and "
+            "cross-domain connections (crystallize_insights)\n"
+            "- Trigger knowledge consolidation: pattern detection, "
+            "belief promotion, hypothesis review, contradiction "
+            "resolution (consolidate_knowledge)\n\n"
             "## How to behave\n"
             "- Be concise and helpful.\n"
             "- NEVER lie or exaggerate about what you did. If you "
@@ -354,6 +503,10 @@ class ChatService:
             "insufficient, use deep_research.\n"
             "- When the user asks to retract, list, or inspect "
             "claims/entities, use the appropriate tool.\n"
+            "- For complex, multi-faceted questions, prefer "
+            "swarm_research or plan_and_execute over deep_research.\n"
+            "- When the user asks for critical analysis, use "
+            "reason_about to apply epistemic and dialectic reasoning.\n"
             "- For simple greetings and conversation, respond "
             "directly without tools.\n"
             "- Always suggest 2-3 short follow-up prompts at the "
@@ -582,6 +735,239 @@ class ChatService:
         )
         return "\n".join(parts)
 
+    async def _tool_swarm_research(
+        self, question: str, num_agents: int = 3,
+    ) -> str:
+        """Deploy a swarm of cognitive agents for parallel research."""
+        if not self._cognitive_pool:
+            return "Swarm research is not available (cognitive pool not initialized)."
+        num_agents = max(2, min(num_agents, 5))
+        goal_id = f"swarm_{uuid.uuid4().hex[:12]}"
+        agents = []
+        try:
+            for _ in range(num_agents):
+                agent = await self._cognitive_pool.spawn_agent()
+                agents.append(agent)
+            agent_ids = [a.agent_id for a in agents]
+            results = await asyncio.wait_for(
+                self._cognitive_pool.run_parallel_inquiry(
+                    goal_id=goal_id,
+                    goal_description=question,
+                    agent_ids=agent_ids,
+                ),
+                timeout=180.0,
+            )
+            if self._competitive_arena and len(results) >= 2:
+                arena_result = await self._competitive_arena.run_tournament(
+                    goal_id=goal_id,
+                    goal_description=question,
+                    results=results,
+                    agent_ids=agent_ids,
+                )
+                parts = [
+                    f"Swarm research complete ({num_agents} agents, tournament scored).",
+                    f"\nWinner: {arena_result.winner_agent_id}"
+                    if hasattr(arena_result, "winner_agent_id")
+                    else "",
+                ]
+                if hasattr(arena_result, "summary") and arena_result.summary:
+                    parts.append(f"\nTournament summary:\n{arena_result.summary}")
+            else:
+                merged = await self._cognitive_pool.merge_results(results)
+                parts = [
+                    f"Swarm research complete ({num_agents} agents, results merged).",
+                ]
+                summary = getattr(merged, "findings_summary", "") or ""
+                if summary:
+                    parts.append(f"\n{summary}")
+                if getattr(merged, "insights", None):
+                    parts.append("\nKey insights:")
+                    for ins in merged.insights[:5]:
+                        if isinstance(ins, dict):
+                            headline = ins.get("headline", "")
+                        else:
+                            headline = getattr(ins, "headline", "")
+                        if headline:
+                            parts.append(f"  - {headline}")
+        except TimeoutError:
+            parts = ["Swarm research timed out after 180s. Try a more focused question."]
+        except Exception as e:
+            log.exception("Swarm research failed")
+            parts = [f"Swarm research encountered an error: {e}"]
+        finally:
+            for a in agents:
+                try:
+                    await self._cognitive_pool.retire_agent(a.agent_id)
+                except Exception:
+                    pass
+        return "\n".join(p for p in parts if p)
+
+    async def _tool_plan_and_execute(self, goal: str) -> str:
+        """Decompose a goal into subtasks and execute them."""
+        if not self._planner or not self._dispatcher:
+            return "Plan-and-execute is not available (planner/dispatcher not initialized)."
+        try:
+            state = await self._planner.decompose(goal)
+            goal_id = state.goal_id
+
+            done = asyncio.Event()
+            result_holder: dict = {}
+
+            async def on_synthesized(envelope: Envelope) -> None:
+                if envelope.payload.get("goal_id") == goal_id:
+                    result_holder["data"] = envelope.payload
+                    done.set()
+
+            self.bus.subscribe("goals.synthesized", on_synthesized)
+            try:
+                await self._dispatcher.submit_goal(state)
+                await asyncio.wait_for(done.wait(), timeout=180.0)
+            finally:
+                self.bus.unsubscribe("goals.synthesized", on_synthesized)
+
+            data = result_holder.get("data", {})
+            parts = [f"Goal '{goal}' completed."]
+            if data.get("synthesis"):
+                parts.append(f"\n{data['synthesis']}")
+            subtask_count = len(state.decomposition.subtasks) if state.decomposition else 0
+            parts.append(f"\n(Goal ID: {goal_id}, Subtasks: {subtask_count})")
+            return "\n".join(parts)
+
+        except TimeoutError:
+            return (
+                f"Goal execution timed out after 180s. "
+                f"The goal '{goal}' may still be processing in the background."
+            )
+        except Exception as e:
+            log.exception("Plan-and-execute failed")
+            return f"Plan-and-execute error: {e}"
+
+    async def _tool_reason_about(self, claim: str) -> str:
+        """Apply epistemic reasoning and dialectic analysis to a claim."""
+        if not self._epistemic_reasoner or not self._dialectic_engine:
+            return "Epistemic reasoning is not available."
+        goal_id = f"reason_{uuid.uuid4().hex[:12]}"
+        parts = []
+        try:
+            uncertainty = await self._epistemic_reasoner.assess_uncertainty(
+                goal_id=goal_id, finding=claim,
+            )
+            parts.append(f"Confidence: {uncertainty.confidence_level}")
+            parts.append(f"Evidence quality: {uncertainty.evidence_quality}")
+            if uncertainty.potential_biases:
+                parts.append("Potential biases: " + "; ".join(uncertainty.potential_biases))
+            if uncertainty.information_gaps:
+                parts.append("Information gaps: " + "; ".join(uncertainty.information_gaps))
+            if uncertainty.could_be_wrong_because:
+                parts.append(
+                    "Could be wrong because: "
+                    + "; ".join(uncertainty.could_be_wrong_because)
+                )
+        except Exception:
+            log.debug("Uncertainty assessment failed", exc_info=True)
+
+        try:
+            surprise = await self._epistemic_reasoner.detect_surprise(
+                goal_id=goal_id, entity_id="", new_finding=claim,
+            )
+            if surprise:
+                parts.append(
+                    f"\nSurprise detected (magnitude {surprise.surprise_magnitude:.1f}): "
+                    f"{surprise.finding}"
+                )
+                if surprise.implications:
+                    parts.append("Implications: " + "; ".join(surprise.implications))
+        except Exception:
+            log.debug("Surprise detection failed", exc_info=True)
+
+        try:
+            dialectic = await self._dialectic_engine.full_dialectic(
+                goal_id=goal_id, conclusion=claim,
+            )
+            parts.append(
+                f"\nDialectic analysis "
+                f"(revised confidence: {dialectic.revised_confidence:.0%}):"
+            )
+            if dialectic.counterarguments:
+                parts.append("Counterarguments:")
+                for ca in dialectic.counterarguments[:3]:
+                    arg = getattr(ca, "argument", str(ca))
+                    parts.append(f"  - {arg}")
+            if dialectic.assumptions_challenged:
+                parts.append("Assumptions challenged:")
+                for ac in dialectic.assumptions_challenged[:3]:
+                    assumption = getattr(ac, "assumption", str(ac))
+                    parts.append(f"  - {assumption}")
+            if dialectic.synthesis:
+                parts.append(f"\nSynthesis: {dialectic.synthesis}")
+        except Exception:
+            log.debug("Dialectic analysis failed", exc_info=True)
+
+        if not parts:
+            return "Epistemic reasoning produced no results for this claim."
+        return "\n".join(parts)
+
+    async def _tool_crystallize_insights(
+        self, finding: str, domain: str = "general",
+    ) -> str:
+        """Crystallize insights from a finding."""
+        if not self._insight_crystallizer:
+            return "Insight crystallization is not available."
+        goal_id = f"crystal_{uuid.uuid4().hex[:12]}"
+        try:
+            insight = await self._insight_crystallizer.crystallize(
+                goal_id=goal_id,
+                finding=finding,
+                domain=domain,
+            )
+        except Exception as e:
+            log.exception("Insight crystallization failed")
+            return f"Crystallization error: {e}"
+
+        if insight is None:
+            return "Finding did not pass the novelty gate — not novel enough to crystallize."
+
+        parts = [f"Insight: {insight.headline}"]
+        parts.append(f"Confidence: {insight.confidence:.0%}")
+        if hasattr(insight, "mechanism") and insight.mechanism:
+            mech = insight.mechanism
+            explanation = getattr(mech, "explanation", str(mech))
+            parts.append(f"Mechanism: {explanation}")
+        if hasattr(insight, "novelty") and insight.novelty:
+            nov = insight.novelty
+            score = getattr(nov, "novelty_score", None)
+            if score is not None:
+                parts.append(f"Novelty score: {score:.2f}")
+        parts.append(f"Actionability: {insight.actionability_score:.2f}")
+        if insight.actionability_description:
+            parts.append(f"  {insight.actionability_description}")
+        if insight.cross_domain_connections:
+            parts.append("Cross-domain connections:")
+            for conn in insight.cross_domain_connections[:5]:
+                parts.append(f"  - {conn}")
+        return "\n".join(parts)
+
+    async def _tool_consolidate_knowledge(self) -> str:
+        """Trigger knowledge consolidation cycle."""
+        if not self._knowledge_loop:
+            return "Knowledge consolidation is not available."
+        try:
+            await self._knowledge_loop.trigger_consolidation()
+            status = self._knowledge_loop.status()
+            last = status.get("last_cycle_result")
+            if last:
+                parts = ["Knowledge consolidation completed."]
+                parts.append(f"Episodes scanned: {last.get('episodes_scanned', 0)}")
+                parts.append(f"Patterns detected: {last.get('patterns_detected', 0)}")
+                parts.append(f"Beliefs promoted: {last.get('beliefs_promoted', 0)}")
+                parts.append(f"Hypotheses reviewed: {last.get('hypotheses_reviewed', 0)}")
+                parts.append(f"Contradictions found: {last.get('contradictions_found', 0)}")
+                return "\n".join(parts)
+            return "Knowledge consolidation triggered (no cycle results yet)."
+        except Exception as e:
+            log.exception("Knowledge consolidation failed")
+            return f"Consolidation error: {e}"
+
     # ── Agent loop ──────────────────────────────────────────────────────
 
     async def _chat_tool_loop(
@@ -708,6 +1094,15 @@ class ChatService:
             "retract_claim": lambda p: self._tool_retract_claim(p["claim_id"]),
             "get_budget_status": lambda _p: self._tool_get_budget(),
             "deep_research": lambda p: self._tool_deep_research(p["question"]),
+            "swarm_research": lambda p: self._tool_swarm_research(
+                p["question"], p.get("num_agents", 3),
+            ),
+            "plan_and_execute": lambda p: self._tool_plan_and_execute(p["goal"]),
+            "reason_about": lambda p: self._tool_reason_about(p["claim"]),
+            "crystallize_insights": lambda p: self._tool_crystallize_insights(
+                p["finding"], p.get("domain", "general"),
+            ),
+            "consolidate_knowledge": lambda _p: self._tool_consolidate_knowledge(),
         }
 
         if tool_name in handlers:
@@ -751,7 +1146,10 @@ class ChatService:
             if tool == "query_beliefs" and not entry.get("blocked"):
                 # Mark that we have claim results
                 pass
-            if tool == "deep_research" and not entry.get("blocked"):
+            if tool in {
+                "deep_research", "swarm_research", "plan_and_execute",
+                "reason_about", "crystallize_insights", "consolidate_knowledge",
+            } and not entry.get("blocked"):
                 cognitive_used = True
 
         return ChatResponsePayload(

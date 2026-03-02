@@ -788,16 +788,6 @@ async def lifespan(app: FastAPI):
         )
         _inquiry_bridge.start()
 
-        _chat_service = ChatService(
-            substrate=_substrate,
-            bus=bus,
-            budget_tracker=_supervisor.budget_tracker,
-            model=balanced_model,
-            inquiry_engine=_inquiry_engine,
-            tool_registry=_tool_registry,
-            tool_gate=_tool_gate,
-            episodic_memory=_episodic_memory,
-        )
         _goal_store = GoalStore(_substrate.belief_ledger._db_path)
         _planner = PlannerService(
             bus=bus,
@@ -865,6 +855,26 @@ async def lifespan(app: FastAPI):
             budget_tracker=_supervisor.budget_tracker,
         )
         await _synthesizer.start()
+
+        _chat_service = ChatService(
+            substrate=_substrate,
+            bus=bus,
+            budget_tracker=_supervisor.budget_tracker,
+            model=balanced_model,
+            inquiry_engine=_inquiry_engine,
+            tool_registry=_tool_registry,
+            tool_gate=_tool_gate,
+            episodic_memory=_episodic_memory,
+            cognitive_pool=_cognitive_pool,
+            competitive_arena=_competitive_arena,
+            planner=_planner,
+            dispatcher=_dispatcher,
+            goal_store=_goal_store,
+            epistemic_reasoner=_epistemic_reasoner,
+            dialectic_engine=_dialectic_engine,
+            insight_crystallizer=_insight_crystallizer,
+            knowledge_loop=_knowledge_loop,
+        )
 
         # Register the default executor as an agent in the pool
         from qe.runtime.agent_pool import AgentRecord

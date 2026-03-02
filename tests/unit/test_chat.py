@@ -159,6 +159,15 @@ def _make_service(**kwargs) -> ChatService:
         tool_registry=kwargs.get("tool_registry", None),
         tool_gate=kwargs.get("tool_gate", None),
         episodic_memory=kwargs.get("episodic_memory", None),
+        cognitive_pool=kwargs.get("cognitive_pool", None),
+        competitive_arena=kwargs.get("competitive_arena", None),
+        planner=kwargs.get("planner", None),
+        dispatcher=kwargs.get("dispatcher", None),
+        goal_store=kwargs.get("goal_store", None),
+        epistemic_reasoner=kwargs.get("epistemic_reasoner", None),
+        dialectic_engine=kwargs.get("dialectic_engine", None),
+        insight_crystallizer=kwargs.get("insight_crystallizer", None),
+        knowledge_loop=kwargs.get("knowledge_loop", None),
     )
 
 
@@ -340,8 +349,8 @@ class TestToolHandlers:
         mock_engine.run_inquiry.assert_awaited_once()
         call_kwargs = mock_engine.run_inquiry.call_args[1]
         assert call_kwargs["goal_description"] == "Is there water on Mars?"
-        assert call_kwargs["config"].max_iterations == 2
-        assert call_kwargs["config"].inquiry_timeout_seconds == 30.0
+        assert call_kwargs["config"].max_iterations == 5
+        assert call_kwargs["config"].inquiry_timeout_seconds == 120.0
         assert "Mars has subsurface water" in result
         assert "Water found" in result
 
@@ -505,6 +514,309 @@ class TestResponseBuilder:
         assert response.tool_calls_made == []
         assert response.cognitive_process_used is False
         assert response.tracking_envelope_id is None
+
+
+# ── Cognitive infrastructure tool tests ─────────────────────────────────────
+
+
+class TestCognitiveTools:
+    @pytest.mark.asyncio
+    async def test_tool_swarm_research(self):
+        """swarm_research spawns agents, runs parallel inquiry, merges results."""
+        mock_agent = MagicMock()
+        mock_agent.agent_id = "agent_1"
+
+        mock_merged = MagicMock()
+        mock_merged.findings_summary = "Merged findings from swarm."
+        mock_merged.insights = [{"headline": "Insight A"}]
+
+        mock_pool = MagicMock()
+        mock_pool.spawn_agent = AsyncMock(return_value=mock_agent)
+        mock_pool.run_parallel_inquiry = AsyncMock(return_value=[MagicMock(), MagicMock()])
+        mock_pool.merge_results = AsyncMock(return_value=mock_merged)
+        mock_pool.retire_agent = AsyncMock()
+
+        svc = _make_service(cognitive_pool=mock_pool)
+        result = await svc._tool_swarm_research("What is dark matter?", num_agents=3)
+
+        assert mock_pool.spawn_agent.await_count == 3
+        mock_pool.run_parallel_inquiry.assert_awaited_once()
+        mock_pool.merge_results.assert_awaited_once()
+        assert "Merged findings from swarm" in result
+        assert "Insight A" in result
+        assert mock_pool.retire_agent.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_tool_swarm_research_not_available(self):
+        """Returns not-available message when cognitive_pool is None."""
+        svc = _make_service(cognitive_pool=None)
+        result = await svc._tool_swarm_research("test")
+        assert "not available" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_tool_swarm_research_with_arena(self):
+        """swarm_research uses competitive arena when available."""
+        mock_agent = MagicMock()
+        mock_agent.agent_id = "agent_1"
+
+        mock_pool = MagicMock()
+        mock_pool.spawn_agent = AsyncMock(return_value=mock_agent)
+        mock_pool.run_parallel_inquiry = AsyncMock(
+            return_value=[MagicMock(), MagicMock()]
+        )
+        mock_pool.retire_agent = AsyncMock()
+
+        mock_arena_result = MagicMock()
+        mock_arena_result.winner_agent_id = "agent_1"
+        mock_arena_result.summary = "Agent 1 wins."
+        mock_arena = MagicMock()
+        mock_arena.run_tournament = AsyncMock(return_value=mock_arena_result)
+
+        svc = _make_service(cognitive_pool=mock_pool, competitive_arena=mock_arena)
+        result = await svc._tool_swarm_research("test", num_agents=2)
+
+        mock_arena.run_tournament.assert_awaited_once()
+        assert "tournament" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_tool_plan_and_execute(self):
+        """plan_and_execute calls planner.decompose + dispatcher.submit_goal."""
+        mock_decomp = MagicMock()
+        mock_decomp.subtasks = [MagicMock(), MagicMock()]
+
+        mock_state = MagicMock()
+        mock_state.goal_id = "goal_abc"
+        mock_state.decomposition = mock_decomp
+
+        mock_planner = MagicMock()
+        mock_planner.decompose = AsyncMock(return_value=mock_state)
+
+        mock_bus = MagicMock()
+        # Simulate bus.subscribe capturing the callback
+        subscriber_holder = {}
+
+        def fake_subscribe(topic, cb):
+            subscriber_holder[topic] = cb
+
+        mock_bus.subscribe = fake_subscribe
+        mock_bus.unsubscribe = MagicMock()
+
+        mock_dispatcher = MagicMock()
+
+        async def fake_submit(state):
+            # Simulate the synthesizer publishing the result
+            envelope = MagicMock()
+            envelope.payload = {
+                "goal_id": "goal_abc",
+                "synthesis": "All subtasks completed successfully.",
+            }
+            cb = subscriber_holder.get("goals.synthesized")
+            if cb:
+                await cb(envelope)
+
+        mock_dispatcher.submit_goal = AsyncMock(side_effect=fake_submit)
+
+        svc = _make_service(
+            bus=mock_bus,
+            planner=mock_planner,
+            dispatcher=mock_dispatcher,
+        )
+        result = await svc._tool_plan_and_execute("Analyze climate data")
+
+        mock_planner.decompose.assert_awaited_once_with("Analyze climate data")
+        mock_dispatcher.submit_goal.assert_awaited_once_with(mock_state)
+        assert "completed" in result.lower()
+        assert "All subtasks completed" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_plan_and_execute_timeout(self):
+        """Returns timeout message on TimeoutError."""
+        mock_state = MagicMock()
+        mock_state.goal_id = "goal_timeout"
+        mock_state.decomposition = MagicMock()
+
+        mock_planner = MagicMock()
+        mock_planner.decompose = AsyncMock(return_value=mock_state)
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.submit_goal = AsyncMock()  # Never triggers done event
+
+        mock_bus = MagicMock()
+        mock_bus.subscribe = MagicMock()
+        mock_bus.unsubscribe = MagicMock()
+
+        svc = _make_service(
+            bus=mock_bus,
+            planner=mock_planner,
+            dispatcher=mock_dispatcher,
+        )
+
+        # Patch wait_for to immediately raise TimeoutError
+        with patch("qe.services.chat.service.asyncio.wait_for", side_effect=TimeoutError):
+            result = await svc._tool_plan_and_execute("Slow goal")
+
+        assert "timed out" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_tool_plan_and_execute_not_available(self):
+        """Returns not-available when planner is None."""
+        svc = _make_service(planner=None, dispatcher=None)
+        result = await svc._tool_plan_and_execute("test")
+        assert "not available" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_tool_reason_about(self):
+        """reason_about calls epistemic + dialectic methods."""
+        mock_uncertainty = MagicMock()
+        mock_uncertainty.confidence_level = "low"
+        mock_uncertainty.evidence_quality = "secondary"
+        mock_uncertainty.potential_biases = ["confirmation bias"]
+        mock_uncertainty.information_gaps = ["missing data"]
+        mock_uncertainty.could_be_wrong_because = ["small sample"]
+
+        mock_surprise = MagicMock()
+        mock_surprise.surprise_magnitude = 0.8
+        mock_surprise.finding = "Unexpected result"
+        mock_surprise.implications = ["Rethink assumptions"]
+
+        mock_dialectic = MagicMock()
+        mock_dialectic.revised_confidence = 0.4
+        mock_dialectic.counterarguments = []
+        mock_dialectic.assumptions_challenged = []
+        mock_dialectic.synthesis = "The claim needs more evidence."
+
+        mock_epistemic = MagicMock()
+        mock_epistemic.assess_uncertainty = AsyncMock(return_value=mock_uncertainty)
+        mock_epistemic.detect_surprise = AsyncMock(return_value=mock_surprise)
+
+        mock_dialectic_engine = MagicMock()
+        mock_dialectic_engine.full_dialectic = AsyncMock(return_value=mock_dialectic)
+
+        svc = _make_service(
+            epistemic_reasoner=mock_epistemic,
+            dialectic_engine=mock_dialectic_engine,
+        )
+        result = await svc._tool_reason_about("AI will replace all jobs")
+
+        mock_epistemic.assess_uncertainty.assert_awaited_once()
+        mock_epistemic.detect_surprise.assert_awaited_once()
+        mock_dialectic_engine.full_dialectic.assert_awaited_once()
+        assert "low" in result
+        assert "confirmation bias" in result
+        assert "Surprise detected" in result
+        assert "claim needs more evidence" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_reason_about_not_available(self):
+        """Returns not-available when epistemic_reasoner is None."""
+        svc = _make_service(epistemic_reasoner=None, dialectic_engine=None)
+        result = await svc._tool_reason_about("test claim")
+        assert "not available" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_tool_crystallize_insights(self):
+        """crystallize_insights calls crystallizer, formats CrystallizedInsight."""
+        mock_mechanism = MagicMock()
+        mock_mechanism.explanation = "Mechanism X causes Y"
+
+        mock_novelty = MagicMock()
+        mock_novelty.novelty_score = 0.85
+
+        mock_insight = MagicMock()
+        mock_insight.headline = "Novel finding about X"
+        mock_insight.confidence = 0.9
+        mock_insight.mechanism = mock_mechanism
+        mock_insight.novelty = mock_novelty
+        mock_insight.actionability_score = 0.7
+        mock_insight.actionability_description = "Can be applied to Y"
+        mock_insight.cross_domain_connections = ["biology", "economics"]
+
+        mock_crystallizer = MagicMock()
+        mock_crystallizer.crystallize = AsyncMock(return_value=mock_insight)
+
+        svc = _make_service(insight_crystallizer=mock_crystallizer)
+        result = await svc._tool_crystallize_insights("Finding about X", domain="science")
+
+        mock_crystallizer.crystallize.assert_awaited_once()
+        call_kwargs = mock_crystallizer.crystallize.call_args[1]
+        assert call_kwargs["finding"] == "Finding about X"
+        assert call_kwargs["domain"] == "science"
+        assert "Novel finding about X" in result
+        assert "Mechanism X causes Y" in result
+        assert "biology" in result
+        assert "economics" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_crystallize_insights_not_novel(self):
+        """Returns 'not novel' when crystallizer returns None."""
+        mock_crystallizer = MagicMock()
+        mock_crystallizer.crystallize = AsyncMock(return_value=None)
+
+        svc = _make_service(insight_crystallizer=mock_crystallizer)
+        result = await svc._tool_crystallize_insights("Obvious fact")
+
+        assert "not novel" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_tool_consolidate_knowledge(self):
+        """consolidate_knowledge triggers consolidation + returns status."""
+        mock_loop = MagicMock()
+        mock_loop.trigger_consolidation = AsyncMock()
+        mock_loop.status.return_value = {
+            "running": True,
+            "last_cycle_result": {
+                "episodes_scanned": 42,
+                "patterns_detected": 3,
+                "beliefs_promoted": 1,
+                "hypotheses_reviewed": 5,
+                "contradictions_found": 0,
+            },
+        }
+
+        svc = _make_service(knowledge_loop=mock_loop)
+        result = await svc._tool_consolidate_knowledge()
+
+        mock_loop.trigger_consolidation.assert_awaited_once()
+        assert "consolidation completed" in result.lower()
+        assert "42" in result
+        assert "3" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_consolidate_knowledge_not_available(self):
+        """Returns not-available when knowledge_loop is None."""
+        svc = _make_service(knowledge_loop=None)
+        result = await svc._tool_consolidate_knowledge()
+        assert "not available" in result.lower()
+
+    def test_deep_research_config_uncrippled(self):
+        """Verify config has max_iterations=5 and timeout=120s."""
+        from qe.services.chat.service import _CHAT_INQUIRY_CONFIG
+
+        assert _CHAT_INQUIRY_CONFIG.max_iterations == 5
+        assert _CHAT_INQUIRY_CONFIG.inquiry_timeout_seconds == 120.0
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_full_capabilities(self):
+        """System prompt mentions swarm, plan, epistemic, dialectic, crystallize."""
+        svc = _make_service()
+        prompt = svc._build_system_prompt()
+        assert "swarm" in prompt.lower()
+        assert "plan_and_execute" in prompt
+        assert "epistemic" in prompt.lower()
+        assert "dialectic" in prompt.lower()
+        assert "crystallize_insights" in prompt
+        assert "consolidate_knowledge" in prompt
+
+    def test_cognitive_tools_in_build_response(self):
+        """New cognitive tools marked as cognitive_process_used."""
+        svc = _make_service()
+        for tool_name in [
+            "swarm_research", "plan_and_execute", "reason_about",
+            "crystallize_insights", "consolidate_knowledge",
+        ]:
+            audit = [{"tool": tool_name, "params": {}, "result": "ok", "blocked": False}]
+            response = svc._build_response("msg-1", "Done.", audit)
+            assert response.cognitive_process_used is True, f"{tool_name} not marked cognitive"
 
 
 # ── API endpoint tests ──────────────────────────────────────────────────────
