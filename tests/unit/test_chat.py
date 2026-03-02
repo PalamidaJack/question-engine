@@ -229,10 +229,11 @@ async def test_handle_question_degrades_on_inquiry_exception():
 
 @pytest.mark.asyncio
 async def test_handle_question_inquiry_failed_status():
+    """InquiryEngine returns failed status with some findings — use them."""
     result = _make_inquiry_result(
         status="failed",
         findings_summary="",
-        total_questions_generated=0,
+        total_questions_generated=2,
         total_questions_answered=0,
         insights=[],
         question_tree=[],
@@ -249,6 +250,37 @@ async def test_handle_question_inquiry_failed_status():
     assert "could not find a definitive answer" in response.reply_text
     assert response.confidence == 0.0
     assert "failed" in response.reasoning
+
+
+@pytest.mark.asyncio
+async def test_handle_question_empty_inquiry_falls_back():
+    """InquiryEngine returns 0 questions & no findings → fall back to QueryService."""
+    result = _make_inquiry_result(
+        findings_summary="",
+        total_questions_generated=0,
+        total_questions_answered=0,
+        insights=[],
+        question_tree=[],
+    )
+    mock_engine = MagicMock()
+    mock_engine.run_inquiry = AsyncMock(return_value=result)
+
+    svc = ChatService(
+        substrate=MagicMock(), bus=MagicMock(), inquiry_engine=mock_engine,
+    )
+
+    with patch("qe.services.chat.service.answer_question", new_callable=AsyncMock) as mock_aq:
+        mock_aq.return_value = {
+            "answer": "Legacy fallback answer",
+            "reasoning": None,
+            "confidence": 0.1,
+            "supporting_claims": [],
+        }
+        response = await svc._handle_question("what model am I talking to?", "msg1")
+
+    mock_engine.run_inquiry.assert_awaited_once()
+    mock_aq.assert_awaited_once()
+    assert response.reply_text == "Legacy fallback answer"
 
 
 @pytest.mark.asyncio

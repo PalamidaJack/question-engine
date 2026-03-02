@@ -207,7 +207,9 @@ class ChatService:
         """Route to InquiryEngine (if available) or legacy QueryService."""
         if self._inquiry_engine is not None:
             try:
-                return await self._handle_question_via_inquiry(query, message_id)
+                response = await self._handle_question_via_inquiry(query, message_id)
+                if response is not None:
+                    return response
             except Exception:
                 log.exception(
                     "InquiryEngine failed for query %r, falling back", query,
@@ -216,13 +218,20 @@ class ChatService:
 
     async def _handle_question_via_inquiry(
         self, query: str, message_id: str
-    ) -> ChatResponsePayload:
-        """Answer a question using the full InquiryEngine cognitive loop."""
+    ) -> ChatResponsePayload | None:
+        """Answer a question using the full InquiryEngine cognitive loop.
+
+        Returns None if the engine produced an empty/useless result,
+        signalling the caller to fall back to the legacy path.
+        """
         result: InquiryResult = await self._inquiry_engine.run_inquiry(
             goal_id=f"chat_{message_id}",
             goal_description=query,
             config=CHAT_INQUIRY_CONFIG,
         )
+        if not result.findings_summary and result.total_questions_generated == 0:
+            log.info("InquiryEngine returned empty result for %r, falling back", query)
+            return None
         return self._map_inquiry_result(result, message_id)
 
     async def _handle_question_via_query(
