@@ -22,7 +22,7 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 - `src/qe/services/inquiry/` — **NEW (v2)**: Dialectic Engine, Insight Crystallizer (Inquiry Loop components)
 - `src/qe/bus/` — MemoryBus, event log, bus metrics
 - `src/qe/substrate/` — Belief ledger (SQLite), cold storage, goal store, embeddings, BayesianBeliefStore
-- `src/qe/models/` — Pydantic models (Envelope, Claim, GoalState, Genome Blueprint, Cognition)
+- `src/qe/models/` — Pydantic models (Envelope, Claim, GoalState, Genome Blueprint, Cognition, Arena)
 - `src/qe/optimization/` — Prompt tuning (DSPy-based) + PromptRegistry (Thompson sampling over prompt variants) + PromptMutator (LLM-powered variant generation)
 - `src/qe/runtime/` — Service base, context curator, episodic memory, engram cache, metacognitor, epistemic reasoner, persistence engine
 - `tests/unit/` — Unit tests (~50+ files)
@@ -33,14 +33,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1866 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1950 unit/integration tests, all passing
 .venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-02)
 
-~1866 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring + 69 Goal Orchestration Pipeline + 21 Enhanced Onboarding), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~1950 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring + 69 Goal Orchestration Pipeline + 21 Enhanced Onboarding + 84 Competitive Arena), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -201,6 +201,17 @@ All built, tested (21 tests across 2 test files), lint clean. Adds channel confi
 - `src/qe/api/static/index.html` — `HatchingScreen` component (SVG progress ring with pulsing QE logo, polls `/api/health/ready` every 1s, maps 4 readiness phases to 0-100% progress, phase checklist with green checkmarks, 1.5s delay before transition). `SetupWizard` replaces `SetupScreen` with 2-step flow: Step 1 (LLM providers + API keys + Ollama toggle) → Step 2 (channel picker with toggle switches and credential inputs, Web Dashboard always-on with DEFAULT badge). `Root` component uses `setSetupComplete(true)` instead of `window.location.reload()` for smooth React transition. Settings tab: collapsible "LLM Providers & Channels" card with provider status dots + masked keys, editable tier models, API key update inputs, channel status, save via `POST /api/setup/reconfigure`
 - Tests: `tests/unit/test_setup.py` (+16 tests: TestSaveSetupWithChannels — writes channel env vars / multiple / empty / None; TestGetConfiguredChannels — no env web only / telegram / slack needs both / slack full / email full / masked passwords; endpoints — status includes channels / channels list / reconfigure works / reconfigure rejects empty / 403 points to reconfigure), `tests/unit/test_onboarding.py` (5 tests: health/ready returns phases dict + ready flag, CHANNELS has expected IDs, web always_on, env_var keys match adapters)
 
+### Competitive Agent Arena + Missing Features — COMPLETE
+All built, tested (84 tests across 4 new + 4 modified test files), lint clean. Tournament-style agent-vs-agent verification competition, context compression via LLM summarization, and HIL integration tests:
+- `src/qe/models/arena.py` — 8 Pydantic models: `AgentEloRating` (persistent Elo 1200 default, wins/losses/draws), `CrossExamination` (structured challenge with `xex_` ID prefix), `DefenseResponse` (rebuttals + concessions), `MatchJudgment` (`jdg_` prefix, 3-axis scoring: factual accuracy, evidence quality, novelty), `DivergenceCheck` (`div_` prefix, anti-sycophancy similarity assessment), `ArenaMatch` (`mtch_` prefix, full head-to-head match), `ArenaConfig` (enabled=False, max_rounds=2, divergence_threshold=0.3, budget_limit_usd=0.50, round_robin/single_elimination), `ArenaResult` (`arena_` prefix, full tournament output with sycophancy_detected flag)
+- `src/qe/runtime/competitive_arena.py` — `CompetitiveArena`: tournament orchestration with 4 phases: (1) Divergence check — LLM classifies similarity between agent outputs, flags sycophancy if above threshold, (2) Cross-examination — each agent challenges the other's findings (forced-adversarial prompt: "CANNOT simply agree"), (3) Judgment — independent LLM judge scores on 3 axes, picks winner or declares draw, (4) Elo update — standard Elo formula (K=32) + Thompson sampling BetaArm updates. Anti-sycophancy: if agents are too similar, skips expensive cross-examination and uses majority-vote fallback. Budget enforcement: aborts early if `_total_cost_usd >= budget_limit_usd`. Match pairing: round_robin (all pairs) or single_elimination (sequential). `select_agents_for_arena()` uses Thompson sampling for exploration/exploitation. 4 LLM prompt templates (cross-examine, defense, judge, divergence) all using `instructor.from_litellm(litellm.acompletion)` for structured output
+- `src/qe/runtime/context_manager.py` — `compress()` upgraded from TODO/pass to `async def compress(keep_recent=3)`: LLM summarization via instructor with `ConversationSummary` Pydantic model (summary, key_facts, open_questions), keeps last N messages verbatim, summarizes older messages, fallback to truncation on LLM failure. Uses cheapest model (`gemini-2.0-flash`)
+- `src/qe/runtime/cognitive_agent_pool.py` — Added `arena: CompetitiveArena | None = None` param to `__init__`; new `run_competitive_inquiry()` method: runs parallel inquiry, then tournament if arena is set and ≥2 results, otherwise falls back to `merge_results()`
+- `src/qe/runtime/inquiry_bridge.py` — Subscribes to `arena.tournament_completed` (5 topics total); new `_on_arena_tournament_completed()` handler stores synthesis episode with winner info and sycophancy flag
+- `src/qe/runtime/strategy_models.py` — Added `arena_enabled: bool = False` to `StrategyConfig` (lets strategies opt into competitive verification; StrategyEvolver learns via Thompson sampling whether arena-enabled strategies produce better outcomes)
+- `src/qe/bus/protocol.py` — 6 new topics (158 total): `arena.tournament_started`, `arena.tournament_completed`, `arena.match_completed`, `arena.divergence_checked`, `arena.sycophancy_fallback`, `arena.elo_updated`
+- Tests: `tests/unit/test_arena_models.py` (13 tests: model construction, ID prefixes, field validation, serialization), `tests/unit/test_competitive_arena.py` (30 tests: Elo math — win/loss/draw/upset/expected/sum preservation, Thompson sampling — BetaArm/agent selection/strong prior, divergence — high/low similarity/fallback, cross-examination — challenges/fallback, defense, judgment — winner/draw/fallback, tournament — 2-agent/3-agent round robin/single elimination/budget exhaustion, sycophancy — skip cross-exam/majority vote/bus events, bus events — correct topics published/no events without bus, status, match pairing), `tests/unit/test_context_compression.py` (9 tests: ConversationSummary model, no-op when short/at limit, LLM compression with key facts, fallback to truncation, custom keep_recent), `tests/integration/test_hil_e2e.py` (8 tests: proposal creates pending file/contains expiry, approved/rejected publishes correct topic, timeout auto-rejects, pending file cleanup on approval/timeout, 3 concurrent proposals with mixed decisions), + extended `test_cognitive_agent_pool.py` (+4 tests: competitive inquiry with/without arena, single result, empty pool), `test_inquiry_bridge.py` (+3 tests: arena completed stores episode/sycophancy in summary/no crash on store failure; lifecycle updated to 5 topics), `test_strategy_models.py` (+1 test: arena_enabled flag)
+
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
 - Multi-agent orchestration (planner, dispatcher, executor)
@@ -228,3 +239,6 @@ All built, tested (21 tests across 2 test files), lint clean. Adds channel confi
 - Goal pipeline E2E tests use `MemoryBus` (real) + `FakeGoalStore` (in-memory dict) + real `Dispatcher` + `ExecutorService`/`GoalSynthesizer` with mocked LLMs
 - Setup/onboarding tests use `tmp_path` for `.env` files and `monkeypatch` for `CONFIG_PATH`; endpoint tests use `patch("qe.api.app.is_setup_complete")` and `patch("qe.api.app.save_setup")` to control setup state; `CHANNELS` constant validated in `test_onboarding.py`
 - `POST /api/setup/save` is for initial setup only (403 after complete); `POST /api/setup/reconfigure` is for post-setup changes (no 403 guard)
+- CompetitiveArena tests mock LLM via `patch("qe.runtime.competitive_arena.instructor")` + mock client with response dispatch based on `response_model` parameter (returns `_DivergenceResult`, `_CrossExamResult`, `_DefenseResult`, or `_JudgeResult`); bus events tested via `MagicMock` bus with `publish.call_args_list`
+- Context compression tests mock LLM via `patch("qe.runtime.context_manager.instructor")` + `AsyncMock` returning `ConversationSummary`; verify fallback to truncation on LLM failure
+- HIL integration tests use real `HILService` with `MagicMock` bus and `tmp_path` directories; pre-create decision files before `_handle_hil_request()` so poll picks them up immediately; use `asyncio.wait_for()` with 5s timeout on poll tasks
