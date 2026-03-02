@@ -402,7 +402,7 @@ class ChatService:
             tool_schemas = self._get_chat_tools()
             reply_text, tool_audit = await asyncio.wait_for(
                 self._chat_tool_loop(
-                    messages, tool_schemas, max_iterations=8
+                    messages, tool_schemas, max_iterations=20
                 ),
                 timeout=300.0,
             )
