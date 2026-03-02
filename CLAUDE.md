@@ -33,14 +33,14 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 ## Running Tests & Linting
 
 ```bash
-.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1845 unit/integration tests, all passing
+.venv/bin/pytest tests/ -m "not slow" --timeout=60 -q    # ~1866 unit/integration tests, all passing
 .venv/bin/pytest tests/ -m slow --timeout=120 -v          # 6 real LLM integration tests (requires KILOCODE_API_KEY)
 .venv/bin/ruff check src/ tests/ benchmarks/  # all clean
 ```
 
 ## Current State (2026-03-02)
 
-~1845 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring + 69 Goal Orchestration Pipeline), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~1866 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring + 69 Goal Orchestration Pipeline + 21 Enhanced Onboarding), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -194,6 +194,13 @@ All built, tested (69 tests across 5 new test files + 1 modified), lint clean. C
 - `src/qe/errors.py` — 2 new error classes: `ExecutorContractError`, `ExecutorToolError`
 - Tests: `tests/unit/test_tool_wiring.py` (11), `tests/unit/test_executor_upgrade.py` (24), `tests/unit/test_goal_synthesizer.py` (19), `tests/unit/test_goal_orchestration_wiring.py` (11), `tests/integration/test_goal_pipeline_e2e.py` (4: full 2-subtask pipeline, retry→success, dialectic synthesis, metadata retrieval)
 
+### Enhanced Onboarding Flow — COMPLETE
+All built, tested (21 tests across 2 test files), lint clean. Adds channel configuration, hatching UX, and post-setup reconfiguration:
+- `src/qe/api/setup.py` — `CHANNELS` constant (web/telegram/slack/email with env_var metadata), `get_configured_channels()` (checks env vars, masks passwords, returns config status), `save_setup()` extended with `channels: dict[str, str] | None` param to merge channel env vars into `.env`
+- `src/qe/api/app.py` — `GET /api/setup/status` extended with `channels` field, `GET /api/setup/channels` (static channel list with descriptions/env_var metadata), `POST /api/setup/save` extended to accept `channels` in body (403 message updated to point to reconfigure), `POST /api/setup/reconfigure` (same payload shape as `/save` but works after initial setup, returns restart note)
+- `src/qe/api/static/index.html` — `HatchingScreen` component (SVG progress ring with pulsing QE logo, polls `/api/health/ready` every 1s, maps 4 readiness phases to 0-100% progress, phase checklist with green checkmarks, 1.5s delay before transition). `SetupWizard` replaces `SetupScreen` with 2-step flow: Step 1 (LLM providers + API keys + Ollama toggle) → Step 2 (channel picker with toggle switches and credential inputs, Web Dashboard always-on with DEFAULT badge). `Root` component uses `setSetupComplete(true)` instead of `window.location.reload()` for smooth React transition. Settings tab: collapsible "LLM Providers & Channels" card with provider status dots + masked keys, editable tier models, API key update inputs, channel status, save via `POST /api/setup/reconfigure`
+- Tests: `tests/unit/test_setup.py` (+16 tests: TestSaveSetupWithChannels — writes channel env vars / multiple / empty / None; TestGetConfiguredChannels — no env web only / telegram / slack needs both / slack full / email full / masked passwords; endpoints — status includes channels / channels list / reconfigure works / reconfigure rejects empty / 403 points to reconfigure), `tests/unit/test_onboarding.py` (5 tests: health/ready returns phases dict + ready flag, CHANNELS has expected IDs, web always_on, env_var keys match adapters)
+
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
 - Multi-agent orchestration (planner, dispatcher, executor)
@@ -219,3 +226,5 @@ All built, tested (69 tests across 5 new test files + 1 modified), lint clean. C
 - ExecutorService tests mock LLM via `patch("qe.services.executor.service.litellm")` + `AsyncMock` for `acompletion`; tool registry/gate via `MagicMock` with `get_tool_schemas`/`execute`/`validate` methods; rate limiter via `patch("qe.services.executor.service.get_rate_limiter")`
 - GoalSynthesizer tests mock LLM via `patch("qe.services.synthesizer.service.instructor")` + `AsyncMock` client returning `SynthesisInput`; goal store via `AsyncMock` with `load_goal`/`save_goal`; dialectic engine via `AsyncMock` with `full_dialectic` returning mock report with `revised_confidence`
 - Goal pipeline E2E tests use `MemoryBus` (real) + `FakeGoalStore` (in-memory dict) + real `Dispatcher` + `ExecutorService`/`GoalSynthesizer` with mocked LLMs
+- Setup/onboarding tests use `tmp_path` for `.env` files and `monkeypatch` for `CONFIG_PATH`; endpoint tests use `patch("qe.api.app.is_setup_complete")` and `patch("qe.api.app.save_setup")` to control setup state; `CHANNELS` constant validated in `test_onboarding.py`
+- `POST /api/setup/save` is for initial setup only (403 after complete); `POST /api/setup/reconfigure` is for post-setup changes (no 403 guard)
