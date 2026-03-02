@@ -145,6 +145,13 @@ TOPICS = {
     "knowledge.hypothesis_updated",
     # Inquiry Bridge
     "bridge.strategy_outcome_recorded",
+    # Competitive Arena
+    "arena.tournament_started",
+    "arena.tournament_completed",
+    "arena.match_completed",
+    "arena.divergence_checked",
+    "arena.sycophancy_fallback",
+    "arena.elo_updated",
     # Goal Orchestration Pipeline
     "tasks.contract_violated",
     "goals.synthesized",

@@ -23,6 +23,7 @@ class StrategyConfig(BaseModel):
     max_depth: int = 5
     exploration_rate: float = Field(default=0.2, ge=0.0, le=1.0)
     preferred_model_tier: str = "balanced"
+    arena_enabled: bool = False
 
 
 class ScaleProfile(BaseModel):

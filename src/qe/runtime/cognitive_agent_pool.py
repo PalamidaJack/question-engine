@@ -16,6 +16,7 @@ from typing import Any
 
 from qe.runtime.agent_pool import AgentPool, AgentRecord
 from qe.runtime.cognitive_agent import CognitiveAgent
+from qe.runtime.competitive_arena import CompetitiveArena
 from qe.runtime.strategy_models import StrategyConfig
 from qe.services.inquiry.schemas import InquiryConfig, InquiryResult
 
@@ -48,12 +49,14 @@ class CognitiveAgentPool:
         bus: Any = None,
         max_agents: int = 3,
         engine_factory: EngineFactory | None = None,
+        arena: CompetitiveArena | None = None,
     ) -> None:
         self._slots: dict[str, AgentSlot] = {}
         self._pool = AgentPool()
         self._bus = bus
         self._max_agents = max_agents
         self._engine_factory = engine_factory
+        self._arena = arena
         self._semaphore = asyncio.Semaphore(max_agents)
 
     async def spawn_agent(
@@ -251,6 +254,30 @@ class CognitiveAgentPool:
             total_cost_usd=total_cost,
             duration_seconds=max_duration,
         )
+
+    async def run_competitive_inquiry(
+        self,
+        goal_id: str,
+        goal_description: str,
+        agent_ids: list[str] | None = None,
+        config: InquiryConfig | None = None,
+    ) -> Any:
+        """Run parallel inquiry, then competitive arena if available.
+
+        If an arena is configured and at least 2 results are produced,
+        runs a tournament. Otherwise falls back to merge_results.
+
+        Returns ArenaResult when arena is used, InquiryResult otherwise.
+        """
+        results = await self.run_parallel_inquiry(
+            goal_id, goal_description, agent_ids, config,
+        )
+        if self._arena is not None and len(results) >= 2:
+            ids = agent_ids or list(self._slots.keys())
+            return await self._arena.run_tournament(
+                goal_id, goal_description, results, ids[: len(results)],
+            )
+        return await self.merge_results(results)
 
     def get_slot(self, agent_id: str) -> AgentSlot | None:
         """Get the slot for an agent."""

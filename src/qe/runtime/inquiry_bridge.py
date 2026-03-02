@@ -52,6 +52,7 @@ class InquiryBridge:
             "inquiry.completed": self._on_inquiry_completed,
             "inquiry.failed": self._on_inquiry_failed,
             "inquiry.insight_generated": self._on_insight_generated,
+            "arena.tournament_completed": self._on_arena_tournament_completed,
         }
         for topic, handler in topics.items():
             self._bus.subscribe(topic, handler)
@@ -212,6 +213,27 @@ class InquiryBridge:
             self._episodes_stored += 1
         except Exception:
             log.warning("inquiry_bridge.insight_episode_failed", exc_info=True)
+
+    # ── Arena Events ──────────────────────────────────────────────────
+
+    async def _on_arena_tournament_completed(self, envelope: Envelope) -> None:
+        """Store synthesis episode when a competitive arena tournament completes."""
+        payload = envelope.payload
+        try:
+            episode = Episode(
+                episode_type="synthesis",
+                goal_id=payload.get("goal_id", ""),
+                inquiry_id=payload.get("arena_id", ""),
+                summary=(
+                    f"Arena tournament completed: winner={payload.get('winner_id', 'unknown')}, "
+                    f"sycophancy_detected={payload.get('sycophancy_detected', False)}"
+                ),
+                content={"event": "arena.tournament_completed", **payload},
+            )
+            await self._episodic.store(episode)
+            self._episodes_stored += 1
+        except Exception:
+            log.warning("inquiry_bridge.arena_completed_episode_failed", exc_info=True)
 
     # ── Helpers ───────────────────────────────────────────────────────
 

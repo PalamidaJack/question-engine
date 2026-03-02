@@ -1,11 +1,24 @@
 import logging
 
+import instructor
+import litellm
 from litellm import token_counter
+from pydantic import BaseModel, Field
 
 from qe.models.envelope import Envelope
 from qe.models.genome import Blueprint
 
 log = logging.getLogger(__name__)
+
+_COMPRESSION_MODEL = "openai/google/gemini-2.0-flash"
+
+
+class ConversationSummary(BaseModel):
+    """LLM-generated summary of conversation history."""
+
+    summary: str = ""
+    key_facts: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
 
 
 class ContextManager:
@@ -80,17 +93,75 @@ class ContextManager:
 
         return messages
 
-    def compress(self) -> None:
-        """
-        Compression strategy (two-stage):
-        Stage 1 — Structural summarization: use LLM to summarize history
-        Stage 2 — Drop oldest messages until under threshold
+    async def compress(self, keep_recent: int = 3) -> None:
+        """Compress conversation history via LLM summarization.
 
-        Phase 0: not implemented. Uses truncation in build_messages instead.
-        TODO Phase 1: implement LLM summarization.
+        Stage 1 — Structural summarization: use LLM to summarize older messages.
+        Stage 2 — Fallback to truncation if the LLM call fails.
+
+        Preserves immutable messages (system prompt, constitution) and
+        the most recent ``keep_recent`` messages verbatim.
         """
-        # TODO Phase 1: replace truncation with LLM summarization
-        pass
+        # Strip immutable prefix from history (they live in build_messages)
+        compressible = self.history
+        if len(compressible) <= keep_recent:
+            return  # nothing to compress
+
+        older = compressible[:-keep_recent]
+        recent = compressible[-keep_recent:]
+
+        try:
+            client = instructor.from_litellm(litellm.acompletion)
+            summary_result: ConversationSummary = (
+                await client.chat.completions.create(
+                    model=_COMPRESSION_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Summarize the following conversation messages into "
+                                "a concise summary. Extract key facts and any open "
+                                "questions that remain unanswered."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": "\n".join(
+                                f"[{m.get('role', 'unknown')}]: {m.get('content', '')}"
+                                for m in older
+                            ),
+                        },
+                    ],
+                    response_model=ConversationSummary,
+                )
+            )
+
+            summary_text = summary_result.summary
+            if summary_result.key_facts:
+                summary_text += "\nKey facts: " + "; ".join(
+                    summary_result.key_facts
+                )
+            if summary_result.open_questions:
+                summary_text += "\nOpen questions: " + "; ".join(
+                    summary_result.open_questions
+                )
+
+            self.history = [
+                {"role": "system", "content": f"[CONVERSATION SUMMARY]\n{summary_text}"},
+                *recent,
+            ]
+            log.info(
+                "context.compressed older=%d kept_recent=%d",
+                len(older),
+                len(recent),
+            )
+        except Exception:
+            log.warning(
+                "context.compression_failed — falling back to truncation",
+                exc_info=True,
+            )
+            # Fallback: just keep recent messages
+            self.history = list(recent)
 
     def reinforce(self) -> None:
         """

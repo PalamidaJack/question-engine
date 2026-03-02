@@ -87,14 +87,15 @@ class TestInquiryBridgeInit:
 
 
 class TestInquiryBridgeLifecycle:
-    def test_start_subscribes_4_topics(self):
+    def test_start_subscribes_5_topics(self):
         bridge = _make_bridge()
         bridge.start()
-        assert bridge._bus.subscribe.call_count == 4
+        assert bridge._bus.subscribe.call_count == 5
         topics = {c.args[0] for c in bridge._bus.subscribe.call_args_list}
         assert topics == {
             "inquiry.started", "inquiry.completed",
             "inquiry.failed", "inquiry.insight_generated",
+            "arena.tournament_completed",
         }
 
     @pytest.mark.asyncio
@@ -102,15 +103,15 @@ class TestInquiryBridgeLifecycle:
         bridge = _make_bridge()
         bridge.start()
         await bridge.stop()
-        assert bridge._bus.unsubscribe.call_count == 4
+        assert bridge._bus.unsubscribe.call_count == 5
         assert bridge._running is False
 
     def test_double_start_is_noop(self):
         bridge = _make_bridge()
         bridge.start()
         bridge.start()
-        # Still only 4 subscribes
-        assert bridge._bus.subscribe.call_count == 4
+        # Still only 5 subscribes
+        assert bridge._bus.subscribe.call_count == 5
 
 
 # ── inquiry.started ──────────────────────────────────────────────────────
@@ -287,6 +288,58 @@ class TestOnInsightGenerated:
         await bridge._on_insight_generated(env)
         ep = bridge._episodic.store.call_args.args[0]
         assert "Market is growing" in ep.summary
+
+
+# ── Bus Events ───────────────────────────────────────────────────────────
+
+
+# ── arena.tournament_completed ──────────────────────────────────────────
+
+
+class TestOnArenaTournamentCompleted:
+    @pytest.mark.asyncio
+    async def test_arena_completed_stores_episode(self):
+        bridge = _make_bridge()
+        env = _envelope("arena.tournament_completed", {
+            "arena_id": "arena_abc",
+            "goal_id": "g_1",
+            "winner_id": "agent_a",
+            "sycophancy_detected": False,
+            "match_count": 3,
+        })
+        await bridge._on_arena_tournament_completed(env)
+        bridge._episodic.store.assert_called_once()
+        ep = bridge._episodic.store.call_args.args[0]
+        assert ep.episode_type == "synthesis"
+        assert "winner=agent_a" in ep.summary
+        assert bridge._episodes_stored == 1
+
+    @pytest.mark.asyncio
+    async def test_arena_completed_sycophancy_in_summary(self):
+        bridge = _make_bridge()
+        env = _envelope("arena.tournament_completed", {
+            "arena_id": "arena_def",
+            "goal_id": "g_2",
+            "winner_id": "agent_b",
+            "sycophancy_detected": True,
+        })
+        await bridge._on_arena_tournament_completed(env)
+        ep = bridge._episodic.store.call_args.args[0]
+        assert "sycophancy_detected=True" in ep.summary
+
+    @pytest.mark.asyncio
+    async def test_arena_completed_no_crash_on_store_failure(self):
+        bridge = _make_bridge()
+        bridge._episodic.store.side_effect = RuntimeError("DB error")
+        env = _envelope("arena.tournament_completed", {
+            "arena_id": "arena_xyz",
+            "goal_id": "g_3",
+            "winner_id": "agent_c",
+            "sycophancy_detected": False,
+        })
+        # Should not raise
+        await bridge._on_arena_tournament_completed(env)
+        assert bridge._episodes_stored == 0
 
 
 # ── Bus Events ───────────────────────────────────────────────────────────

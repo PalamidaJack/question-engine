@@ -19,6 +19,11 @@ class TestStrategyConfig:
         assert cfg.max_depth == 5
         assert cfg.exploration_rate == 0.2
         assert cfg.preferred_model_tier == "balanced"
+        assert cfg.arena_enabled is False
+
+    def test_arena_enabled(self):
+        cfg = StrategyConfig(name="arena_test", arena_enabled=True)
+        assert cfg.arena_enabled is True
 
     def test_custom_values(self):
         cfg = StrategyConfig(

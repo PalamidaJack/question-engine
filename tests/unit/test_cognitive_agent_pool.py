@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from qe.models.arena import ArenaResult
 from qe.runtime.cognitive_agent_pool import AgentSlot, CognitiveAgentPool
+from qe.runtime.competitive_arena import CompetitiveArena
 from qe.runtime.strategy_models import StrategyConfig
 from qe.services.inquiry.schemas import InquiryResult
 
@@ -232,3 +234,70 @@ class TestPoolStatus:
     async def test_get_slot_nonexistent(self):
         pool = CognitiveAgentPool()
         assert pool.get_slot("nope") is None
+
+
+class TestCompetitiveInquiry:
+    @pytest.mark.asyncio
+    async def test_competitive_inquiry_with_arena(self):
+        """When arena is set and >= 2 results, tournament runs."""
+        arena = MagicMock(spec=CompetitiveArena)
+        arena_result = ArenaResult(goal_id="g1", winner_id="agent_a")
+        arena.run_tournament = AsyncMock(return_value=arena_result)
+
+        pool = CognitiveAgentPool(
+            max_agents=3,
+            engine_factory=lambda: _make_mock_engine(),
+            arena=arena,
+        )
+        await pool.spawn_agent("econ")
+        await pool.spawn_agent("tech")
+
+        result = await pool.run_competitive_inquiry("g1", "test goal")
+
+        assert isinstance(result, ArenaResult)
+        assert result.winner_id == "agent_a"
+        arena.run_tournament.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_competitive_inquiry_without_arena(self):
+        """Without arena, falls back to merge_results."""
+        pool = CognitiveAgentPool(
+            max_agents=3,
+            engine_factory=lambda: _make_mock_engine(),
+        )
+        await pool.spawn_agent("econ")
+        await pool.spawn_agent("tech")
+
+        result = await pool.run_competitive_inquiry("g1", "test goal")
+
+        assert isinstance(result, InquiryResult)
+        assert result.goal_id == "g1"
+
+    @pytest.mark.asyncio
+    async def test_competitive_inquiry_single_result(self):
+        """With < 2 results, falls back to merge even with arena."""
+        arena = MagicMock(spec=CompetitiveArena)
+        arena.run_tournament = AsyncMock()
+
+        pool = CognitiveAgentPool(
+            max_agents=3,
+            engine_factory=lambda: _make_mock_engine(),
+            arena=arena,
+        )
+        await pool.spawn_agent("econ")
+
+        result = await pool.run_competitive_inquiry("g1", "test goal")
+
+        assert isinstance(result, InquiryResult)
+        arena.run_tournament.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_competitive_inquiry_empty_pool(self):
+        """Empty pool returns empty merged result."""
+        arena = MagicMock(spec=CompetitiveArena)
+        pool = CognitiveAgentPool(arena=arena)
+
+        result = await pool.run_competitive_inquiry("g1", "test goal")
+
+        assert isinstance(result, InquiryResult)
+        arena.run_tournament.assert_not_awaited()
