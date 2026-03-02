@@ -203,8 +203,8 @@ class MCPBridge:
         )
 
         async def _handler(
-            params: dict, _conn=conn, _name=tool_name,
+            _conn=conn, _name=tool_name, **kwargs,
         ) -> str:
-            return await _conn.call_tool(_name, params)
+            return await _conn.call_tool(_name, kwargs)
 
         self._tool_registry.register(spec, _handler)

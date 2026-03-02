@@ -667,7 +667,7 @@ class ChatService:
         if self._tool_registry:
             try:
                 registry_tools = self._tool_registry.get_tool_schemas(
-                    capabilities={"web_search", "web_fetch"},
+                    capabilities={"web_search", "web_fetch", "mcp"},
                     mode="relevant",
                 )
                 tools.extend(registry_tools)
@@ -1321,7 +1321,7 @@ class ChatService:
 
     # Capabilities the chat agent declares for tool gate validation.
     _CHAT_CAPABILITIES: set[str] = {
-        "chat", "web_search", "web_fetch",
+        "chat", "web_search", "web_fetch", "mcp",
     }
 
     def _check_tool_gate(
