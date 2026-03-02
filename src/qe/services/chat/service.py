@@ -404,7 +404,7 @@ class ChatService:
                 self._chat_tool_loop(
                     messages, tool_schemas, max_iterations=8
                 ),
-                timeout=90.0,
+                timeout=300.0,
             )
             response = self._build_response(
                 message_id, reply_text, tool_audit
