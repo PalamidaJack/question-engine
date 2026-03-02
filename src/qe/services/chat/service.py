@@ -1,28 +1,20 @@
-"""Chat service: intent detection, routing, and response generation."""
+"""Chat service: direct-conversation agent with cognitive augmentation."""
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-import instructor
 import litellm
 from dotenv import load_dotenv
 
 from qe.models.envelope import Envelope
 from qe.runtime.budget import BudgetTracker
-from qe.services.chat.schemas import (
-    ChatIntent,
-    ChatResponsePayload,
-    CommandAction,
-    CommandParse,
-    ConversationalResponse,
-    IntentClassification,
-)
-from qe.services.inquiry.schemas import InquiryConfig, InquiryResult
-from qe.services.query.service import answer_question
+from qe.services.chat.schemas import ChatIntent, ChatResponsePayload
+from qe.services.inquiry.schemas import InquiryConfig
 from qe.substrate import Substrate
 
 load_dotenv()
@@ -31,13 +23,144 @@ log = logging.getLogger(__name__)
 
 _MAX_HISTORY = 50
 _HISTORY_TRIM_TO = 30
+_MAX_CONTEXT_MESSAGES = 16
 
-CHAT_INQUIRY_CONFIG = InquiryConfig(
+_CHAT_INQUIRY_CONFIG = InquiryConfig(
     max_iterations=2,
     confidence_threshold=0.6,
     questions_per_iteration=2,
     inquiry_timeout_seconds=30.0,
 )
+
+# ── Chat tool schemas ───────────────────────────────────────────────────────
+
+_CHAT_TOOL_SCHEMAS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "query_beliefs",
+            "description": (
+                "Search the knowledge base (belief ledger) for claims matching a query. "
+                "Use this when the user asks about what is known, or you need to look up facts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to find relevant claims.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_entities",
+            "description": (
+                "List all entities in the knowledge base. Use this when the user asks "
+                "to see entities, or you need to know what subjects are tracked."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_entity_details",
+            "description": (
+                "Get details about a specific entity, including its claims. "
+                "Use this when the user asks about a particular entity."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity": {
+                        "type": "string",
+                        "description": "The entity name to look up.",
+                    },
+                },
+                "required": ["entity"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_observation",
+            "description": (
+                "Submit new information to the knowledge pipeline for processing. "
+                "The system will extract claims, validate them, and add them to the belief ledger. "
+                "Use this when the user provides new information or observations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The observation text to submit.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "retract_claim",
+            "description": (
+                "Retract (soft-delete) a claim from the belief ledger by its ID. "
+                "Use this when the user asks to retract or remove a specific claim."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "claim_id": {
+                        "type": "string",
+                        "description": "The claim ID to retract (e.g. 'clm_abc123').",
+                    },
+                },
+                "required": ["claim_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_budget_status",
+            "description": (
+                "Get the current budget status including spend, limit, and remaining percentage. "
+                "Use this when the user asks about costs or budget."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deep_research",
+            "description": (
+                "Activate the cognitive research engine to deeply investigate a question. "
+                "This runs a multi-phase inquiry loop with hypothesis generation, "
+                "dialectic challenges, and evidence synthesis. Use this for complex questions "
+                "that need thorough investigation beyond a simple belief lookup."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The research question to investigate.",
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
+]
 
 
 class ChatSession:
@@ -64,7 +187,12 @@ class ChatSession:
 
 
 class ChatService:
-    """Orchestrates chat: intent detection, routing, response generation."""
+    """Direct-conversation agent with cognitive augmentation.
+
+    The user talks to the LLM agent directly. The agent decides what
+    to do — calling tools for knowledge management, observation
+    submission, and deep research when needed.
+    """
 
     def __init__(
         self,
@@ -73,23 +201,29 @@ class ChatService:
         budget_tracker: BudgetTracker | None = None,
         model: str = "gpt-4o-mini",
         inquiry_engine: Any | None = None,
+        tool_registry: Any | None = None,
+        tool_gate: Any | None = None,
+        episodic_memory: Any | None = None,
     ) -> None:
         self.substrate = substrate
         self.bus = bus
         self.budget_tracker = budget_tracker
         self.model = model
         self._inquiry_engine = inquiry_engine
+        self._tool_registry = tool_registry
+        self._tool_gate = tool_gate
+        self._episodic_memory = episodic_memory
         self._sessions: dict[str, ChatSession] = {}
 
     _MAX_SESSIONS = 1000
 
+    # ── Session management (unchanged) ──────────────────────────────────
+
     def get_or_create_session(self, session_id: str | None = None) -> ChatSession:
-        # Periodically clean stale sessions when approaching capacity
         if len(self._sessions) > self._MAX_SESSIONS // 2:
             self.cleanup_stale_sessions()
         if session_id and session_id in self._sessions:
             return self._sessions[session_id]
-        # Evict oldest if at capacity
         if len(self._sessions) >= self._MAX_SESSIONS:
             oldest_sid = min(
                 self._sessions,
@@ -100,6 +234,20 @@ class ChatService:
         session = ChatSession(sid)
         self._sessions[sid] = session
         return session
+
+    def cleanup_stale_sessions(self, max_age_hours: int = 24) -> int:
+        """Remove sessions older than max_age_hours. Returns count removed."""
+        now = datetime.now(UTC)
+        stale = [
+            sid
+            for sid, s in self._sessions.items()
+            if (now - s.last_active).total_seconds() > max_age_hours * 3600
+        ]
+        for sid in stale:
+            del self._sessions[sid]
+        return len(stale)
+
+    # ── Main entry point ────────────────────────────────────────────────
 
     async def handle_message(
         self, session_id: str, user_message: str
@@ -118,448 +266,438 @@ class ChatService:
             )
 
         try:
-            intent_result = await self._classify_intent(user_message, session)
-
-            if intent_result.intent == ChatIntent.QUESTION:
-                response = await self._handle_question(
-                    intent_result.extracted_query, message_id
-                )
-            elif intent_result.intent == ChatIntent.OBSERVATION:
-                response = await self._handle_observation(
-                    intent_result.extracted_query, user_message, message_id
-                )
-            elif intent_result.intent == ChatIntent.COMMAND:
-                response = await self._handle_command(
-                    intent_result.extracted_query, message_id
-                )
-            else:
-                response = await self._handle_conversation(
-                    user_message, message_id, session
-                )
-
-            session.add_assistant_message(response.reply_text)
-            return response
-
+            messages = await self._build_messages(session)
+            tool_schemas = self._get_chat_tools()
+            reply_text, tool_audit = await self._chat_tool_loop(
+                messages, tool_schemas, max_iterations=8
+            )
+            response = self._build_response(message_id, reply_text, tool_audit)
         except Exception as e:
-            log.exception("Chat handler error for session %s", session_id)
-            error_response = ChatResponsePayload(
+            log.exception("Agent loop error for session %s", session_id)
+            response = ChatResponsePayload(
                 message_id=message_id,
-                reply_text=f"I encountered an error processing your message: {e}",
+                reply_text=f"I encountered an error: {e}",
                 intent=ChatIntent.CONVERSATION,
                 error=str(e),
             )
-            session.add_assistant_message(error_response.reply_text)
-            return error_response
 
-    # ── Intent Classification ───────────────────────────────────────────
+        session.add_assistant_message(response.reply_text)
+        return response
 
-    async def _classify_intent(
-        self, message: str, session: ChatSession
-    ) -> IntentClassification:
-        """Use LLM to classify user intent."""
-        recent = session.history[-6:]
-        history_context = "\n".join(
-            f"{m['role'].upper()}: {m['content']}" for m in recent[:-1]
+    # ── System prompt & context assembly ────────────────────────────────
+
+    def _build_system_prompt(self) -> str:
+        """Static identity and behavioral instructions."""
+        return (
+            "You are the Question Engine assistant — an AI agent with a cognitive "
+            "architecture that includes a belief ledger, episodic memory, and a "
+            "multi-phase research engine.\n\n"
+            "## What you can do\n"
+            "- Answer questions using the knowledge base (query_beliefs)\n"
+            "- Accept new observations and submit them to the "
+            "research pipeline (submit_observation)\n"
+            "- List and inspect entities and claims (list_entities, get_entity_details)\n"
+            "- Retract claims that are wrong (retract_claim)\n"
+            "- Check system budget (get_budget_status)\n"
+            "- Perform deep multi-phase research on complex questions (deep_research)\n\n"
+            "## How to behave\n"
+            "- Be concise and helpful.\n"
+            "- When the user provides new information (facts, news, observations), "
+            "use submit_observation to ingest it.\n"
+            "- When the user asks what is known about a topic, use query_beliefs first. "
+            "If the results are insufficient, use deep_research for thorough investigation.\n"
+            "- When the user asks to retract, list, or inspect claims/entities, "
+            "use the appropriate tool.\n"
+            "- For simple greetings and conversation, respond directly without tools.\n"
+            "- Always suggest 2-3 short follow-up prompts at the end of your response.\n"
+            "- Format follow-up suggestions on separate lines prefixed with '> '.\n"
         )
 
-        messages: list[dict[str, str]] = [
-            {
-                "role": "system",
-                "content": (
-                    "You classify user messages into one of four intents:\n"
-                    "- question: User wants to query existing knowledge "
-                    "(e.g. 'What do we know about X?', 'Tell me about Y')\n"
-                    "- observation: User is providing new information to be ingested "
-                    "(e.g. 'I read that X happened', 'NASA announced Y')\n"
-                    "- command: User wants to perform an action "
-                    "(e.g. 'retract claim X', 'show entities', 'list claims', "
-                    "'show budget', 'help')\n"
-                    "- conversation: General chat, greetings, clarifications, "
-                    "or anything that doesn't fit above\n\n"
-                    "Extract the core query/observation/command from the message."
-                ),
-            },
-        ]
-        if history_context:
-            messages.append({
-                "role": "user",
-                "content": f"Conversation context:\n{history_context}",
-            })
-        messages.append({
-            "role": "user",
-            "content": f"Classify this message: {message}",
-        })
+    async def _build_knowledge_context(self) -> str:
+        """Query substrate for current knowledge state."""
+        parts: list[str] = []
+        try:
+            claims = await self.substrate.get_claims()
+            entities = await self.substrate.entity_resolver.list_entities()
+            parts.append(
+                f"Knowledge base: {len(claims)} claims, {len(entities)} entities."
+            )
 
-        client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            response_model=IntentClassification,
-        )
-        self._record_cost(messages)
-        return result
-
-    # ── Question Handler ────────────────────────────────────────────────
-
-    async def _handle_question(
-        self, query: str, message_id: str
-    ) -> ChatResponsePayload:
-        """Route to InquiryEngine (if available) or legacy QueryService."""
-        if self._inquiry_engine is not None:
-            try:
-                response = await self._handle_question_via_inquiry(query, message_id)
-                if response is not None:
-                    return response
-            except Exception:
-                log.exception(
-                    "InquiryEngine failed for query %r, falling back", query,
+            if claims:
+                sorted_claims = sorted(
+                    claims,
+                    key=lambda c: getattr(c, "confidence", 0.0),
+                    reverse=True,
                 )
-        return await self._handle_question_via_query(query, message_id)
+                top = sorted_claims[:10]
+                lines = []
+                for c in top:
+                    subj = getattr(c, "subject_entity_id", "?")
+                    pred = getattr(c, "predicate", "?")
+                    obj = getattr(c, "object_value", "?")
+                    conf = getattr(c, "confidence", 0.0)
+                    lines.append(f"  - [{conf:.0%}] {subj} {pred} {obj}")
+                parts.append("Top claims:\n" + "\n".join(lines))
+        except Exception:
+            log.debug("Failed to build knowledge context", exc_info=True)
 
-    async def _handle_question_via_inquiry(
-        self, query: str, message_id: str
-    ) -> ChatResponsePayload | None:
-        """Answer a question using the full InquiryEngine cognitive loop.
+        if self.budget_tracker:
+            try:
+                spent = self.budget_tracker.total_spend()
+                limit = self.budget_tracker.monthly_limit_usd
+                remaining = self.budget_tracker.remaining_pct()
+                parts.append(
+                    f"Budget: ${spent:.4f} spent of ${limit:.2f} "
+                    f"({remaining * 100:.1f}% remaining)."
+                )
+            except Exception:
+                pass
 
-        Returns None if the engine produced an empty/useless result,
-        signalling the caller to fall back to the legacy path.
-        """
-        result: InquiryResult = await self._inquiry_engine.run_inquiry(
-            goal_id=f"chat_{message_id}",
-            goal_description=query,
-            config=CHAT_INQUIRY_CONFIG,
-        )
-        if not result.findings_summary and result.total_questions_generated == 0:
-            log.info("InquiryEngine returned empty result for %r, falling back", query)
-            return None
-        return self._map_inquiry_result(result, message_id)
+        return "\n".join(parts)
 
-    async def _handle_question_via_query(
-        self, query: str, message_id: str
-    ) -> ChatResponsePayload:
-        """Legacy path: answer via direct belief-ledger scan."""
-        result = await answer_question(query, self.substrate, model=self.model)
+    async def _build_memory_context(self, session: ChatSession) -> str:
+        """Query episodic memory for recent relevant episodes."""
+        if not self._episodic_memory:
+            return ""
+        try:
+            last_user = ""
+            for msg in reversed(session.history):
+                if msg["role"] == "user":
+                    last_user = msg["content"]
+                    break
+            if not last_user:
+                return ""
+            episodes = await self._episodic_memory.recall(
+                last_user, top_k=5, time_window_hours=72.0
+            )
+            if not episodes:
+                return ""
+            lines = ["Recent memory:"]
+            for ep in episodes:
+                summary = getattr(ep, "summary", "") or str(
+                    getattr(ep, "content", {})
+                )
+                lines.append(f"  - [{ep.episode_type}] {summary[:120]}")
+            return "\n".join(lines)
+        except Exception:
+            log.debug("Failed to build memory context", exc_info=True)
+            return ""
 
-        reply_parts = [result["answer"]]
-        if result.get("reasoning"):
-            reply_parts.append(f"\n\n**Reasoning:** {result['reasoning']}")
+    async def _build_messages(self, session: ChatSession) -> list[dict]:
+        """Assemble full message list for the LLM call."""
+        system_parts = [self._build_system_prompt()]
 
-        suggestions: list[str] = []
-        for claim in result.get("supporting_claims", [])[:2]:
-            entity = claim.get("subject_entity_id")
-            if entity:
-                suggestions.append(f"Tell me more about {entity}")
-        if not suggestions:
-            suggestions.append("What else do we know?")
-        suggestions.append("Submit a new observation")
+        knowledge_ctx = await self._build_knowledge_context()
+        if knowledge_ctx:
+            system_parts.append(f"\n## Current state\n{knowledge_ctx}")
 
-        return ChatResponsePayload(
-            message_id=message_id,
-            reply_text="\n".join(reply_parts),
-            intent=ChatIntent.QUESTION,
-            claims=result.get("supporting_claims", []),
-            confidence=result.get("confidence"),
-            reasoning=result.get("reasoning"),
-            suggestions=suggestions[:3],
-        )
+        memory_ctx = await self._build_memory_context(session)
+        if memory_ctx:
+            system_parts.append(f"\n## {memory_ctx}")
 
-    def _map_inquiry_result(
-        self, result: InquiryResult, message_id: str
-    ) -> ChatResponsePayload:
-        """Convert an InquiryResult into a ChatResponsePayload."""
-        reply_text = result.findings_summary or (
-            "I investigated but could not find a definitive answer."
-        )
-
-        claims = [
-            {"insight_id": ins.get("insight_id", ""), "headline": ins.get("headline", "")}
-            for ins in result.insights[:10]
+        messages: list[dict] = [
+            {"role": "system", "content": "\n".join(system_parts)},
         ]
+        messages.extend(session.history[-_MAX_CONTEXT_MESSAGES:])
+        return messages
 
-        confidence = (
-            result.total_questions_answered / result.total_questions_generated
-            if result.total_questions_generated > 0
-            else 0.0
-        )
+    # ── Tool definitions ────────────────────────────────────────────────
 
-        reasoning = (
-            f"Status: {result.status} | "
-            f"Iterations: {result.iterations_completed} | "
-            f"Termination: {result.termination_reason}"
-        )
+    def _get_chat_tools(self) -> list[dict]:
+        """Return combined tool schemas: chat-specific + selected registry tools."""
+        tools = list(_CHAT_TOOL_SCHEMAS)
 
-        suggestions: list[str] = []
-        for q in result.question_tree:
-            if q.status == "pending" and len(suggestions) < 2:
-                suggestions.append(q.text)
-        suggestions.append("Submit a new observation")
+        if self._tool_registry:
+            try:
+                registry_tools = self._tool_registry.get_tool_schemas(
+                    capabilities={"web_search", "web_fetch"},
+                    mode="relevant",
+                )
+                tools.extend(registry_tools)
+            except Exception:
+                log.debug("Failed to get registry tool schemas", exc_info=True)
 
-        return ChatResponsePayload(
-            message_id=message_id,
-            reply_text=reply_text,
-            intent=ChatIntent.QUESTION,
-            claims=claims,
-            confidence=confidence,
-            reasoning=reasoning,
-            suggestions=suggestions[:3],
-        )
+        return tools
 
-    # ── Observation Handler ─────────────────────────────────────────────
+    # ── Tool handlers ───────────────────────────────────────────────────
 
-    async def _handle_observation(
-        self, extracted: str, original: str, message_id: str
-    ) -> ChatResponsePayload:
-        """Ingest an observation via the bus and return tracking info."""
-        text = extracted or original
+    async def _tool_query_beliefs(self, query: str) -> str:
+        """Search the belief ledger for matching claims."""
+        results = await self.substrate.hybrid_search(query)
+        if not results:
+            return "No matching claims found."
+        lines = []
+        for r in results[:10]:
+            claim_id = getattr(r, "claim_id", "?")
+            subj = getattr(r, "subject_entity_id", "?")
+            pred = getattr(r, "predicate", "?")
+            obj = getattr(r, "object_value", "?")
+            conf = getattr(r, "confidence", 0.0)
+            lines.append(
+                f"[{claim_id}] ({conf:.0%}) {subj} {pred} {obj}"
+            )
+        return f"Found {len(results)} claims. Top results:\n" + "\n".join(lines)
+
+    async def _tool_list_entities(self) -> str:
+        """List all entities in the knowledge base."""
+        entities = await self.substrate.entity_resolver.list_entities()
+        if not entities:
+            return "No entities in the knowledge base yet."
+        lines = []
+        for e in entities[:30]:
+            name = e.get("canonical_name", str(e))
+            lines.append(f"  - {name}")
+        return f"Found {len(entities)} entities:\n" + "\n".join(lines)
+
+    async def _tool_get_entity_details(self, entity: str) -> str:
+        """Resolve an entity and return its claims."""
+        canonical = await self.substrate.entity_resolver.resolve(entity)
+        claims = await self.substrate.get_claims(subject_entity_id=canonical)
+        if not claims:
+            return f"Entity '{canonical}' found but has no claims."
+        lines = [f"Entity: {canonical} ({len(claims)} claims)"]
+        for c in claims[:15]:
+            claim_id = getattr(c, "claim_id", "?")
+            pred = getattr(c, "predicate", "?")
+            obj = getattr(c, "object_value", "?")
+            conf = getattr(c, "confidence", 0.0)
+            lines.append(f"  [{claim_id}] ({conf:.0%}) {pred} {obj}")
+        return "\n".join(lines)
+
+    async def _tool_submit_observation(self, text: str) -> str:
+        """Publish an observation to the research pipeline."""
         envelope = Envelope(
             topic="observations.structured",
             source_service_id="chat",
             payload={"text": text},
         )
         self.bus.publish(envelope)
-
-        return ChatResponsePayload(
-            message_id=message_id,
-            reply_text=(
-                f"I've submitted your observation for processing. "
-                f"The research pipeline will extract claims from it.\n\n"
-                f"**Tracking ID:** `{envelope.envelope_id}`\n"
-                f"**Pipeline:** observation \u2192 researcher \u2192 validator \u2192 committed"
-            ),
-            intent=ChatIntent.OBSERVATION,
-            pipeline_complete=False,
-            tracking_envelope_id=envelope.envelope_id,
-            suggestions=[
-                "What do we know so far?",
-                "Submit another observation",
-                "Show all claims",
-            ],
+        return (
+            f"Observation submitted. Tracking ID: {envelope.envelope_id}\n"
+            f"Pipeline: observation → researcher → validator → committed"
         )
 
-    # ── Command Handler ─────────────────────────────────────────────────
+    async def _tool_retract_claim(self, claim_id: str) -> str:
+        """Retract a claim from the belief ledger."""
+        retracted = await self.substrate.retract_claim(claim_id)
+        if retracted:
+            return f"Claim '{claim_id}' has been retracted."
+        return f"Claim '{claim_id}' not found."
 
-    async def _handle_command(
-        self, extracted: str, message_id: str
-    ) -> ChatResponsePayload:
-        """Handle direct commands against the system."""
-        cmd = self._parse_command(extracted)
-
-        if cmd.action == CommandAction.LIST_CLAIMS:
-            claims = await self.substrate.get_claims()
-            if cmd.target:
-                claims = [
-                    c
-                    for c in claims
-                    if cmd.target.lower() in c.subject_entity_id.lower()
-                ]
-            claim_dicts = [c.model_dump(mode="json") for c in claims[:20]]
-            count = len(claims)
-            about = f' about "{cmd.target}"' if cmd.target else ""
-            return ChatResponsePayload(
-                message_id=message_id,
-                reply_text=f"Found {count} claim{'s' if count != 1 else ''}{about}.",
-                intent=ChatIntent.COMMAND,
-                claims=claim_dicts,
-                suggestions=["Show entities", "Ask a question about these claims"],
-            )
-
-        if cmd.action == CommandAction.LIST_ENTITIES:
-            entities = await self.substrate.entity_resolver.list_entities()
-            first_entity = (
-                entities[0].get("canonical_name", entities[0])
-                if entities
-                else None
-            )
-            entity_suggestions = ["Show claims"]
-            if first_entity:
-                entity_suggestions.append(f"Tell me about {first_entity}")
-            return ChatResponsePayload(
-                message_id=message_id,
-                reply_text=f"Found {len(entities)} entities in the knowledge base.",
-                intent=ChatIntent.COMMAND,
-                entities=entities[:30],
-                suggestions=entity_suggestions,
-            )
-
-        if cmd.action == CommandAction.SHOW_ENTITY:
-            if not cmd.target:
-                return ChatResponsePayload(
-                    message_id=message_id,
-                    reply_text=(
-                        "Please specify which entity to show. "
-                        "For example: 'show entity SpaceX'"
-                    ),
-                    intent=ChatIntent.COMMAND,
-                )
-            canonical = await self.substrate.entity_resolver.resolve(cmd.target)
-            claims = await self.substrate.get_claims(subject_entity_id=canonical)
-            return ChatResponsePayload(
-                message_id=message_id,
-                reply_text=f"Entity **{canonical}** has {len(claims)} claims.",
-                intent=ChatIntent.COMMAND,
-                claims=[c.model_dump(mode="json") for c in claims[:20]],
-                suggestions=[
-                    "Show all entities",
-                    f"What else do we know about {canonical}?",
-                ],
-            )
-
-        if cmd.action == CommandAction.RETRACT_CLAIM:
-            if not cmd.target:
-                return ChatResponsePayload(
-                    message_id=message_id,
-                    reply_text=(
-                        "Please specify the claim ID to retract. "
-                        "For example: 'retract claim clm_abc123'"
-                    ),
-                    intent=ChatIntent.COMMAND,
-                )
-            retracted = await self.substrate.retract_claim(cmd.target)
-            if retracted:
-                return ChatResponsePayload(
-                    message_id=message_id,
-                    reply_text=f"Claim `{cmd.target}` has been retracted.",
-                    intent=ChatIntent.COMMAND,
-                    suggestions=["Show all claims", "List entities"],
-                )
-            return ChatResponsePayload(
-                message_id=message_id,
-                reply_text=f"Claim `{cmd.target}` not found.",
-                intent=ChatIntent.COMMAND,
-                error="claim_not_found",
-                suggestions=["Show all claims", "List entities"],
-            )
-
-        if cmd.action == CommandAction.SHOW_BUDGET:
-            if self.budget_tracker:
-                return ChatResponsePayload(
-                    message_id=message_id,
-                    reply_text=(
-                        f"**Budget Status:**\n"
-                        f"- Spent: ${self.budget_tracker.total_spend():.4f}\n"
-                        f"- Limit: ${self.budget_tracker.monthly_limit_usd:.2f}\n"
-                        f"- Remaining: "
-                        f"{self.budget_tracker.remaining_pct() * 100:.1f}%"
-                    ),
-                    intent=ChatIntent.COMMAND,
-                    suggestions=["Show all claims", "List entities"],
-                )
-            return ChatResponsePayload(
-                message_id=message_id,
-                reply_text="Budget tracking is not active.",
-                intent=ChatIntent.COMMAND,
-                suggestions=["Show all claims", "List entities"],
-            )
-
-        if cmd.action == CommandAction.HELP:
-            return ChatResponsePayload(
-                message_id=message_id,
-                reply_text=(
-                    "**What I can do:**\n\n"
-                    "**Ask questions** \u2014 "
-                    "'What do we know about SpaceX?'\n"
-                    "**Submit observations** \u2014 "
-                    "'NASA announced water on Mars'\n"
-                    "**List claims** \u2014 "
-                    "'Show all claims' or 'List claims about JWST'\n"
-                    "**List entities** \u2014 'Show entities'\n"
-                    "**Show entity** \u2014 'Show entity SpaceX'\n"
-                    "**Retract claims** \u2014 "
-                    "'Retract claim clm_abc123'\n"
-                    "**Check budget** \u2014 'Show budget'\n"
-                ),
-                intent=ChatIntent.COMMAND,
-                suggestions=[
-                    "What do we know about exoplanets?",
-                    "Show all claims",
-                    "Show budget",
-                ],
-            )
-
-        return ChatResponsePayload(
-            message_id=message_id,
-            reply_text="I didn't understand that command. Type 'help' to see what I can do.",
-            intent=ChatIntent.COMMAND,
+    async def _tool_get_budget(self) -> str:
+        """Return current budget status."""
+        if not self.budget_tracker:
+            return "Budget tracking is not active."
+        spent = self.budget_tracker.total_spend()
+        limit = self.budget_tracker.monthly_limit_usd
+        remaining = self.budget_tracker.remaining_pct()
+        return (
+            f"Budget: ${spent:.4f} spent of ${limit:.2f} limit "
+            f"({remaining * 100:.1f}% remaining)"
         )
 
-    def _parse_command(self, extracted: str) -> CommandParse:
-        """Rule-based command parsing (no LLM needed)."""
-        lower = extracted.lower().strip()
+    async def _tool_deep_research(self, question: str) -> str:
+        """Run the InquiryEngine's multi-phase cognitive loop."""
+        if not self._inquiry_engine:
+            return "Deep research engine is not available."
+        result = await self._inquiry_engine.run_inquiry(
+            goal_id=f"chat_{uuid.uuid4().hex[:12]}",
+            goal_description=question,
+            config=_CHAT_INQUIRY_CONFIG,
+        )
+        summary = result.findings_summary or "Investigation completed but no definitive findings."
+        parts = [summary]
+        if result.insights:
+            parts.append("\nKey insights:")
+            for ins in result.insights[:5]:
+                headline = ins.get("headline", "")
+                if headline:
+                    parts.append(f"  - {headline}")
+        parts.append(
+            f"\n(Iterations: {result.iterations_completed}, "
+            f"Questions: {result.total_questions_generated}, "
+            f"Status: {result.status})"
+        )
+        return "\n".join(parts)
 
-        if "help" in lower:
-            return CommandParse(action=CommandAction.HELP)
-        if any(kw in lower for kw in ("budget", "spend", "cost")):
-            return CommandParse(action=CommandAction.SHOW_BUDGET)
-        if lower.startswith("retract") or lower.startswith("delete claim"):
-            target = (
-                lower.replace("retract claim", "")
-                .replace("delete claim", "")
-                .strip()
-            )
-            return CommandParse(
-                action=CommandAction.RETRACT_CLAIM, target=target or None
-            )
-        if "list entities" in lower or "show entities" in lower:
-            return CommandParse(action=CommandAction.LIST_ENTITIES)
-        if "show entity" in lower or "entity " in lower:
-            target = lower.replace("show entity", "").replace("entity", "").strip()
-            return CommandParse(
-                action=CommandAction.SHOW_ENTITY, target=target or None
-            )
-        if "list claims" in lower or "show claims" in lower or "show all claims" in lower:
-            target = None
-            for kw in ("about", "for", "on", "regarding"):
-                if kw in lower:
-                    target = lower.split(kw, 1)[1].strip()
+    # ── Agent loop ──────────────────────────────────────────────────────
+
+    async def _chat_tool_loop(
+        self,
+        messages: list[dict],
+        tool_schemas: list[dict],
+        max_iterations: int = 8,
+    ) -> tuple[str, list[dict]]:
+        """Simple ReAct loop: call LLM, execute tools, repeat.
+
+        Returns (reply_text, tool_audit_log).
+        """
+        tool_audit: list[dict] = []
+        working_messages = list(messages)
+
+        for _iteration in range(max_iterations):
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "messages": working_messages,
+            }
+            if tool_schemas:
+                kwargs["tools"] = tool_schemas
+
+            response = await litellm.acompletion(**kwargs)
+            choice = response.choices[0]
+            message = choice.message
+
+            # No tool calls → return the text reply
+            if not getattr(message, "tool_calls", None):
+                reply_text = getattr(message, "content", "") or ""
+                self._record_cost(working_messages)
+                return reply_text, tool_audit
+
+            # Append the assistant message with tool calls
+            working_messages.append(message.model_dump())
+
+            # Execute each tool call
+            for tool_call in message.tool_calls:
+                fn = tool_call.function
+                tool_name = fn.name
+                try:
+                    params = json.loads(fn.arguments) if fn.arguments else {}
+                except json.JSONDecodeError:
+                    params = {}
+
+                # Tool gate check
+                gate_ok, gate_reason = self._check_tool_gate(tool_name, params)
+                if not gate_ok:
+                    result_str = f"Tool '{tool_name}' blocked: {gate_reason}"
+                    tool_audit.append({
+                        "tool": tool_name,
+                        "params": params,
+                        "result": result_str,
+                        "blocked": True,
+                    })
+                else:
+                    result_str = await self._execute_chat_tool(tool_name, params)
+                    tool_audit.append({
+                        "tool": tool_name,
+                        "params": params,
+                        "result": result_str[:500],
+                        "blocked": False,
+                    })
+
+                working_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result_str,
+                })
+
+            self._record_cost(working_messages)
+
+        # Max iterations reached — return whatever text we have
+        last_text = ""
+        for msg in reversed(working_messages):
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                last_text = msg.get("content", "") or ""
+                if last_text:
                     break
-            return CommandParse(action=CommandAction.LIST_CLAIMS, target=target)
+            elif hasattr(msg, "role") and msg.role == "assistant":
+                last_text = getattr(msg, "content", "") or ""
+                if last_text:
+                    break
+        if not last_text:
+            last_text = "I ran out of steps processing your request. Please try again."
+        return last_text, tool_audit
 
-        return CommandParse(action=CommandAction.UNKNOWN)
+    def _check_tool_gate(
+        self, tool_name: str, params: dict
+    ) -> tuple[bool, str]:
+        """Check the tool gate. Returns (allowed, reason)."""
+        if not self._tool_gate:
+            return True, ""
+        try:
+            from qe.runtime.tool_gate import GateDecision
 
-    # ── Conversation Handler ────────────────────────────────────────────
+            result = self._tool_gate.validate(
+                tool_name=tool_name,
+                params=params,
+                capabilities={"chat"},
+                goal_id="chat",
+            )
+            if result.decision == GateDecision.DENY:
+                return False, result.reason
+            return True, ""
+        except Exception:
+            log.debug("Tool gate check failed", exc_info=True)
+            return True, ""
 
-    async def _handle_conversation(
-        self, message: str, message_id: str, session: ChatSession
+    async def _execute_chat_tool(
+        self, tool_name: str, params: dict
+    ) -> str:
+        """Dispatch to local handler or tool registry."""
+        handlers: dict[str, Any] = {
+            "query_beliefs": lambda p: self._tool_query_beliefs(p["query"]),
+            "list_entities": lambda _p: self._tool_list_entities(),
+            "get_entity_details": lambda p: self._tool_get_entity_details(p["entity"]),
+            "submit_observation": lambda p: self._tool_submit_observation(p["text"]),
+            "retract_claim": lambda p: self._tool_retract_claim(p["claim_id"]),
+            "get_budget_status": lambda _p: self._tool_get_budget(),
+            "deep_research": lambda p: self._tool_deep_research(p["question"]),
+        }
+
+        if tool_name in handlers:
+            try:
+                return await handlers[tool_name](params)
+            except Exception as e:
+                log.exception("Chat tool %s failed", tool_name)
+                return f"Tool error: {e}"
+
+        # Fall back to tool registry
+        if self._tool_registry:
+            try:
+                result = await self._tool_registry.execute(tool_name, params)
+                return str(result)
+            except Exception as e:
+                log.exception("Registry tool %s failed", tool_name)
+                return f"Tool error: {e}"
+
+        return f"Unknown tool: {tool_name}"
+
+    # ── Response builder ────────────────────────────────────────────────
+
+    def _build_response(
+        self,
+        message_id: str,
+        reply_text: str,
+        tool_audit: list[dict],
     ) -> ChatResponsePayload:
-        """Handle general conversation with system-aware context."""
-        claims = await self.substrate.get_claims()
-        entities = await self.substrate.entity_resolver.list_entities()
+        """Construct ChatResponsePayload from agent output."""
+        tracking_id = None
+        claims: list[dict] = []
+        cognitive_used = False
 
-        messages: list[dict[str, str]] = [
-            {
-                "role": "system",
-                "content": (
-                    "You are the Question Engine assistant. You help users interact "
-                    "with a knowledge system that extracts claims from observations, "
-                    "validates them, and builds a belief ledger.\n\n"
-                    f"Current state: {len(claims)} claims, {len(entities)} entities.\n\n"
-                    "You can:\n"
-                    "- Answer questions about what the system knows\n"
-                    "- Accept observations for claim extraction\n"
-                    "- Execute commands (list claims, retract, show entities, etc.)\n"
-                    "- Explain how the system works\n\n"
-                    "Be concise and helpful. If the user seems to want to ask a "
-                    "question or submit an observation, guide them to do so.\n\n"
-                    "Also suggest 2-3 short follow-up prompts the user might want to try next."
-                ),
-            },
-        ]
-        for m in session.history[-8:]:
-            messages.append(m)
-
-        client = instructor.from_litellm(litellm.acompletion)
-        result = await client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            response_model=ConversationalResponse,
-        )
-        self._record_cost(messages)
+        for entry in tool_audit:
+            tool = entry.get("tool", "")
+            if tool == "submit_observation" and not entry.get("blocked"):
+                # Extract tracking ID from result
+                result = entry.get("result", "")
+                if "Tracking ID:" in result:
+                    tracking_id = result.split("Tracking ID:")[1].strip().split("\n")[0].strip()
+            if tool == "query_beliefs" and not entry.get("blocked"):
+                # Mark that we have claim results
+                pass
+            if tool == "deep_research" and not entry.get("blocked"):
+                cognitive_used = True
 
         return ChatResponsePayload(
             message_id=message_id,
-            reply_text=result.reply,
+            reply_text=reply_text,
             intent=ChatIntent.CONVERSATION,
-            suggestions=result.suggestions[:3],
+            claims=claims,
+            tracking_envelope_id=tracking_id,
+            tool_calls_made=[
+                {"tool": e["tool"], "blocked": e.get("blocked", False)}
+                for e in tool_audit
+            ],
+            cognitive_process_used=cognitive_used,
         )
 
     # ── Helpers ─────────────────────────────────────────────────────────
@@ -575,15 +713,3 @@ class ChatService:
             self.budget_tracker.record_cost(self.model, cost)
         except Exception:
             pass
-
-    def cleanup_stale_sessions(self, max_age_hours: int = 24) -> int:
-        """Remove sessions older than max_age_hours. Returns count removed."""
-        now = datetime.now(UTC)
-        stale = [
-            sid
-            for sid, s in self._sessions.items()
-            if (now - s.last_active).total_seconds() > max_age_hours * 3600
-        ]
-        for sid in stale:
-            del self._sessions[sid]
-        return len(stale)

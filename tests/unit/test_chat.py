@@ -1,4 +1,4 @@
-"""Tests for the chat interface."""
+"""Tests for the chat interface — agent loop architecture."""
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,9 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from qe.services.chat.schemas import ChatIntent, CommandAction
-from qe.services.chat.service import CHAT_INQUIRY_CONFIG, ChatService, ChatSession
-from qe.services.inquiry.schemas import InquiryResult, Question
+from qe.services.chat.schemas import ChatIntent
+from qe.services.chat.service import ChatService, ChatSession
 
 # ── ChatSession tests ───────────────────────────────────────────────────────
 
@@ -38,56 +37,6 @@ class TestChatSession:
         before = session.last_active
         session.add_user_message("hello")
         assert session.last_active >= before
-
-
-# ── Command parsing tests ───────────────────────────────────────────────────
-
-
-class TestParseCommand:
-    @pytest.fixture
-    def svc(self):
-        """Create a ChatService without full init for command parsing tests."""
-        obj = ChatService.__new__(ChatService)
-        return obj
-
-    def test_help(self, svc):
-        cmd = svc._parse_command("help")
-        assert cmd.action == CommandAction.HELP
-
-    def test_list_claims(self, svc):
-        cmd = svc._parse_command("list claims about SpaceX")
-        assert cmd.action == CommandAction.LIST_CLAIMS
-        assert cmd.target == "spacex"
-
-    def test_show_claims(self, svc):
-        cmd = svc._parse_command("show all claims")
-        assert cmd.action == CommandAction.LIST_CLAIMS
-
-    def test_retract(self, svc):
-        cmd = svc._parse_command("retract claim clm_abc123")
-        assert cmd.action == CommandAction.RETRACT_CLAIM
-        assert "clm_abc123" in cmd.target
-
-    def test_show_budget(self, svc):
-        cmd = svc._parse_command("show budget")
-        assert cmd.action == CommandAction.SHOW_BUDGET
-
-    def test_cost_keyword(self, svc):
-        cmd = svc._parse_command("how much did it cost")
-        assert cmd.action == CommandAction.SHOW_BUDGET
-
-    def test_list_entities(self, svc):
-        cmd = svc._parse_command("show entities")
-        assert cmd.action == CommandAction.LIST_ENTITIES
-
-    def test_show_entity(self, svc):
-        cmd = svc._parse_command("show entity SpaceX")
-        assert cmd.action == CommandAction.SHOW_ENTITY
-        assert "spacex" in cmd.target
-
-    def test_unknown(self, svc):
-        cmd = svc._parse_command("do something weird")
-        assert cmd.action == CommandAction.UNKNOWN
 
 
 # ── Budget exhaustion ───────────────────────────────────────────────────────
@@ -136,171 +85,426 @@ def test_cleanup_stale_sessions():
     assert "s2" in svc._sessions
 
 
-# ── Inquiry routing tests ──────────────────────────────────────────────────
+# ── Helper: mock LLM response ──────────────────────────────────────────────
 
 
-def _make_inquiry_result(**overrides) -> InquiryResult:
-    defaults = dict(
-        inquiry_id="inq_test",
-        goal_id="chat_msg1",
-        status="completed",
-        termination_reason="confidence_met",
-        iterations_completed=1,
-        total_questions_generated=4,
-        total_questions_answered=3,
-        findings_summary="Dark matter makes up ~27% of the universe.",
-        insights=[
-            {"insight_id": "ins_1", "headline": "Dark matter is invisible"},
-            {"insight_id": "ins_2", "headline": "It interacts via gravity"},
+def _mock_llm_text_response(text: str):
+    """Create a mock litellm response with plain text (no tool calls)."""
+    message = MagicMock()
+    message.content = text
+    message.tool_calls = None
+    choice = MagicMock()
+    choice.message = message
+    resp = MagicMock()
+    resp.choices = [choice]
+    return resp
+
+
+def _mock_llm_tool_response(tool_calls_data: list[dict]):
+    """Create a mock litellm response with tool calls.
+
+    tool_calls_data: list of {"name": ..., "arguments": ..., "id": ...}
+    """
+    tool_calls = []
+    for tc in tool_calls_data:
+        fn = MagicMock()
+        fn.name = tc["name"]
+        fn.arguments = tc.get("arguments", "{}")
+        tool_call = MagicMock()
+        tool_call.function = fn
+        tool_call.id = tc.get("id", f"call_{tc['name']}")
+        tool_calls.append(tool_call)
+
+    message = MagicMock()
+    message.content = None
+    message.tool_calls = tool_calls
+    message.model_dump.return_value = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            }
+            for tc in tool_calls
         ],
-        question_tree=[
-            Question(text="What is dark energy?", status="pending"),
-            Question(text="How is it detected?", status="answered"),
-            Question(text="What are WIMPs?", status="pending"),
-        ],
-    )
-    defaults.update(overrides)
-    return InquiryResult(**defaults)
+    }
+    choice = MagicMock()
+    choice.message = message
+    resp = MagicMock()
+    resp.choices = [choice]
+    return resp
 
 
-@pytest.mark.asyncio
-async def test_handle_question_uses_inquiry_when_available():
-    mock_engine = MagicMock()
-    mock_engine.run_inquiry = AsyncMock(return_value=_make_inquiry_result())
+def _make_service(**kwargs) -> ChatService:
+    """Create a ChatService with mocked dependencies."""
+    substrate = kwargs.get("substrate", MagicMock())
+    # Default: get_claims returns [], list_entities returns []
+    if not hasattr(substrate.get_claims, "return_value") or not isinstance(
+        substrate.get_claims, AsyncMock
+    ):
+        substrate.get_claims = AsyncMock(return_value=[])
+    if not hasattr(
+        substrate.entity_resolver.list_entities, "return_value"
+    ) or not isinstance(substrate.entity_resolver.list_entities, AsyncMock):
+        substrate.entity_resolver.list_entities = AsyncMock(return_value=[])
 
-    svc = ChatService(
-        substrate=MagicMock(), bus=MagicMock(), inquiry_engine=mock_engine,
-    )
-
-    response = await svc._handle_question("What is dark matter?", "msg1")
-
-    mock_engine.run_inquiry.assert_awaited_once_with(
-        goal_id="chat_msg1",
-        goal_description="What is dark matter?",
-        config=CHAT_INQUIRY_CONFIG,
-    )
-    assert response.intent == ChatIntent.QUESTION
-    assert "27%" in response.reply_text
-    assert response.confidence == 3 / 4
-    assert len(response.claims) == 2
-    assert "confidence_met" in response.reasoning
-
-
-@pytest.mark.asyncio
-async def test_handle_question_fallback_when_no_inquiry_engine():
-    svc = ChatService(substrate=MagicMock(), bus=MagicMock())
-
-    with patch("qe.services.chat.service.answer_question", new_callable=AsyncMock) as mock_aq:
-        mock_aq.return_value = {
-            "answer": "Not enough info",
-            "reasoning": "Empty ledger",
-            "confidence": 0.1,
-            "supporting_claims": [],
-        }
-        response = await svc._handle_question("What is dark matter?", "msg1")
-
-    mock_aq.assert_awaited_once()
-    assert response.reply_text.startswith("Not enough info")
-    assert response.intent == ChatIntent.QUESTION
-
-
-@pytest.mark.asyncio
-async def test_handle_question_degrades_on_inquiry_exception():
-    mock_engine = MagicMock()
-    mock_engine.run_inquiry = AsyncMock(side_effect=RuntimeError("LLM timeout"))
-
-    svc = ChatService(
-        substrate=MagicMock(), bus=MagicMock(), inquiry_engine=mock_engine,
+    return ChatService(
+        substrate=substrate,
+        bus=kwargs.get("bus", MagicMock()),
+        budget_tracker=kwargs.get("budget_tracker", None),
+        model="gpt-4o-mini",
+        inquiry_engine=kwargs.get("inquiry_engine", None),
+        tool_registry=kwargs.get("tool_registry", None),
+        tool_gate=kwargs.get("tool_gate", None),
+        episodic_memory=kwargs.get("episodic_memory", None),
     )
 
-    with patch("qe.services.chat.service.answer_question", new_callable=AsyncMock) as mock_aq:
-        mock_aq.return_value = {
-            "answer": "Fallback answer",
-            "reasoning": None,
-            "confidence": 0.2,
-            "supporting_claims": [],
-        }
-        response = await svc._handle_question("What is dark matter?", "msg1")
 
-    mock_engine.run_inquiry.assert_awaited_once()
-    mock_aq.assert_awaited_once()
-    assert response.reply_text == "Fallback answer"
+# ── Agent loop tests ────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_handle_question_inquiry_failed_status():
-    """InquiryEngine returns failed status with some findings — use them."""
-    result = _make_inquiry_result(
-        status="failed",
-        findings_summary="",
-        total_questions_generated=2,
-        total_questions_answered=0,
-        insights=[],
-        question_tree=[],
-    )
-    mock_engine = MagicMock()
-    mock_engine.run_inquiry = AsyncMock(return_value=result)
+class TestAgentLoop:
+    @pytest.mark.asyncio
+    async def test_agent_responds_directly_for_chat(self):
+        """LLM returns plain text → reply_text populated, no tool_calls."""
+        svc = _make_service()
+        mock_resp = _mock_llm_text_response("Hello! How can I help you today?")
 
-    svc = ChatService(
-        substrate=MagicMock(), bus=MagicMock(), inquiry_engine=mock_engine,
-    )
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            response = await svc.handle_message("s1", "hello")
 
-    response = await svc._handle_question("What is dark matter?", "msg1")
+        assert response.reply_text == "Hello! How can I help you today?"
+        assert response.tool_calls_made == []
+        assert response.cognitive_process_used is False
 
-    assert "could not find a definitive answer" in response.reply_text
-    assert response.confidence == 0.0
-    assert "failed" in response.reasoning
+    @pytest.mark.asyncio
+    async def test_agent_loop_calls_tool_and_loops(self):
+        """LLM returns tool_call, then text → tool executed, result fed back."""
+        svc = _make_service()
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "dark matter"}'},
+        ])
+        text_resp = _mock_llm_text_response("I found no claims about dark matter.")
+
+        call_count = 0
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return tool_resp
+            return text_resp
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            response = await svc.handle_message("s1", "What is dark matter?")
+
+        assert "no claims" in response.reply_text.lower()
+        assert len(response.tool_calls_made) == 1
+        assert response.tool_calls_made[0]["tool"] == "query_beliefs"
+
+    @pytest.mark.asyncio
+    async def test_agent_loop_respects_max_iterations(self):
+        """After max iterations, loop stops and returns last text."""
+        svc = _make_service()
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        # Always return tool calls — should stop at max_iterations
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=tool_resp)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            reply, audit = await svc._chat_tool_loop(
+                messages, tool_schemas, max_iterations=3
+            )
+
+        assert len(audit) == 3  # 3 iterations, 1 tool call each
+        assert reply  # Should have some fallback text
+
+    @pytest.mark.asyncio
+    async def test_context_includes_belief_state(self):
+        """_build_messages() includes claim count and top claims in system context."""
+        mock_claim = MagicMock()
+        mock_claim.confidence = 0.9
+        mock_claim.subject_entity_id = "Mars"
+        mock_claim.predicate = "has"
+        mock_claim.object_value = "water"
+
+        substrate = MagicMock()
+        substrate.get_claims = AsyncMock(return_value=[mock_claim])
+        substrate.entity_resolver.list_entities = AsyncMock(
+            return_value=[{"canonical_name": "Mars"}]
+        )
+
+        svc = _make_service(substrate=substrate)
+        session = svc.get_or_create_session("s1")
+        session.add_user_message("test")
+
+        messages = await svc._build_messages(session)
+
+        system_msg = messages[0]["content"]
+        assert "1 claims" in system_msg
+        assert "1 entities" in system_msg
+        assert "Mars" in system_msg
+
+    @pytest.mark.asyncio
+    async def test_context_includes_memory(self):
+        """_build_messages() includes episodic memory entries."""
+        mock_episode = MagicMock()
+        mock_episode.episode_type = "observation"
+        mock_episode.summary = "User discussed Mars exploration"
+
+        mock_memory = MagicMock()
+        mock_memory.recall = AsyncMock(return_value=[mock_episode])
+
+        svc = _make_service(episodic_memory=mock_memory)
+        session = svc.get_or_create_session("s1")
+        session.add_user_message("tell me about Mars")
+
+        messages = await svc._build_messages(session)
+
+        system_msg = messages[0]["content"]
+        assert "Mars exploration" in system_msg
+        assert "observation" in system_msg
 
 
-@pytest.mark.asyncio
-async def test_handle_question_empty_inquiry_falls_back():
-    """InquiryEngine returns 0 questions & no findings → fall back to QueryService."""
-    result = _make_inquiry_result(
-        findings_summary="",
-        total_questions_generated=0,
-        total_questions_answered=0,
-        insights=[],
-        question_tree=[],
-    )
-    mock_engine = MagicMock()
-    mock_engine.run_inquiry = AsyncMock(return_value=result)
-
-    svc = ChatService(
-        substrate=MagicMock(), bus=MagicMock(), inquiry_engine=mock_engine,
-    )
-
-    with patch("qe.services.chat.service.answer_question", new_callable=AsyncMock) as mock_aq:
-        mock_aq.return_value = {
-            "answer": "Legacy fallback answer",
-            "reasoning": None,
-            "confidence": 0.1,
-            "supporting_claims": [],
-        }
-        response = await svc._handle_question("what model am I talking to?", "msg1")
-
-    mock_engine.run_inquiry.assert_awaited_once()
-    mock_aq.assert_awaited_once()
-    assert response.reply_text == "Legacy fallback answer"
+# ── Tool handler tests ──────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_map_inquiry_result_suggestions_from_tree():
-    result = _make_inquiry_result(
-        question_tree=[
-            Question(text="Q1 pending", status="pending"),
-            Question(text="Q2 answered", status="answered"),
-            Question(text="Q3 pending", status="pending"),
-            Question(text="Q4 pending", status="pending"),
-        ],
-    )
+class TestToolHandlers:
+    @pytest.mark.asyncio
+    async def test_tool_query_beliefs(self):
+        """_tool_query_beliefs calls substrate.hybrid_search, returns formatted claims."""
+        mock_claim = MagicMock()
+        mock_claim.claim_id = "clm_001"
+        mock_claim.subject_entity_id = "Mars"
+        mock_claim.predicate = "has"
+        mock_claim.object_value = "water"
+        mock_claim.confidence = 0.85
 
-    svc = ChatService(substrate=MagicMock(), bus=MagicMock())
-    payload = svc._map_inquiry_result(result, "msg1")
+        substrate = MagicMock()
+        substrate.hybrid_search = AsyncMock(return_value=[mock_claim])
 
-    assert len(payload.suggestions) == 3
-    assert payload.suggestions[0] == "Q1 pending"
-    assert payload.suggestions[1] == "Q3 pending"
-    assert payload.suggestions[2] == "Submit a new observation"
+        svc = _make_service(substrate=substrate)
+        result = await svc._tool_query_beliefs("Mars water")
+
+        substrate.hybrid_search.assert_awaited_once_with("Mars water")
+        assert "clm_001" in result
+        assert "Mars" in result
+        assert "85%" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_submit_observation(self):
+        """_tool_submit_observation publishes to bus, returns envelope_id."""
+        mock_bus = MagicMock()
+        svc = _make_service(bus=mock_bus)
+
+        result = await svc._tool_submit_observation("NASA found water on Mars")
+
+        mock_bus.publish.assert_called_once()
+        envelope = mock_bus.publish.call_args[0][0]
+        assert envelope.topic == "observations.structured"
+        assert envelope.payload["text"] == "NASA found water on Mars"
+        assert "Tracking ID:" in result
+        assert envelope.envelope_id in result
+
+    @pytest.mark.asyncio
+    async def test_tool_deep_research(self):
+        """_tool_deep_research calls inquiry_engine.run_inquiry with correct config."""
+        mock_result = MagicMock()
+        mock_result.findings_summary = "Mars has subsurface water."
+        mock_result.insights = [{"headline": "Water found"}]
+        mock_result.iterations_completed = 2
+        mock_result.total_questions_generated = 4
+        mock_result.status = "completed"
+
+        mock_engine = MagicMock()
+        mock_engine.run_inquiry = AsyncMock(return_value=mock_result)
+
+        svc = _make_service(inquiry_engine=mock_engine)
+        result = await svc._tool_deep_research("Is there water on Mars?")
+
+        mock_engine.run_inquiry.assert_awaited_once()
+        call_kwargs = mock_engine.run_inquiry.call_args[1]
+        assert call_kwargs["goal_description"] == "Is there water on Mars?"
+        assert call_kwargs["config"].max_iterations == 2
+        assert call_kwargs["config"].inquiry_timeout_seconds == 30.0
+        assert "Mars has subsurface water" in result
+        assert "Water found" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_list_entities(self):
+        """_tool_list_entities calls entity_resolver.list_entities."""
+        substrate = MagicMock()
+        substrate.entity_resolver.list_entities = AsyncMock(
+            return_value=[{"canonical_name": "Mars"}, {"canonical_name": "SpaceX"}]
+        )
+
+        svc = _make_service(substrate=substrate)
+        result = await svc._tool_list_entities()
+
+        substrate.entity_resolver.list_entities.assert_awaited_once()
+        assert "2 entities" in result
+        assert "Mars" in result
+        assert "SpaceX" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_retract_claim(self):
+        """_tool_retract_claim calls substrate.retract_claim."""
+        substrate = MagicMock()
+        substrate.retract_claim = AsyncMock(return_value=True)
+
+        svc = _make_service(substrate=substrate)
+        result = await svc._tool_retract_claim("clm_abc123")
+
+        substrate.retract_claim.assert_awaited_once_with("clm_abc123")
+        assert "retracted" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_tool_retract_claim_not_found(self):
+        substrate = MagicMock()
+        substrate.retract_claim = AsyncMock(return_value=False)
+
+        svc = _make_service(substrate=substrate)
+        result = await svc._tool_retract_claim("clm_nope")
+
+        assert "not found" in result.lower()
+
+
+# ── Tool gate tests ─────────────────────────────────────────────────────────
+
+
+class TestToolGate:
+    @pytest.mark.asyncio
+    async def test_tool_gate_blocks_denied_tool(self):
+        """Tool gate returns DENY → tool not executed, error in audit."""
+        from qe.runtime.tool_gate import GateDecision, GateResult
+
+        mock_gate = MagicMock()
+        mock_gate.validate.return_value = GateResult(
+            decision=GateDecision.DENY,
+            reason="Not allowed",
+            policy_name="test",
+        )
+
+        svc = _make_service(tool_gate=mock_gate)
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+        text_resp = _mock_llm_text_response("Tool was blocked.")
+
+        call_count = 0
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return tool_resp
+            return text_resp
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            response = await svc.handle_message("s1", "test")
+
+        assert len(response.tool_calls_made) == 1
+        assert response.tool_calls_made[0]["blocked"] is True
+        # hybrid_search should NOT have been called
+        svc.substrate.hybrid_search.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tool_gate_allows_tool(self):
+        """Tool gate returns ALLOW → tool executed normally."""
+        from qe.runtime.tool_gate import GateDecision, GateResult
+
+        mock_gate = MagicMock()
+        mock_gate.validate.return_value = GateResult(
+            decision=GateDecision.ALLOW,
+            reason="",
+            policy_name="test",
+        )
+
+        svc = _make_service(tool_gate=mock_gate)
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+        text_resp = _mock_llm_text_response("No results.")
+
+        call_count = 0
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return tool_resp
+            return text_resp
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            response = await svc.handle_message("s1", "test")
+
+        assert len(response.tool_calls_made) == 1
+        assert response.tool_calls_made[0]["blocked"] is False
+        svc.substrate.hybrid_search.assert_awaited_once()
+
+
+# ── Response builder tests ──────────────────────────────────────────────────
+
+
+class TestResponseBuilder:
+    def test_response_includes_tracking_id(self):
+        """When submit_observation used, tracking_envelope_id populated."""
+        svc = _make_service()
+        tool_audit = [
+            {
+                "tool": "submit_observation",
+                "params": {"text": "test"},
+                "result": "Observation submitted. Tracking ID: abc-123\nPipeline: ...",
+                "blocked": False,
+            },
+        ]
+        response = svc._build_response("msg-1", "Done!", tool_audit)
+        assert response.tracking_envelope_id == "abc-123"
+
+    def test_response_marks_cognitive_process(self):
+        """When deep_research used, cognitive_process_used is True."""
+        svc = _make_service()
+        tool_audit = [
+            {
+                "tool": "deep_research",
+                "params": {"question": "test"},
+                "result": "Findings...",
+                "blocked": False,
+            },
+        ]
+        response = svc._build_response("msg-1", "Here are my findings.", tool_audit)
+        assert response.cognitive_process_used is True
+
+    def test_response_no_tools(self):
+        """No tools used → clean response."""
+        svc = _make_service()
+        response = svc._build_response("msg-1", "Hello!", [])
+        assert response.tool_calls_made == []
+        assert response.cognitive_process_used is False
+        assert response.tracking_envelope_id is None
 
 
 # ── API endpoint tests ──────────────────────────────────────────────────────

@@ -794,6 +794,9 @@ async def lifespan(app: FastAPI):
             budget_tracker=_supervisor.budget_tracker,
             model=balanced_model,
             inquiry_engine=_inquiry_engine,
+            tool_registry=_tool_registry,
+            tool_gate=_tool_gate,
+            episodic_memory=_episodic_memory,
         )
         _goal_store = GoalStore(_substrate.belief_ledger._db_path)
         _planner = PlannerService(

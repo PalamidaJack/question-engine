@@ -14,6 +14,9 @@ class ChatIntent(StrEnum):
     CONVERSATION = "conversation"
 
 
+# ── Deprecated (kept for backward compat, no longer used by ChatService) ────
+
+
 class IntentClassification(BaseModel):
     """LLM-generated intent classification for a user message."""
 
@@ -46,6 +49,9 @@ class CommandParse(BaseModel):
     )
 
 
+# ── Active schemas ──────────────────────────────────────────────────────────
+
+
 class ChatResponsePayload(BaseModel):
     """Structured response sent back to the chat client."""
 
@@ -60,6 +66,8 @@ class ChatResponsePayload(BaseModel):
     tracking_envelope_id: str | None = None
     error: str | None = None
     suggestions: list[str] = Field(default_factory=list)
+    tool_calls_made: list[dict] = Field(default_factory=list)
+    cognitive_process_used: bool = False
 
 
 class ConversationalResponse(BaseModel):
