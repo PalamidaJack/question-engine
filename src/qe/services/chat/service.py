@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -268,10 +269,29 @@ class ChatService:
         try:
             messages = await self._build_messages(session)
             tool_schemas = self._get_chat_tools()
-            reply_text, tool_audit = await self._chat_tool_loop(
-                messages, tool_schemas, max_iterations=8
+            reply_text, tool_audit = await asyncio.wait_for(
+                self._chat_tool_loop(
+                    messages, tool_schemas, max_iterations=8
+                ),
+                timeout=90.0,
             )
-            response = self._build_response(message_id, reply_text, tool_audit)
+            response = self._build_response(
+                message_id, reply_text, tool_audit
+            )
+        except TimeoutError:
+            log.warning(
+                "Agent loop timed out for session %s", session_id,
+            )
+            response = ChatResponsePayload(
+                message_id=message_id,
+                reply_text=(
+                    "Sorry, my response took too long. "
+                    "This can happen with complex research queries. "
+                    "Please try again with a more specific question."
+                ),
+                intent=ChatIntent.CONVERSATION,
+                error="timeout",
+            )
         except Exception as e:
             log.exception("Agent loop error for session %s", session_id)
             response = ChatResponsePayload(
@@ -518,12 +538,25 @@ class ChatService:
         """Run the InquiryEngine's multi-phase cognitive loop."""
         if not self._inquiry_engine:
             return "Deep research engine is not available."
-        result = await self._inquiry_engine.run_inquiry(
-            goal_id=f"chat_{uuid.uuid4().hex[:12]}",
-            goal_description=question,
-            config=_CHAT_INQUIRY_CONFIG,
+        try:
+            result = await asyncio.wait_for(
+                self._inquiry_engine.run_inquiry(
+                    goal_id=f"chat_{uuid.uuid4().hex[:12]}",
+                    goal_description=question,
+                    config=_CHAT_INQUIRY_CONFIG,
+                ),
+                timeout=_CHAT_INQUIRY_CONFIG.inquiry_timeout_seconds,
+            )
+        except TimeoutError:
+            return (
+                "Deep research timed out after "
+                f"{_CHAT_INQUIRY_CONFIG.inquiry_timeout_seconds:.0f}s. "
+                "The question may be too broad or the research "
+                "engine encountered issues. Try a more specific question."
+            )
+        summary = result.findings_summary or (
+            "Investigation completed but no definitive findings."
         )
-        summary = result.findings_summary or "Investigation completed but no definitive findings."
         parts = [summary]
         if result.insights:
             parts.append("\nKey insights:")
