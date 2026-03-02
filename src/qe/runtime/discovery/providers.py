@@ -348,27 +348,37 @@ async def fetch_mistral(api_key: str) -> list[DiscoveredModel]:
 
 
 async def fetch_kilo(api_key: str) -> list[DiscoveredModel]:
-    """Fetch models from Kilo Code (all free via API gateway)."""
+    """Fetch models from Kilo Code (all free via API gateway).
+
+    Kilo's catalog endpoint returns a flat JSON list (not OpenAI-compatible).
+    Each entry uses ``openrouterId`` as the model identifier and
+    ``contextLength`` for context window.  All models are free through
+    the Kilo gateway regardless of the listed pricing.
+    """
     now = datetime.now()
     data = await _http_get_json(
-        "https://kilo.ai/api/openrouter/v1/models",
+        "https://kilo.ai/api/models",
         headers={"Authorization": f"Bearer {api_key}"},
     )
+    items = data if isinstance(data, list) else data.get("data", [])
     models: list[DiscoveredModel] = []
-    for m in data.get("data", []):
-        mid = m.get("id", "")
-        # Kilo uses openai/ prefix with api_base
-        model_id = f"openai/{mid}"
-        ctx = m.get("context_length", 8192) or 8192
-        caps = _infer_capabilities(m)
+    for m in items:
+        or_id = m.get("openrouterId", "")
+        if not or_id:
+            continue
+        # Kilo routes via openai/ prefix + api_base
+        model_id = f"openai/{or_id}"
+        ctx = m.get("contextLength", 8192) or 8192
+        base_name = or_id.rsplit("/", 1)[-1]
+        caps = _infer_capabilities({"id": or_id})
         models.append(
             DiscoveredModel(
                 model_id=model_id,
                 provider="kilo",
-                base_model_name=mid.rsplit("/", 1)[-1],
+                base_model_name=base_name,
                 is_free=True,
                 context_length=ctx,
-                quality_tier=_infer_quality_tier(mid, ctx),
+                quality_tier=_infer_quality_tier(or_id, ctx),
                 cost_per_m_input=0.0,
                 cost_per_m_output=0.0,
                 rate_limit_rpm=60,
