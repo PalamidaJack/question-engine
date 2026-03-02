@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -382,7 +383,8 @@ class ChatService:
     # ── Main entry point ────────────────────────────────────────────────
 
     async def handle_message(
-        self, session_id: str, user_message: str
+        self, session_id: str, user_message: str,
+        progress_queue: asyncio.Queue[dict] | None = None,
     ) -> ChatResponsePayload:
         """Main entry point: receive user message, return structured response."""
         session = self.get_or_create_session(session_id)
@@ -402,7 +404,8 @@ class ChatService:
             tool_schemas = self._get_chat_tools()
             reply_text, tool_audit = await asyncio.wait_for(
                 self._chat_tool_loop(
-                    messages, tool_schemas, max_iterations=20
+                    messages, tool_schemas, max_iterations=20,
+                    progress_queue=progress_queue,
                 ),
                 timeout=300.0,
             )
@@ -975,6 +978,7 @@ class ChatService:
         messages: list[dict],
         tool_schemas: list[dict],
         max_iterations: int = 8,
+        progress_queue: asyncio.Queue[dict] | None = None,
     ) -> tuple[str, list[dict]]:
         """Simple ReAct loop: call LLM, execute tools, repeat.
 
@@ -982,6 +986,24 @@ class ChatService:
         """
         tool_audit: list[dict] = []
         working_messages = list(messages)
+
+        _loop_start = time.monotonic()
+        _cumulative_tokens: dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
+        _cumulative_cost: float = 0.0
+        _total_tool_calls = 0
+
+        def _emit(event: dict) -> None:
+            if progress_queue is None:
+                return
+            event.setdefault("type", "chat_progress")
+            event["elapsed_ms"] = int((time.monotonic() - _loop_start) * 1000)
+            event["cumulative_tokens"] = dict(_cumulative_tokens)
+            event["cumulative_cost_usd"] = round(_cumulative_cost, 6)
+            event["timestamp"] = datetime.now(UTC).isoformat()
+            try:
+                progress_queue.put_nowait(event)
+            except Exception:
+                pass
 
         for _iteration in range(max_iterations):
             kwargs: dict[str, Any] = {
@@ -991,30 +1013,97 @@ class ChatService:
             if tool_schemas:
                 kwargs["tools"] = tool_schemas
 
+            _emit({
+                "phase": "llm_start",
+                "iteration": _iteration,
+                "max_iterations": max_iterations,
+                "model": self.model,
+            })
+
             try:
                 response = await asyncio.wait_for(
                     litellm.acompletion(**kwargs), timeout=60.0
                 )
             except TimeoutError:
                 log.warning("chat_tool_loop.llm_timeout iteration=%d", _iteration)
+                _emit({
+                    "phase": "complete",
+                    "iteration": _iteration,
+                    "max_iterations": max_iterations,
+                    "total_iterations": _iteration + 1,
+                    "total_tool_calls": _total_tool_calls,
+                    "final_cost_usd": round(_cumulative_cost, 6),
+                    "final_tokens": dict(_cumulative_tokens),
+                    "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
+                })
                 return "Sorry, the model took too long to respond. Please try again.", tool_audit
             except Exception as e:
                 log.exception("chat_tool_loop.llm_error iteration=%d", _iteration)
+                _emit({
+                    "phase": "complete",
+                    "iteration": _iteration,
+                    "max_iterations": max_iterations,
+                    "total_iterations": _iteration + 1,
+                    "total_tool_calls": _total_tool_calls,
+                    "final_cost_usd": round(_cumulative_cost, 6),
+                    "final_tokens": dict(_cumulative_tokens),
+                    "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
+                })
                 return f"LLM call failed: {e}", tool_audit
+
+            # Extract token usage and cost from response
+            call_tokens = {"prompt": 0, "completion": 0, "total": 0}
+            call_cost = 0.0
+            if hasattr(response, "usage") and response.usage:
+                call_tokens["prompt"] = getattr(response.usage, "prompt_tokens", 0) or 0
+                call_tokens["completion"] = getattr(response.usage, "completion_tokens", 0) or 0
+                call_tokens["total"] = getattr(response.usage, "total_tokens", 0) or 0
+                _cumulative_tokens["prompt"] += call_tokens["prompt"]
+                _cumulative_tokens["completion"] += call_tokens["completion"]
+                _cumulative_tokens["total"] += call_tokens["total"]
+            try:
+                call_cost = litellm.completion_cost(completion_response=response)
+                _cumulative_cost += call_cost
+            except Exception:
+                pass
+
             choice = response.choices[0]
             message = choice.message
+            has_tool_calls = bool(getattr(message, "tool_calls", None))
+            tool_count = len(message.tool_calls) if has_tool_calls else 0
+
+            _emit({
+                "phase": "llm_complete",
+                "iteration": _iteration,
+                "max_iterations": max_iterations,
+                "model": self.model,
+                "call_tokens": call_tokens,
+                "call_cost_usd": round(call_cost, 6),
+                "has_tool_calls": has_tool_calls,
+                "tool_count": tool_count,
+            })
 
             # No tool calls → return the text reply
-            if not getattr(message, "tool_calls", None):
+            if not has_tool_calls:
                 reply_text = getattr(message, "content", "") or ""
-                self._record_cost(working_messages)
+                self._record_cost(response)
+                _emit({
+                    "phase": "complete",
+                    "iteration": _iteration,
+                    "max_iterations": max_iterations,
+                    "total_iterations": _iteration + 1,
+                    "total_tool_calls": _total_tool_calls,
+                    "final_cost_usd": round(_cumulative_cost, 6),
+                    "final_tokens": dict(_cumulative_tokens),
+                    "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
+                })
                 return reply_text, tool_audit
 
             # Append the assistant message with tool calls
             working_messages.append(message.model_dump())
 
             # Execute each tool call
-            for tool_call in message.tool_calls:
+            for idx, tool_call in enumerate(message.tool_calls):
                 fn = tool_call.function
                 tool_name = fn.name
                 try:
@@ -1022,10 +1111,26 @@ class ChatService:
                 except json.JSONDecodeError:
                     params = {}
 
+                params_preview = json.dumps(params)[:120] if params else ""
+                _emit({
+                    "phase": "tool_start",
+                    "iteration": _iteration,
+                    "max_iterations": max_iterations,
+                    "tool_name": tool_name,
+                    "tool_index": idx,
+                    "tool_count": tool_count,
+                    "params_preview": params_preview,
+                })
+
+                tool_start = time.monotonic()
+                blocked = False
+                error = False
+
                 # Tool gate check
                 gate_ok, gate_reason = self._check_tool_gate(tool_name, params)
                 if not gate_ok:
                     result_str = f"Tool '{tool_name}' blocked: {gate_reason}"
+                    blocked = True
                     tool_audit.append({
                         "tool": tool_name,
                         "params": params,
@@ -1044,11 +1149,13 @@ class ChatService:
                             tool_name, _iteration,
                         )
                         result_str = f"Tool '{tool_name}' timed out after 120s."
+                        error = True
                     except Exception as e:
                         log.exception(
                             "chat_tool_loop.tool_error tool=%s", tool_name,
                         )
                         result_str = f"Tool '{tool_name}' failed: {e}"
+                        error = True
                     tool_audit.append({
                         "tool": tool_name,
                         "params": params,
@@ -1056,13 +1163,27 @@ class ChatService:
                         "blocked": False,
                     })
 
+                _total_tool_calls += 1
+                _emit({
+                    "phase": "tool_complete",
+                    "iteration": _iteration,
+                    "max_iterations": max_iterations,
+                    "tool_name": tool_name,
+                    "tool_index": idx,
+                    "tool_count": tool_count,
+                    "duration_ms": int((time.monotonic() - tool_start) * 1000),
+                    "result_preview": result_str[:120] if result_str else "",
+                    "blocked": blocked,
+                    "error": error,
+                })
+
                 working_messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": result_str,
                 })
 
-            self._record_cost(working_messages)
+            self._record_cost(response)
 
         # Max iterations reached — return whatever text we have
         last_text = ""
@@ -1077,6 +1198,16 @@ class ChatService:
                     break
         if not last_text:
             last_text = "I ran out of steps processing your request. Please try again."
+        _emit({
+            "phase": "complete",
+            "iteration": max_iterations - 1,
+            "max_iterations": max_iterations,
+            "total_iterations": max_iterations,
+            "total_tool_calls": _total_tool_calls,
+            "final_cost_usd": round(_cumulative_cost, 6),
+            "final_tokens": dict(_cumulative_tokens),
+            "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
+        })
         return last_text, tool_audit
 
     # Capabilities the chat agent declares for tool gate validation.
@@ -1191,14 +1322,12 @@ class ChatService:
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
-    def _record_cost(self, messages: list[dict]) -> None:
-        """Record LLM cost to budget tracker."""
+    def _record_cost(self, response: Any) -> None:
+        """Record LLM cost to budget tracker using actual response."""
         if self.budget_tracker is None:
             return
         try:
-            cost = litellm.completion_cost(
-                model=self.model, messages=messages, completion=""
-            )
-            self.budget_tracker.record_cost(self.model, cost)
+            cost = litellm.completion_cost(completion_response=response)
         except Exception:
-            pass
+            cost = 0.0
+        self.budget_tracker.record_cost(self.model, cost, service_id="chat")

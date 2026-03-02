@@ -2501,9 +2501,27 @@ async def chat_websocket(websocket: WebSocket):
 
                 await websocket.send_json({"type": "typing", "active": True})
 
-                response = await _chat_service.handle_message(
-                    session_id, user_text
-                )
+                progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+                async def _forward_progress(_q=progress_queue):
+                    while True:
+                        event = await _q.get()
+                        if event is None:
+                            break
+                        try:
+                            await websocket.send_json(event)
+                        except Exception:
+                            break
+
+                forwarder_task = asyncio.create_task(_forward_progress())
+                try:
+                    response = await _chat_service.handle_message(
+                        session_id, user_text,
+                        progress_queue=progress_queue,
+                    )
+                finally:
+                    await progress_queue.put(None)
+                    await forwarder_task
 
                 if response.tracking_envelope_id:
                     tracked_envelopes.add(response.tracking_envelope_id)

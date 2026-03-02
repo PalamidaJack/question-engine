@@ -992,6 +992,50 @@
       );
     }
 
+    function ChatProgressPanel({ progress, toolStream }) {
+      if (!progress) return null;
+      const isComplete = progress.phase === "complete";
+      const elapsed = progress.elapsed_ms || progress.total_elapsed_ms || 0;
+      const elapsedStr = elapsed < 1000 ? `${elapsed}ms` : `${(elapsed / 1000).toFixed(1)}s`;
+      const tokens = progress.cumulative_tokens || progress.final_tokens || {};
+      const cost = progress.cumulative_cost_usd || progress.final_cost_usd || 0;
+      const iter = (progress.iteration || 0) + 1;
+      const maxIter = progress.max_iterations || 20;
+
+      let phaseLabel = "Thinking...";
+      if (progress.phase === "llm_start") phaseLabel = "Reasoning...";
+      else if (progress.phase === "llm_complete" && progress.has_tool_calls) phaseLabel = `Planning ${progress.tool_count} tool call${progress.tool_count > 1 ? "s" : ""}...`;
+      else if (progress.phase === "llm_complete") phaseLabel = "Generating response...";
+      else if (progress.phase === "tool_start") phaseLabel = `Running: ${progress.tool_name} (${(progress.tool_index || 0) + 1}/${progress.tool_count})`;
+      else if (progress.phase === "tool_complete") phaseLabel = `Completed: ${progress.tool_name}`;
+      else if (progress.phase === "complete") phaseLabel = "Done";
+
+      const pct = Math.min(100, Math.round((iter / maxIter) * 100));
+
+      return React.createElement("div", {
+        style: { padding: "10px 16px", marginBottom: 12, borderRadius: 10, background: palette.surface, border: `1px solid ${palette.border}`, fontFamily: FONT_MONO, fontSize: 11 }
+      },
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, color: palette.textDim } },
+          React.createElement("span", { style: { color: palette.accent, fontWeight: 600 } }, `Step ${iter}/${maxIter}`),
+          React.createElement("span", null, elapsedStr),
+          React.createElement("span", null, `${(tokens.total || 0).toLocaleString()} tok`),
+          cost > 0 ? React.createElement("span", null, `$${cost.toFixed(4)}`) : null
+        ),
+        React.createElement("div", { style: { marginBottom: 6, color: isComplete ? palette.success || "#4caf50" : palette.text, fontWeight: 500, fontSize: 12, animation: isComplete ? "none" : "pulse 1.5s infinite" } }, phaseLabel),
+        React.createElement("div", { style: { height: 3, background: palette.border, borderRadius: 2, marginBottom: toolStream.length > 0 ? 6 : 0, overflow: "hidden" } },
+          React.createElement("div", { style: { height: "100%", width: `${pct}%`, background: palette.accent, borderRadius: 2, transition: "width 0.3s ease" } })
+        ),
+        toolStream.length > 0 ? React.createElement("div", { style: { maxHeight: 120, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 } },
+          toolStream.map((t, i) => React.createElement("div", { key: t._key || i, style: { display: "flex", justifyContent: "space-between", gap: 8, color: t.phase === "tool_complete" ? palette.textDim : palette.text, fontSize: 10 } },
+            React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+              `${t.phase === "tool_complete" ? "\u2713" : "\u25b6"} ${t.tool_name}`
+            ),
+            t.duration_ms != null ? React.createElement("span", { style: { flexShrink: 0 } }, `${t.duration_ms}ms`) : null
+          ))
+        ) : null
+      );
+    }
+
     function App() {
       const [activeTab, setActiveTab] = useState("dashboard");
       const [claims, setClaims] = useState([]);
@@ -1016,6 +1060,8 @@
       const [chatTyping, setChatTyping] = useState(false);
       const [chatSessionId, setChatSessionId] = useState(null);
       const [chatPipelineEvents, setChatPipelineEvents] = useState({});
+      const [chatProgress, setChatProgress] = useState(null);
+      const [chatToolStream, setChatToolStream] = useState([]);
       const chatWsRef = useRef(null);
       const chatEndRef = useRef(null);
 
@@ -1224,6 +1270,25 @@
             const data = JSON.parse(msg.data);
             if (data.type === "session_init") setChatSessionId(data.session_id);
             if (data.type === "typing") setChatTyping(data.active);
+            if (data.type === "chat_progress") {
+              setChatProgress(data);
+              if (data.phase === "tool_start" || data.phase === "tool_complete") {
+                setChatToolStream(prev => {
+                  const key = `${data.iteration}-${data.tool_index}`;
+                  const existing = prev.findIndex(e => e._key === key);
+                  const entry = { ...data, _key: key };
+                  if (existing >= 0) {
+                    const next = [...prev];
+                    next[existing] = entry;
+                    return next;
+                  }
+                  return [...prev, entry];
+                });
+              }
+              if (data.phase === "complete") {
+                setTimeout(() => { setChatProgress(null); setChatToolStream([]); }, 3000);
+              }
+            }
             if (data.type === "chat_response") {
               setChatMessages(prev => [...prev, {
                 id: data.message_id, role: "assistant", content: data.reply_text,
@@ -1267,7 +1332,7 @@
       // Auto-scroll chat
       useEffect(() => {
         if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
-      }, [chatMessages, chatTyping]);
+      }, [chatMessages, chatTyping, chatProgress]);
 
       const handleChatSend = () => {
         if (!chatInput.trim() || !chatWsRef.current) return;
@@ -1863,13 +1928,15 @@
                       isLastMessage={i === chatMessages.length - 1}
                       onSuggestionClick={setChatInput} />
                   ))}
-                  {chatTyping && (
+                  {chatTyping && (chatProgress
+                    ? React.createElement(ChatProgressPanel, { progress: chatProgress, toolStream: chatToolStream })
+                    : (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 16px", marginBottom: 12 }}>
                       <div style={{ padding: "8px 16px", borderRadius: 12, background: palette.surface, border: `1px solid ${palette.border}` }}>
                         <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.accent, animation: "pulse 1.5s infinite" }}>Thinking...</span>
                       </div>
                     </div>
-                  )}
+                  ))}
                   <div ref={chatEndRef} />
                 </div>
                 <div style={{ flexShrink: 0, padding: "16px 0 0", borderTop: `1px solid ${palette.border}` }}>

@@ -97,6 +97,7 @@ def _mock_llm_text_response(text: str):
     choice.message = message
     resp = MagicMock()
     resp.choices = [choice]
+    resp.usage = None
     return resp
 
 
@@ -134,6 +135,7 @@ def _mock_llm_tool_response(tool_calls_data: list[dict]):
     choice.message = message
     resp = MagicMock()
     resp.choices = [choice]
+    resp.usage = None
     return resp
 
 
@@ -837,3 +839,150 @@ def test_chat_requires_message(client):
 def test_chat_returns_503_when_not_started(client):
     resp = client.post("/api/chat", json={"message": "hello"})
     assert resp.status_code == 503
+
+
+# ── Progress events tests ──────────────────────────────────────────────────
+
+
+class TestProgressEvents:
+    @pytest.mark.asyncio
+    async def test_progress_events_emitted_for_simple_response(self):
+        """No tool calls → [llm_start, llm_complete, complete]."""
+        import asyncio
+
+        svc = _make_service()
+        mock_resp = _mock_llm_text_response("Hello!")
+
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            reply, audit = await svc._chat_tool_loop(
+                messages, tool_schemas, max_iterations=5,
+                progress_queue=queue,
+            )
+
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+
+        phases = [e["phase"] for e in events]
+        assert phases == ["llm_start", "llm_complete", "complete"]
+        assert events[-1]["total_tool_calls"] == 0
+        assert "elapsed_ms" in events[0]
+        assert "timestamp" in events[0]
+
+    @pytest.mark.asyncio
+    async def test_progress_events_emitted_for_tool_loop(self):
+        """With tool calls → includes tool_start, tool_complete."""
+        import asyncio
+
+        svc = _make_service()
+        svc.substrate.hybrid_search = AsyncMock(return_value=[])
+
+        tool_resp = _mock_llm_tool_response([
+            {"name": "query_beliefs", "arguments": '{"query": "test"}'},
+        ])
+        text_resp = _mock_llm_text_response("No results.")
+
+        call_count = 0
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return tool_resp if call_count == 1 else text_resp
+
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=side_effect)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            reply, audit = await svc._chat_tool_loop(
+                messages, tool_schemas, max_iterations=5,
+                progress_queue=queue,
+            )
+
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+
+        phases = [e["phase"] for e in events]
+        assert "tool_start" in phases
+        assert "tool_complete" in phases
+        assert phases[0] == "llm_start"
+        assert phases[-1] == "complete"
+
+        tool_start_evt = next(e for e in events if e["phase"] == "tool_start")
+        assert tool_start_evt["tool_name"] == "query_beliefs"
+        assert tool_start_evt["tool_index"] == 0
+
+        tool_complete_evt = next(e for e in events if e["phase"] == "tool_complete")
+        assert "duration_ms" in tool_complete_evt
+        assert tool_complete_evt["tool_name"] == "query_beliefs"
+
+    @pytest.mark.asyncio
+    async def test_no_progress_when_queue_is_none(self):
+        """Backward compat: no errors when progress_queue is None."""
+        svc = _make_service()
+        mock_resp = _mock_llm_text_response("Hello!")
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            messages = await svc._build_messages(svc.get_or_create_session("s1"))
+            tool_schemas = svc._get_chat_tools()
+            reply, audit = await svc._chat_tool_loop(
+                messages, tool_schemas, max_iterations=5,
+                progress_queue=None,
+            )
+
+        assert reply == "Hello!"
+
+    @pytest.mark.asyncio
+    async def test_handle_message_passes_queue(self):
+        """Queue gets events when passed to handle_message."""
+        import asyncio
+
+        svc = _make_service()
+        mock_resp = _mock_llm_text_response("Hi there!")
+
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.completion_cost = MagicMock(return_value=0.001)
+            response = await svc.handle_message(
+                "s1", "hello", progress_queue=queue,
+            )
+
+        assert response.reply_text == "Hi there!"
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        assert len(events) >= 3
+        assert events[-1]["phase"] == "complete"
+
+
+class TestRecordCost:
+    def test_record_cost_uses_actual_response(self):
+        """Verify _record_cost calls completion_cost(completion_response=response)."""
+        mock_budget = MagicMock()
+        svc = _make_service(budget_tracker=mock_budget)
+
+        mock_response = MagicMock()
+
+        with patch("qe.services.chat.service.litellm") as mock_litellm:
+            mock_litellm.completion_cost = MagicMock(return_value=0.005)
+            svc._record_cost(mock_response)
+
+        mock_litellm.completion_cost.assert_called_once_with(
+            completion_response=mock_response,
+        )
+        mock_budget.record_cost.assert_called_once_with(
+            svc.model, 0.005, service_id="chat",
+        )
