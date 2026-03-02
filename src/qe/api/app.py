@@ -97,6 +97,7 @@ _active_adapters: list = []
 _extra_routes_registered = False
 _inquiry_engine: InquiryEngine | None = None
 _cognitive_pool = None
+_competitive_arena = None
 _strategy_evolver = None
 _prompt_registry: PromptRegistry | None = None
 _prompt_mutator = None
@@ -519,7 +520,7 @@ async def lifespan(app: FastAPI):
     global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
     global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
     global _memory_store, _extra_routes_registered, _inquiry_engine
-    global _cognitive_pool, _strategy_evolver, _prompt_mutator, _knowledge_loop
+    global _cognitive_pool, _competitive_arena, _strategy_evolver, _prompt_mutator, _knowledge_loop
     global _inquiry_bridge, _synthesizer
     global _elastic_scaler, _episodic_memory
     global _tool_registry, _tool_gate, _workspace_manager
@@ -709,10 +710,15 @@ async def lifespan(app: FastAPI):
                 bus=bus,
             )
 
+        from qe.models.arena import ArenaConfig
+        from qe.runtime.competitive_arena import CompetitiveArena
+
+        _competitive_arena = CompetitiveArena(bus=bus, config=ArenaConfig())
         _cognitive_pool = CognitiveAgentPool(
             bus=bus,
             max_agents=5,
             engine_factory=_engine_factory,
+            arena=_competitive_arena,
         )
         _elastic_scaler = ElasticScaler(
             agent_pool=_cognitive_pool,
@@ -729,6 +735,11 @@ async def lifespan(app: FastAPI):
             "multi_agent_mode",
             enabled=False,
             description="Use CognitiveAgentPool for parallel multi-agent inquiry",
+        )
+        flag_store.define(
+            "competitive_arena",
+            enabled=False,
+            description="Enable agent-vs-agent competitive verification in multi-agent mode",
         )
 
         # Auto-populate pool with diverse strategies (when multi-agent enabled)
@@ -946,6 +957,7 @@ async def lifespan(app: FastAPI):
             log.debug("shutdown.strategy_evolver_stop_failed")
 
         _cognitive_pool = None
+        _competitive_arena = None
         _strategy_evolver = None
         _elastic_scaler = None
         _episodic_memory = None
@@ -1497,6 +1509,14 @@ async def pool_status():
     return _cognitive_pool.pool_status()
 
 
+@app.get("/api/arena/status")
+async def arena_status():
+    """Return competitive arena status and Elo rankings."""
+    if _competitive_arena is None:
+        return {"enabled": False, "rankings": []}
+    return _competitive_arena.status()
+
+
 @app.get("/api/strategy/snapshots")
 async def strategy_snapshots():
     """Return strategy evolver snapshots and current strategy."""
@@ -1782,6 +1802,7 @@ async def status():
             ),
         },
         "flags": get_flag_store().stats(),
+        "arena": _competitive_arena.status() if _competitive_arena else None,
         "bridge": _inquiry_bridge.status() if _inquiry_bridge else None,
         "knowledge_loop": _knowledge_loop.status() if _knowledge_loop else None,
     }
@@ -2012,6 +2033,39 @@ async def submit_goal(body: dict[str, Any]):
                     strategy = _strategy_evolver.select_strategy()
                     config = strategy_to_inquiry_config(strategy)
 
+                # Competitive arena path: tournament verification
+                if (
+                    flag_store.is_enabled("competitive_arena")
+                    and _competitive_arena is not None
+                ):
+                    from qe.models.arena import ArenaResult
+
+                    result = await _cognitive_pool.run_competitive_inquiry(
+                        goal_id=goal_id,
+                        goal_description=description,
+                        config=config,
+                    )
+                    if isinstance(result, ArenaResult):
+                        return {
+                            "arena_id": result.arena_id,
+                            "goal_id": result.goal_id,
+                            "winner_id": result.winner_id,
+                            "sycophancy_detected": result.sycophancy_detected,
+                            "match_count": len(result.matches),
+                            "total_cost_usd": result.total_cost_usd,
+                            "mode": "competitive_arena",
+                        }
+                    # Fell through to InquiryResult (< 2 agents)
+                    if result is not None:
+                        return {
+                            "goal_id": result.goal_id,
+                            "inquiry_id": result.inquiry_id,
+                            "status": result.status,
+                            "findings_summary": result.findings_summary[:1000],
+                            "mode": "multi_agent",
+                        }
+
+                # Standard multi-agent path: parallel + merge
                 results = await _cognitive_pool.run_parallel_inquiry(
                     goal_id=goal_id,
                     goal_description=description,
