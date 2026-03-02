@@ -991,7 +991,16 @@ class ChatService:
             if tool_schemas:
                 kwargs["tools"] = tool_schemas
 
-            response = await litellm.acompletion(**kwargs)
+            try:
+                response = await asyncio.wait_for(
+                    litellm.acompletion(**kwargs), timeout=60.0
+                )
+            except TimeoutError:
+                log.warning("chat_tool_loop.llm_timeout iteration=%d", _iteration)
+                return "Sorry, the model took too long to respond. Please try again.", tool_audit
+            except Exception as e:
+                log.exception("chat_tool_loop.llm_error iteration=%d", _iteration)
+                return f"LLM call failed: {e}", tool_audit
             choice = response.choices[0]
             message = choice.message
 
@@ -1024,7 +1033,22 @@ class ChatService:
                         "blocked": True,
                     })
                 else:
-                    result_str = await self._execute_chat_tool(tool_name, params)
+                    try:
+                        result_str = await asyncio.wait_for(
+                            self._execute_chat_tool(tool_name, params),
+                            timeout=120.0,
+                        )
+                    except TimeoutError:
+                        log.warning(
+                            "chat_tool_loop.tool_timeout tool=%s iteration=%d",
+                            tool_name, _iteration,
+                        )
+                        result_str = f"Tool '{tool_name}' timed out after 120s."
+                    except Exception as e:
+                        log.exception(
+                            "chat_tool_loop.tool_error tool=%s", tool_name,
+                        )
+                        result_str = f"Tool '{tool_name}' failed: {e}"
                     tool_audit.append({
                         "tool": tool_name,
                         "params": params,
