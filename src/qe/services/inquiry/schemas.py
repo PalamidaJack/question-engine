@@ -93,8 +93,23 @@ class InquiryConfig(BaseModel):
     budget_hard_stop_pct: float = Field(default=0.05, ge=0.0, le=1.0)
     questions_per_iteration: int = 3
     max_tool_calls_per_question: int = 5
-    model_balanced: str = "openai/anthropic/claude-sonnet-4"
-    model_fast: str = "openai/google/gemini-2.0-flash"
+    model_balanced: str = ""
+    model_fast: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        """Fill model defaults from configured tiers if not set."""
+        if not self.model_balanced or not self.model_fast:
+            from qe.api.setup import get_current_tiers
+
+            tiers = get_current_tiers()
+            if not self.model_balanced:
+                self.model_balanced = tiers.get(
+                    "balanced", "gpt-4o",
+                )
+            if not self.model_fast:
+                self.model_fast = tiers.get(
+                    "fast", "gpt-4o-mini",
+                )
     domain: str = "general"
     max_concurrent_inquiries: int = 3
     inquiry_rate_limit_rpm: int = 10

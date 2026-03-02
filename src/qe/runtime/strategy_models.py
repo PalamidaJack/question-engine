@@ -100,20 +100,26 @@ DEFAULT_STRATEGIES: dict[str, StrategyConfig] = {
 
 def strategy_to_inquiry_config(strategy: StrategyConfig) -> InquiryConfig:
     """Map a StrategyConfig to an InquiryConfig for the InquiryEngine."""
+    from qe.api.setup import get_current_tiers
     from qe.services.inquiry.schemas import InquiryConfig as _InquiryConfig
 
-    model_map = {
-        "fast": "openai/google/gemini-2.0-flash",
-        "balanced": "openai/anthropic/claude-sonnet-4",
-    }
-    model = model_map.get(strategy.preferred_model_tier, model_map["balanced"])
+    tiers = get_current_tiers()
+    fast = tiers.get("fast", "gpt-4o-mini")
+    balanced = tiers.get("balanced", "gpt-4o")
+
+    model_map = {"fast": fast, "balanced": balanced}
+    model = model_map.get(
+        strategy.preferred_model_tier, balanced,
+    )
 
     return _InquiryConfig(
         questions_per_iteration=strategy.question_batch_size,
         max_iterations=strategy.max_depth,
-        confidence_threshold=max(0.1, min(1.0, 1.0 - strategy.exploration_rate)),
+        confidence_threshold=max(
+            0.1, min(1.0, 1.0 - strategy.exploration_rate),
+        ),
         model_balanced=model,
-        model_fast="openai/google/gemini-2.0-flash",
+        model_fast=fast,
     )
 
 
