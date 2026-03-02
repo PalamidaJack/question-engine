@@ -289,28 +289,46 @@ class ChatService:
     def _build_system_prompt(self) -> str:
         """Static identity and behavioral instructions."""
         return (
-            "You are the Question Engine assistant — an AI agent with a cognitive "
-            "architecture that includes a belief ledger, episodic memory, and a "
-            "multi-phase research engine.\n\n"
+            "You are the Question Engine assistant — an AI agent with a "
+            "cognitive architecture that includes a belief ledger, episodic "
+            "memory, and a multi-phase research engine.\n\n"
+            f"## About you\n"
+            f"- You are powered by model: {self.model}\n"
+            "- You are NOT a generic chatbot — you are a knowledge "
+            "management and research agent.\n"
+            "- When asked what you are or what model you run, "
+            "identify yourself as the Question Engine assistant "
+            f"running on {self.model}.\n\n"
             "## What you can do\n"
-            "- Answer questions using the knowledge base (query_beliefs)\n"
-            "- Accept new observations and submit them to the "
-            "research pipeline (submit_observation)\n"
-            "- List and inspect entities and claims (list_entities, get_entity_details)\n"
+            "- Answer questions using the knowledge base "
+            "(query_beliefs)\n"
+            "- Accept USER-PROVIDED observations and submit them "
+            "to the research pipeline (submit_observation)\n"
+            "- List and inspect entities and claims "
+            "(list_entities, get_entity_details)\n"
             "- Retract claims that are wrong (retract_claim)\n"
             "- Check system budget (get_budget_status)\n"
-            "- Perform deep multi-phase research on complex questions (deep_research)\n\n"
+            "- Search the web for current information "
+            "(web_search, web_fetch)\n"
+            "- Perform deep multi-phase research on complex "
+            "questions (deep_research)\n\n"
             "## How to behave\n"
             "- Be concise and helpful.\n"
-            "- When the user provides new information (facts, news, observations), "
-            "use submit_observation to ingest it.\n"
-            "- When the user asks what is known about a topic, use query_beliefs first. "
-            "If the results are insufficient, use deep_research for thorough investigation.\n"
-            "- When the user asks to retract, list, or inspect claims/entities, "
-            "use the appropriate tool.\n"
-            "- For simple greetings and conversation, respond directly without tools.\n"
-            "- Always suggest 2-3 short follow-up prompts at the end of your response.\n"
-            "- Format follow-up suggestions on separate lines prefixed with '> '.\n"
+            "- ONLY use submit_observation for information the "
+            "USER explicitly provides (facts, news, things they "
+            "tell you). NEVER submit your own analyses, "
+            "summaries, or responses as observations.\n"
+            "- When the user asks what is known about a topic, "
+            "use query_beliefs first. If the results are "
+            "insufficient, use deep_research.\n"
+            "- When the user asks to retract, list, or inspect "
+            "claims/entities, use the appropriate tool.\n"
+            "- For simple greetings and conversation, respond "
+            "directly without tools.\n"
+            "- Always suggest 2-3 short follow-up prompts at the "
+            "end of your response.\n"
+            "- Format follow-up suggestions on separate lines "
+            "prefixed with '> '.\n"
         )
 
     async def _build_knowledge_context(self) -> str:
@@ -607,6 +625,11 @@ class ChatService:
             last_text = "I ran out of steps processing your request. Please try again."
         return last_text, tool_audit
 
+    # Capabilities the chat agent declares for tool gate validation.
+    _CHAT_CAPABILITIES: set[str] = {
+        "chat", "web_search", "web_fetch",
+    }
+
     def _check_tool_gate(
         self, tool_name: str, params: dict
     ) -> tuple[bool, str]:
@@ -619,7 +642,7 @@ class ChatService:
             result = self._tool_gate.validate(
                 tool_name=tool_name,
                 params=params,
-                capabilities={"chat"},
+                capabilities=self._CHAT_CAPABILITIES,
                 goal_id="chat",
             )
             if result.decision == GateDecision.DENY:
