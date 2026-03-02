@@ -109,6 +109,7 @@ _synthesizer = None
 _tool_registry = None
 _tool_gate = None
 _workspace_manager = None
+_discovery_service = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
@@ -524,6 +525,7 @@ async def lifespan(app: FastAPI):
     global _inquiry_bridge, _synthesizer
     global _elastic_scaler, _episodic_memory
     global _tool_registry, _tool_gate, _workspace_manager
+    global _discovery_service
 
     configure_from_config(get_settings())
 
@@ -554,6 +556,12 @@ async def lifespan(app: FastAPI):
 
     if is_setup_complete():
         _configure_kilocode()
+
+        # Model Discovery — polls free providers for available models
+        from qe.runtime.discovery.service import ModelDiscoveryService
+
+        _discovery_service = ModelDiscoveryService(bus=bus)
+        await _discovery_service.start()
 
         _supervisor = Supervisor(
             bus=bus, substrate=_substrate, config_path=Path("config.toml")
@@ -946,6 +954,13 @@ async def lifespan(app: FastAPI):
             log.info("engram_cache.cleared count=%d", cleared)
         except Exception:
             log.debug("shutdown.engram_cache_clear_failed")
+
+        # Shutdown — Model Discovery
+        try:
+            if _discovery_service is not None:
+                await _discovery_service.stop()
+        except Exception:
+            log.debug("shutdown.discovery_stop_failed")
 
         # Shutdown — Inquiry Bridge
         try:

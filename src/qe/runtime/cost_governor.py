@@ -80,9 +80,11 @@ class CostGovernor:
         self,
         default_goal_cap_usd: float = 5.0,
         budget_tracker: Any | None = None,
+        discovery: Any | None = None,
     ) -> None:
         self.default_goal_cap_usd = default_goal_cap_usd
         self._budget_tracker = budget_tracker
+        self._discovery = discovery
         self._goal_budgets: dict[str, GoalBudget] = {}
 
     def register_goal(
@@ -209,9 +211,17 @@ class CostGovernor:
             "exhausted": gb.exhausted,
         }
 
-    @staticmethod
-    def _lookup_rate(table: dict[str, float], model: str) -> float:
-        """Look up cost rate, matching by prefix."""
+    def _lookup_rate(self, table: dict[str, float], model: str) -> float:
+        """Look up cost rate from discovery or hardcoded table."""
+        # Try discovery first
+        if self._discovery is not None:
+            dm = self._discovery.get_model(model)
+            if dm is not None:
+                if table is _COST_PER_M_INPUT:
+                    return dm.cost_per_m_input
+                return dm.cost_per_m_output
+
+        # Fall back to hardcoded prefix match
         for prefix, rate in table.items():
             if model.startswith(prefix):
                 return rate

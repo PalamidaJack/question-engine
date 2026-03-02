@@ -89,6 +89,66 @@ PROVIDERS: list[dict] = [
         },
     },
     {
+        "name": "Cerebras",
+        "env_var": "CEREBRAS_API_KEY",
+        "example_models": ["cerebras/llama-3.3-70b"],
+        "tier_defaults": {
+            "fast": "cerebras/llama-3.1-8b",
+            "balanced": "cerebras/llama-3.3-70b",
+            "powerful": "cerebras/llama-3.3-70b",
+        },
+    },
+    {
+        "name": "GitHub Models",
+        "env_var": "GITHUB_TOKEN",
+        "example_models": ["github/gpt-4o", "github/Meta-Llama-3.1-70B-Instruct"],
+        "tier_defaults": {
+            "fast": "github/Meta-Llama-3.1-8B-Instruct",
+            "balanced": "github/Meta-Llama-3.1-70B-Instruct",
+            "powerful": "github/gpt-4o",
+        },
+    },
+    {
+        "name": "Cloudflare Workers AI",
+        "env_var": "CLOUDFLARE_API_TOKEN",
+        "example_models": ["cloudflare/@cf/meta/llama-3.1-8b-instruct"],
+        "tier_defaults": {
+            "fast": "cloudflare/@cf/meta/llama-3.1-8b-instruct",
+            "balanced": "cloudflare/@cf/meta/llama-3.1-8b-instruct",
+            "powerful": "cloudflare/@cf/meta/llama-3.1-8b-instruct",
+        },
+    },
+    {
+        "name": "NVIDIA NIM",
+        "env_var": "NVIDIA_NIM_API_KEY",
+        "example_models": ["nvidia_nim/meta/llama-3.1-70b-instruct"],
+        "tier_defaults": {
+            "fast": "nvidia_nim/meta/llama-3.1-8b-instruct",
+            "balanced": "nvidia_nim/meta/llama-3.1-70b-instruct",
+            "powerful": "nvidia_nim/meta/llama-3.1-405b-instruct",
+        },
+    },
+    {
+        "name": "Fireworks AI",
+        "env_var": "FIREWORKS_AI_API_KEY",
+        "example_models": ["fireworks_ai/accounts/fireworks/models/llama-v3p1-70b-instruct"],
+        "tier_defaults": {
+            "fast": "fireworks_ai/accounts/fireworks/models/llama-v3p1-8b-instruct",
+            "balanced": "fireworks_ai/accounts/fireworks/models/llama-v3p1-70b-instruct",
+            "powerful": "fireworks_ai/accounts/fireworks/models/llama-v3p1-405b-instruct",
+        },
+    },
+    {
+        "name": "Sambanova",
+        "env_var": "SAMBANOVA_API_KEY",
+        "example_models": ["sambanova/Meta-Llama-3.1-70B-Instruct"],
+        "tier_defaults": {
+            "fast": "sambanova/Meta-Llama-3.1-8B-Instruct",
+            "balanced": "sambanova/Meta-Llama-3.1-70B-Instruct",
+            "powerful": "sambanova/Meta-Llama-3.1-405B-Instruct",
+        },
+    },
+    {
         "name": "Ollama (local)",
         "env_var": None,
         "example_models": ["ollama/llama3.2", "ollama/qwen3"],

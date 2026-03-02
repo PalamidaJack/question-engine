@@ -326,7 +326,7 @@ def test_setup_providers_endpoint(client):
     data = resp.json()
     assert "providers" in data
     providers = data["providers"]
-    assert len(providers) == 9
+    assert len(providers) == 15
     names = [p["name"] for p in providers]
     assert "OpenAI" in names
     assert "Anthropic" in names

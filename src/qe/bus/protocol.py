@@ -156,6 +156,9 @@ TOPICS = {
     "tasks.contract_violated",
     "goals.synthesized",
     "goals.synthesis_failed",
+    # Model Discovery
+    "models.discovered",
+    "models.tiers_updated",
 }
 
 

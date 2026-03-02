@@ -125,6 +125,7 @@ class RateLimiter:
         custom_limits: dict[str, int] | None = None,
         enabled: bool = True,
         burst_allowance: int = 0,
+        discovery: Any = None,
     ) -> None:
         self._buckets: dict[str, TokenBucket] = {}
         self._custom_limits = custom_limits or {}
@@ -132,6 +133,7 @@ class RateLimiter:
         self._burst_allowance = burst_allowance
         self._total_waits = 0
         self._total_requests = 0
+        self._discovery = discovery
 
     @property
     def enabled(self) -> bool:
@@ -148,17 +150,24 @@ class RateLimiter:
                 return prefix
         return model.split("/")[0] if "/" in model else model
 
-    def _get_rpm(self, provider: str) -> int:
-        """Get RPM limit for a provider."""
+    def _get_rpm(self, model: str = "", provider: str = "") -> int:
+        """Get RPM limit for a provider, checking discovery first."""
         if provider in self._custom_limits:
             return self._custom_limits[provider]
+
+        # Check discovery for model-specific rate limit
+        if self._discovery is not None and model:
+            dm = self._discovery.get_model(model)
+            if dm is not None:
+                return dm.rate_limit_rpm
+
         return _DEFAULT_RPM.get(provider, 200)
 
     def _get_bucket(self, model: str) -> TokenBucket:
         """Get or create a token bucket for a model's provider."""
         provider = self._get_provider(model)
         if provider not in self._buckets:
-            rpm = self._get_rpm(provider)
+            rpm = self._get_rpm(model=model, provider=provider)
             self._buckets[provider] = TokenBucket(
                 provider=provider, rpm=rpm, burst=self._burst_allowance
             )

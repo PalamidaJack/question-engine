@@ -60,14 +60,30 @@ _KNOWN_PROFILES: dict[str, dict[str, Any]] = {
 class ModelCapabilities:
     """Detect and cache model capabilities."""
 
-    def __init__(self) -> None:
+    def __init__(self, discovery: Any | None = None) -> None:
         self._cache: dict[str, ModelProfile] = {}
+        self._discovery = discovery
 
     def get_profile(self, model: str) -> ModelProfile:
-        """Get model profile from cache or known
+        """Get model profile from discovery, cache, or known
         profiles."""
         if model in self._cache:
             return self._cache[model]
+
+        # Try discovery first
+        if self._discovery is not None:
+            dm = self._discovery.get_model(model)
+            if dm is not None:
+                profile = ModelProfile(
+                    model=model,
+                    supports_json_mode=dm.supports_json_mode,
+                    supports_tool_calling=dm.supports_tool_calling,
+                    supports_system_messages=dm.supports_system_messages,
+                    max_context_tokens=dm.context_length,
+                    estimated_quality_tier=dm.quality_tier,
+                )
+                self._cache[model] = profile
+                return profile
 
         profile = ModelProfile(model=model)
 
