@@ -21,6 +21,7 @@ from qe.services.chat.schemas import (
     ConversationalResponse,
     IntentClassification,
 )
+from qe.services.inquiry.schemas import InquiryConfig, InquiryResult
 from qe.services.query.service import answer_question
 from qe.substrate import Substrate
 
@@ -30,6 +31,13 @@ log = logging.getLogger(__name__)
 
 _MAX_HISTORY = 50
 _HISTORY_TRIM_TO = 30
+
+CHAT_INQUIRY_CONFIG = InquiryConfig(
+    max_iterations=2,
+    confidence_threshold=0.6,
+    questions_per_iteration=2,
+    inquiry_timeout_seconds=30.0,
+)
 
 
 class ChatSession:
@@ -64,11 +72,13 @@ class ChatService:
         bus: Any,
         budget_tracker: BudgetTracker | None = None,
         model: str = "gpt-4o-mini",
+        inquiry_engine: Any | None = None,
     ) -> None:
         self.substrate = substrate
         self.bus = bus
         self.budget_tracker = budget_tracker
         self.model = model
+        self._inquiry_engine = inquiry_engine
         self._sessions: dict[str, ChatSession] = {}
 
     _MAX_SESSIONS = 1000
@@ -194,7 +204,31 @@ class ChatService:
     async def _handle_question(
         self, query: str, message_id: str
     ) -> ChatResponsePayload:
-        """Route to QueryService and format the response."""
+        """Route to InquiryEngine (if available) or legacy QueryService."""
+        if self._inquiry_engine is not None:
+            try:
+                return await self._handle_question_via_inquiry(query, message_id)
+            except Exception:
+                log.exception(
+                    "InquiryEngine failed for query %r, falling back", query,
+                )
+        return await self._handle_question_via_query(query, message_id)
+
+    async def _handle_question_via_inquiry(
+        self, query: str, message_id: str
+    ) -> ChatResponsePayload:
+        """Answer a question using the full InquiryEngine cognitive loop."""
+        result: InquiryResult = await self._inquiry_engine.run_inquiry(
+            goal_id=f"chat_{message_id}",
+            goal_description=query,
+            config=CHAT_INQUIRY_CONFIG,
+        )
+        return self._map_inquiry_result(result, message_id)
+
+    async def _handle_question_via_query(
+        self, query: str, message_id: str
+    ) -> ChatResponsePayload:
+        """Legacy path: answer via direct belief-ledger scan."""
         result = await answer_question(query, self.substrate, model=self.model)
 
         reply_parts = [result["answer"]]
@@ -217,6 +251,47 @@ class ChatService:
             claims=result.get("supporting_claims", []),
             confidence=result.get("confidence"),
             reasoning=result.get("reasoning"),
+            suggestions=suggestions[:3],
+        )
+
+    def _map_inquiry_result(
+        self, result: InquiryResult, message_id: str
+    ) -> ChatResponsePayload:
+        """Convert an InquiryResult into a ChatResponsePayload."""
+        reply_text = result.findings_summary or (
+            "I investigated but could not find a definitive answer."
+        )
+
+        claims = [
+            {"insight_id": ins.get("insight_id", ""), "headline": ins.get("headline", "")}
+            for ins in result.insights[:10]
+        ]
+
+        confidence = (
+            result.total_questions_answered / result.total_questions_generated
+            if result.total_questions_generated > 0
+            else 0.0
+        )
+
+        reasoning = (
+            f"Status: {result.status} | "
+            f"Iterations: {result.iterations_completed} | "
+            f"Termination: {result.termination_reason}"
+        )
+
+        suggestions: list[str] = []
+        for q in result.question_tree:
+            if q.status == "pending" and len(suggestions) < 2:
+                suggestions.append(q.text)
+        suggestions.append("Submit a new observation")
+
+        return ChatResponsePayload(
+            message_id=message_id,
+            reply_text=reply_text,
+            intent=ChatIntent.QUESTION,
+            claims=claims,
+            confidence=confidence,
+            reasoning=reasoning,
             suggestions=suggestions[:3],
         )
 

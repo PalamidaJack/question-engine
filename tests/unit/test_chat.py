@@ -1,13 +1,14 @@
 """Tests for the chat interface."""
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from qe.services.chat.schemas import ChatIntent, CommandAction
-from qe.services.chat.service import ChatService, ChatSession
+from qe.services.chat.service import CHAT_INQUIRY_CONFIG, ChatService, ChatSession
+from qe.services.inquiry.schemas import InquiryResult, Question
 
 # ── ChatSession tests ───────────────────────────────────────────────────────
 
@@ -133,6 +134,141 @@ def test_cleanup_stale_sessions():
     assert removed == 1
     assert "s1" not in svc._sessions
     assert "s2" in svc._sessions
+
+
+# ── Inquiry routing tests ──────────────────────────────────────────────────
+
+
+def _make_inquiry_result(**overrides) -> InquiryResult:
+    defaults = dict(
+        inquiry_id="inq_test",
+        goal_id="chat_msg1",
+        status="completed",
+        termination_reason="confidence_met",
+        iterations_completed=1,
+        total_questions_generated=4,
+        total_questions_answered=3,
+        findings_summary="Dark matter makes up ~27% of the universe.",
+        insights=[
+            {"insight_id": "ins_1", "headline": "Dark matter is invisible"},
+            {"insight_id": "ins_2", "headline": "It interacts via gravity"},
+        ],
+        question_tree=[
+            Question(text="What is dark energy?", status="pending"),
+            Question(text="How is it detected?", status="answered"),
+            Question(text="What are WIMPs?", status="pending"),
+        ],
+    )
+    defaults.update(overrides)
+    return InquiryResult(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_handle_question_uses_inquiry_when_available():
+    mock_engine = MagicMock()
+    mock_engine.run_inquiry = AsyncMock(return_value=_make_inquiry_result())
+
+    svc = ChatService(
+        substrate=MagicMock(), bus=MagicMock(), inquiry_engine=mock_engine,
+    )
+
+    response = await svc._handle_question("What is dark matter?", "msg1")
+
+    mock_engine.run_inquiry.assert_awaited_once_with(
+        goal_id="chat_msg1",
+        goal_description="What is dark matter?",
+        config=CHAT_INQUIRY_CONFIG,
+    )
+    assert response.intent == ChatIntent.QUESTION
+    assert "27%" in response.reply_text
+    assert response.confidence == 3 / 4
+    assert len(response.claims) == 2
+    assert "confidence_met" in response.reasoning
+
+
+@pytest.mark.asyncio
+async def test_handle_question_fallback_when_no_inquiry_engine():
+    svc = ChatService(substrate=MagicMock(), bus=MagicMock())
+
+    with patch("qe.services.chat.service.answer_question", new_callable=AsyncMock) as mock_aq:
+        mock_aq.return_value = {
+            "answer": "Not enough info",
+            "reasoning": "Empty ledger",
+            "confidence": 0.1,
+            "supporting_claims": [],
+        }
+        response = await svc._handle_question("What is dark matter?", "msg1")
+
+    mock_aq.assert_awaited_once()
+    assert response.reply_text.startswith("Not enough info")
+    assert response.intent == ChatIntent.QUESTION
+
+
+@pytest.mark.asyncio
+async def test_handle_question_degrades_on_inquiry_exception():
+    mock_engine = MagicMock()
+    mock_engine.run_inquiry = AsyncMock(side_effect=RuntimeError("LLM timeout"))
+
+    svc = ChatService(
+        substrate=MagicMock(), bus=MagicMock(), inquiry_engine=mock_engine,
+    )
+
+    with patch("qe.services.chat.service.answer_question", new_callable=AsyncMock) as mock_aq:
+        mock_aq.return_value = {
+            "answer": "Fallback answer",
+            "reasoning": None,
+            "confidence": 0.2,
+            "supporting_claims": [],
+        }
+        response = await svc._handle_question("What is dark matter?", "msg1")
+
+    mock_engine.run_inquiry.assert_awaited_once()
+    mock_aq.assert_awaited_once()
+    assert response.reply_text == "Fallback answer"
+
+
+@pytest.mark.asyncio
+async def test_handle_question_inquiry_failed_status():
+    result = _make_inquiry_result(
+        status="failed",
+        findings_summary="",
+        total_questions_generated=0,
+        total_questions_answered=0,
+        insights=[],
+        question_tree=[],
+    )
+    mock_engine = MagicMock()
+    mock_engine.run_inquiry = AsyncMock(return_value=result)
+
+    svc = ChatService(
+        substrate=MagicMock(), bus=MagicMock(), inquiry_engine=mock_engine,
+    )
+
+    response = await svc._handle_question("What is dark matter?", "msg1")
+
+    assert "could not find a definitive answer" in response.reply_text
+    assert response.confidence == 0.0
+    assert "failed" in response.reasoning
+
+
+@pytest.mark.asyncio
+async def test_map_inquiry_result_suggestions_from_tree():
+    result = _make_inquiry_result(
+        question_tree=[
+            Question(text="Q1 pending", status="pending"),
+            Question(text="Q2 answered", status="answered"),
+            Question(text="Q3 pending", status="pending"),
+            Question(text="Q4 pending", status="pending"),
+        ],
+    )
+
+    svc = ChatService(substrate=MagicMock(), bus=MagicMock())
+    payload = svc._map_inquiry_result(result, "msg1")
+
+    assert len(payload.suggestions) == 3
+    assert payload.suggestions[0] == "Q1 pending"
+    assert payload.suggestions[1] == "Q3 pending"
+    assert payload.suggestions[2] == "Submit a new observation"
 
 
 # ── API endpoint tests ──────────────────────────────────────────────────────
