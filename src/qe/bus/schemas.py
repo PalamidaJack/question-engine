@@ -438,6 +438,86 @@ class GoalSynthesisFailedPayload(BaseModel):
     reason: str = ""
 
 
+# ── Innovation Scout payloads ────────────────────────────────────────────
+
+
+class ScoutCycleStartedPayload(BaseModel):
+    """Payload for scout.cycle_started topic."""
+
+    cycle_id: str
+    timestamp: str = ""
+
+
+class ScoutCycleCompletedPayload(BaseModel):
+    """Payload for scout.cycle_completed topic."""
+
+    cycle_id: str
+    findings_count: int = 0
+    ideas_count: int = 0
+    proposals_count: int = 0
+    duration_s: float = 0.0
+
+
+class ScoutFindingDiscoveredPayload(BaseModel):
+    """Payload for scout.finding_discovered topic."""
+
+    finding_id: str
+    url: str = ""
+    title: str = ""
+    source_type: str = ""
+    relevance_score: float = 0.0
+
+
+class ScoutIdeaAnalyzedPayload(BaseModel):
+    """Payload for scout.idea_analyzed topic."""
+
+    idea_id: str
+    finding_id: str = ""
+    title: str = ""
+    category: str = ""
+    composite_score: float = 0.0
+
+
+class ScoutProposalCreatedPayload(BaseModel):
+    """Payload for scout.proposal_created topic."""
+
+    proposal_id: str
+    title: str = ""
+    category: str = ""
+    branch_name: str = ""
+    status: str = "draft"
+
+
+class ScoutProposalTestedPayload(BaseModel):
+    """Payload for scout.proposal_tested topic."""
+
+    proposal_id: str
+    passed: bool = False
+    total_tests: int = 0
+    passed_tests: int = 0
+    failed_tests: int = 0
+    duration_s: float = 0.0
+
+
+class ScoutProposalAppliedPayload(BaseModel):
+    """Payload for scout.proposal_applied topic."""
+
+    proposal_id: str
+    title: str = ""
+    branch_name: str = ""
+    decision: str = "applied"
+
+
+class ScoutLearningRecordedPayload(BaseModel):
+    """Payload for scout.learning_recorded topic."""
+
+    record_id: str
+    proposal_id: str = ""
+    decision: str = ""
+    category: str = ""
+    source_type: str = ""
+
+
 # ── Schema Registry ────────────────────────────────────────────────────────
 
 # Maps topic -> payload model for validation
@@ -486,6 +566,14 @@ TOPIC_SCHEMAS: dict[str, type[BaseModel]] = {
     "tasks.contract_violated": TaskContractViolatedPayload,
     "goals.synthesized": GoalSynthesizedPayload,
     "goals.synthesis_failed": GoalSynthesisFailedPayload,
+    "scout.cycle_started": ScoutCycleStartedPayload,
+    "scout.cycle_completed": ScoutCycleCompletedPayload,
+    "scout.finding_discovered": ScoutFindingDiscoveredPayload,
+    "scout.idea_analyzed": ScoutIdeaAnalyzedPayload,
+    "scout.proposal_created": ScoutProposalCreatedPayload,
+    "scout.proposal_tested": ScoutProposalTestedPayload,
+    "scout.proposal_applied": ScoutProposalAppliedPayload,
+    "scout.learning_recorded": ScoutLearningRecordedPayload,
 }
 
 

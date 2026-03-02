@@ -110,6 +110,8 @@ _tool_registry = None
 _tool_gate = None
 _workspace_manager = None
 _discovery_service = None
+_scout_service = None
+_scout_store = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
@@ -526,6 +528,7 @@ async def lifespan(app: FastAPI):
     global _elastic_scaler, _episodic_memory
     global _tool_registry, _tool_gate, _workspace_manager
     global _discovery_service
+    global _scout_service, _scout_store
 
     configure_from_config(get_settings())
 
@@ -796,6 +799,28 @@ async def lifespan(app: FastAPI):
         )
         _inquiry_bridge.start()
 
+        # Innovation Scout — self-improving meta-agent (disabled by default)
+        from qe.config import ScoutConfig, load_config
+        from qe.services.scout import InnovationScoutService
+        from qe.substrate.scout_store import ScoutStore as _ScoutStoreClass
+
+        _scout_config = load_config(Path("config.toml")).scout
+        _scout_store = _ScoutStoreClass(db_path=_db_path)
+        await _scout_store.initialize()
+        _scout_service = InnovationScoutService(
+            bus=bus,
+            scout_store=_scout_store,
+            config=_scout_config,
+            model=fast_model,
+            balanced_model=balanced_model,
+        )
+        flag_store.define(
+            "innovation_scout",
+            enabled=False,
+            description="Enable Innovation Scout background scouting and proposal generation",
+        )
+        await _scout_service.start()
+
         _goal_store = GoalStore(_substrate.belief_ledger._db_path)
         _planner = PlannerService(
             bus=bus,
@@ -961,6 +986,15 @@ async def lifespan(app: FastAPI):
                 await _discovery_service.stop()
         except Exception:
             log.debug("shutdown.discovery_stop_failed")
+
+        # Shutdown — Innovation Scout
+        try:
+            if _scout_service is not None:
+                await _scout_service.stop()
+        except Exception:
+            log.debug("shutdown.scout_stop_failed")
+        _scout_service = None
+        _scout_store = None
 
         # Shutdown — Inquiry Bridge
         try:
@@ -1508,6 +1542,113 @@ async def inquiry_bridge_status():
     return _inquiry_bridge.status()
 
 
+# ── Innovation Scout ──────────────────────────────────────────────────────
+
+
+@app.get("/api/scout/status")
+async def scout_status():
+    """Return scout service status."""
+    if _scout_service is None:
+        return {"running": False}
+    return _scout_service.status()
+
+
+@app.get("/api/scout/proposals")
+async def scout_proposals(status: str | None = None, limit: int = 50):
+    """List scout proposals with optional status filter."""
+    if _scout_store is None:
+        return {"proposals": [], "count": 0}
+    proposals = await _scout_store.list_proposals(status=status, limit=limit)
+    return {
+        "proposals": [p.model_dump(mode="json") for p in proposals],
+        "count": len(proposals),
+    }
+
+
+@app.get("/api/scout/proposals/{proposal_id}")
+async def scout_proposal_detail(proposal_id: str):
+    """Return full proposal detail with diffs and test results."""
+    if _scout_store is None:
+        return JSONResponse({"error": "Scout not initialized"}, status_code=503)
+    proposal = await _scout_store.get_proposal(proposal_id)
+    if proposal is None:
+        return JSONResponse({"error": "Proposal not found"}, status_code=404)
+    return proposal.model_dump(mode="json")
+
+
+@app.post("/api/scout/proposals/{proposal_id}/approve")
+async def scout_approve(proposal_id: str):
+    """Approve a scout proposal — writes HIL decision file."""
+    if _scout_store is None:
+        return JSONResponse({"error": "Scout not initialized"}, status_code=503)
+    proposal = await _scout_store.get_proposal(proposal_id)
+    if proposal is None:
+        return JSONResponse({"error": "Proposal not found"}, status_code=404)
+    if proposal.status != "pending_review":
+        return JSONResponse(
+            {"error": f"Cannot approve proposal in status '{proposal.status}'"},
+            status_code=400,
+        )
+
+    # Write HIL decision file
+    hil_dir = Path("data/hil_queue/completed")
+    hil_dir.mkdir(parents=True, exist_ok=True)
+    if proposal.hil_envelope_id:
+        decision_file = hil_dir / f"{proposal.hil_envelope_id}.json"
+        decision_file.write_text(
+            json.dumps({
+                "decision": "approved",
+                "decided_at": datetime.now(UTC).isoformat(),
+            }, indent=2),
+            encoding="utf-8",
+        )
+
+    return {"status": "approved", "proposal_id": proposal_id}
+
+
+@app.post("/api/scout/proposals/{proposal_id}/reject")
+async def scout_reject(proposal_id: str, body: dict[str, Any] | None = None):
+    """Reject a scout proposal with optional reason."""
+    if _scout_store is None:
+        return JSONResponse({"error": "Scout not initialized"}, status_code=503)
+    proposal = await _scout_store.get_proposal(proposal_id)
+    if proposal is None:
+        return JSONResponse({"error": "Proposal not found"}, status_code=404)
+    if proposal.status != "pending_review":
+        return JSONResponse(
+            {"error": f"Cannot reject proposal in status '{proposal.status}'"},
+            status_code=400,
+        )
+
+    reason = ""
+    if body:
+        reason = body.get("reason", "")
+
+    # Write HIL decision file
+    hil_dir = Path("data/hil_queue/completed")
+    hil_dir.mkdir(parents=True, exist_ok=True)
+    if proposal.hil_envelope_id:
+        decision_file = hil_dir / f"{proposal.hil_envelope_id}.json"
+        decision_file.write_text(
+            json.dumps({
+                "decision": "rejected",
+                "reason": reason,
+                "decided_at": datetime.now(UTC).isoformat(),
+            }, indent=2),
+            encoding="utf-8",
+        )
+
+    return {"status": "rejected", "proposal_id": proposal_id, "reason": reason}
+
+
+@app.get("/api/scout/learning")
+async def scout_learning():
+    """Return feedback stats (approval rate by category/source)."""
+    if _scout_store is None:
+        return {"total": 0, "approved": 0, "rejected": 0, "approval_rate": 0.0}
+    return await _scout_store.get_feedback_stats()
+
+
 @app.get("/api/prompts/mutator/status")
 async def prompt_mutator_status():
     """Return prompt mutator status."""
@@ -1834,6 +1975,7 @@ async def status():
         "arena": _competitive_arena.status() if _competitive_arena else None,
         "bridge": _inquiry_bridge.status() if _inquiry_bridge else None,
         "knowledge_loop": _knowledge_loop.status() if _knowledge_loop else None,
+        "scout": _scout_service.status() if _scout_service else None,
     }
 
 

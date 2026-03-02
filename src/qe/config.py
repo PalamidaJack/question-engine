@@ -60,6 +60,24 @@ class SecurityConfig(BaseModel):
     require_auth: bool = False
 
 
+class ScoutConfig(BaseModel):
+    enabled: bool = False
+    poll_interval_seconds: int = Field(default=3600, gt=0)
+    max_findings_per_cycle: int = Field(default=20, gt=0)
+    max_proposals_per_cycle: int = Field(default=3, gt=0)
+    min_composite_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    budget_limit_per_cycle_usd: float = Field(default=1.0, gt=0)
+    hil_timeout_seconds: int = Field(default=86400, gt=0)
+    max_pending_proposals: int = Field(default=10, gt=0)
+    search_topics: list[str] = Field(default_factory=lambda: [
+        "Python asyncio patterns",
+        "FastAPI best practices",
+        "Pydantic v2 patterns",
+        "LLM agent architecture",
+        "cognitive architecture AI",
+    ])
+
+
 class QEConfig(BaseModel):
     """Root configuration model for config.toml."""
 
@@ -69,6 +87,7 @@ class QEConfig(BaseModel):
     substrate: SubstrateConfig = Field(default_factory=SubstrateConfig)
     bus: BusConfig = Field(default_factory=BusConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    scout: ScoutConfig = Field(default_factory=ScoutConfig)
 
     model_config = {"extra": "allow"}
 

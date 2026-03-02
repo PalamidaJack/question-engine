@@ -615,6 +615,10 @@ class TestEventVersioning:
             "bridge.strategy_outcome_recorded",
             "tasks.contract_violated",
             "goals.synthesized", "goals.synthesis_failed",
+            "scout.cycle_started", "scout.cycle_completed",
+            "scout.finding_discovered", "scout.idea_analyzed",
+            "scout.proposal_created", "scout.proposal_tested",
+            "scout.proposal_applied", "scout.learning_recorded",
         }
         assert set(TOPIC_SCHEMAS.keys()) == expected
 

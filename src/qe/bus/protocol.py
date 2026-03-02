@@ -159,6 +159,15 @@ TOPICS = {
     # Model Discovery
     "models.discovered",
     "models.tiers_updated",
+    # Innovation Scout
+    "scout.cycle_started",
+    "scout.cycle_completed",
+    "scout.finding_discovered",
+    "scout.idea_analyzed",
+    "scout.proposal_created",
+    "scout.proposal_tested",
+    "scout.proposal_applied",
+    "scout.learning_recorded",
 }
 
 

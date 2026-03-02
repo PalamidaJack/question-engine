@@ -40,7 +40,7 @@ Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 
 ## Current State (2026-03-02)
 
-~1950 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring + 69 Goal Orchestration Pipeline + 21 Enhanced Onboarding + 84 Competitive Arena), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
+~2165 tests pass (1038 v1 + 82 Phase 1 + 108 Phase 2 + 14 P1+2 wiring + 94 Phase 3 + 88 Phase 4 + 24 lint fixes + 33 Phase 5 + 23 Phase 6 + 6 real LLM integration + 47 Prompt Evolution A-C + 49 Prompt Evolution D + 48 Knowledge Loop + 38 Loop Integration + 39 Strategy Wiring + 69 Goal Orchestration Pipeline + 21 Enhanced Onboarding + 84 Competitive Arena + 158 Innovation Scout), ruff clean. The 6 slow tests require KILOCODE_API_KEY and are excluded from default runs.
 
 ### v2 Redesign — Architecture Plan
 
@@ -213,6 +213,23 @@ All built, tested (84 tests across 4 new + 4 modified test files), lint clean. T
 - `src/qe/api/app.py` — Arena wired into lifespan: `CompetitiveArena(bus=bus, config=ArenaConfig())` created after engine_factory and passed as `arena=` param to `CognitiveAgentPool`. `competitive_arena` feature flag (disabled by default). Multi-agent call site in `POST /api/goals` routes through `run_competitive_inquiry()` when both `multi_agent_mode` and `competitive_arena` flags are enabled — returns `ArenaResult` fields (arena_id, winner_id, sycophancy_detected, match_count, total_cost_usd) or falls back to standard multi-agent merge. `GET /api/arena/status` endpoint returns Elo rankings and arena status. Arena status included in `GET /api/monitoring` response. Shutdown cleanup sets `_competitive_arena = None`
 - Tests: `tests/unit/test_arena_models.py` (13 tests: model construction, ID prefixes, field validation, serialization), `tests/unit/test_competitive_arena.py` (30 tests: Elo math — win/loss/draw/upset/expected/sum preservation, Thompson sampling — BetaArm/agent selection/strong prior, divergence — high/low similarity/fallback, cross-examination — challenges/fallback, defense, judgment — winner/draw/fallback, tournament — 2-agent/3-agent round robin/single elimination/budget exhaustion, sycophancy — skip cross-exam/majority vote/bus events, bus events — correct topics published/no events without bus, status, match pairing), `tests/unit/test_context_compression.py` (9 tests: ConversationSummary model, no-op when short/at limit, LLM compression with key facts, fallback to truncation, custom keep_recent), `tests/integration/test_hil_e2e.py` (8 tests: proposal creates pending file/contains expiry, approved/rejected publishes correct topic, timeout auto-rejects, pending file cleanup on approval/timeout, 3 concurrent proposals with mixed decisions), + extended `test_cognitive_agent_pool.py` (+4 tests: competitive inquiry with/without arena, single result, empty pool), `test_inquiry_bridge.py` (+3 tests: arena completed stores episode/sycophancy in summary/no crash on store failure; lifecycle updated to 5 topics), `test_strategy_models.py` (+1 test: arena_enabled flag)
 
+### Innovation Scout — COMPLETE
+All built, tested (158 tests across 9 test files), lint clean. Self-improving meta-agent that scouts the internet for improvements, generates code, tests in sandboxed git worktrees, and submits proposals for human approval:
+- `src/qe/models/scout.py` — 6 Pydantic models: ScoutFinding, ImprovementIdea, CodeChange, TestResult, ImprovementProposal, ScoutFeedbackRecord (ID prefixes: fnd_, idea_, prop_, sfb_)
+- `src/qe/substrate/scout_store.py` — Async SQLite CRUD for proposals, findings, feedback. Migration: `src/qe/substrate/migrations/0014_scout_proposals.sql` (3 tables)
+- `src/qe/services/scout/sources.py` — SourceManager: LLM-generated search queries via instructor, web_search() execution, web_fetch() content extraction, rejected pattern avoidance
+- `src/qe/services/scout/analyzer.py` — ScoutAnalyzer: LLM relevance/feasibility/impact scoring with composite score (0.4/0.3/0.3 weights), dynamic threshold, approved pattern biasing
+- `src/qe/services/scout/codegen.py` — ScoutCodeGenerator: LLM code change generation with impact/risk/rollback assessments
+- `src/qe/services/scout/sandbox.py` — ScoutSandbox: git worktree creation, file application, pytest execution with timeout, unified diff capture, branch merge/cleanup
+- `src/qe/services/scout/pipeline.py` — ScoutPipeline: 6-phase orchestration (Source Discovery → Content Extraction → Analysis → Code Gen → Sandbox Testing → Submit)
+- `src/qe/services/scout/service.py` — InnovationScoutService: poll loop, HIL approve/reject handlers (git merge on approve, branch delete on reject), learning loop (feedback-driven query refinement, dynamic threshold adjustment)
+- `src/qe/bus/protocol.py` — 8 new topics (134 total): scout.cycle_started/completed, scout.finding_discovered, scout.idea_analyzed, scout.proposal_created/tested/applied, scout.learning_recorded
+- `src/qe/bus/schemas.py` — 8 new payload schemas (52 total)
+- `src/qe/config.py` — ScoutConfig (poll_interval, max_findings/proposals, min_composite_score, budget_limit, hil_timeout, search_topics). Feature flag: `innovation_scout` (disabled by default)
+- `src/qe/api/app.py` — 6 API endpoints: GET /api/scout/status, GET/POST /api/scout/proposals (list, detail, approve, reject), GET /api/scout/learning
+- `src/qe/api/static/index.html` — Scout dashboard tab with proposal cards, syntax-highlighted diffs, test results, approve/reject UI, filter tabs, real-time WebSocket updates
+- Tests: `tests/unit/test_scout_models.py` (29), `test_scout_analyzer.py` (27), `test_scout_sources.py` (31), `test_scout_codegen.py` (7), `test_scout_sandbox.py` (19), `test_scout_pipeline.py` (9), `test_scout_service.py` (12), `test_scout_wiring.py` (16), `tests/integration/test_scout_e2e.py` (8)
+
 ### v1 Recently Completed (pre-redesign)
 - Phase 4: VerificationGate, RecoveryOrchestrator, CheckpointManager
 - Multi-agent orchestration (planner, dispatcher, executor)
@@ -243,3 +260,4 @@ All built, tested (84 tests across 4 new + 4 modified test files), lint clean. T
 - CompetitiveArena tests mock LLM via `patch("qe.runtime.competitive_arena.instructor")` + mock client with response dispatch based on `response_model` parameter (returns `_DivergenceResult`, `_CrossExamResult`, `_DefenseResult`, or `_JudgeResult`); bus events tested via `MagicMock` bus with `publish.call_args_list`
 - Context compression tests mock LLM via `patch("qe.runtime.context_manager.instructor")` + `AsyncMock` returning `ConversationSummary`; verify fallback to truncation on LLM failure
 - HIL integration tests use real `HILService` with `MagicMock` bus and `tmp_path` directories; pre-create decision files before `_handle_hil_request()` so poll picks them up immediately; use `asyncio.wait_for()` with 5s timeout on poll tasks
+- InnovationScoutService is a standalone service (not BaseService subclass), like ModelDiscoveryService. Feature flag: `innovation_scout` (disabled by default). Tests mock pipeline via `AsyncMock()`, feature flags via `patch("qe.services.scout.service.get_flag_store")`. Sources tests patch `qe.tools.web_fetch.web_fetch` (lazy import) and `qe.services.scout.sources.web_search`. Sandbox tests use `patch("qe.services.scout.sandbox.asyncio.create_subprocess_exec")` with `_make_proc()` helper

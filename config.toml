@@ -33,5 +33,22 @@ rrf_k = 60
 # rss_feeds = []
 # webhook_port = 9090
 
+[scout]
+enabled = false
+poll_interval_seconds = 3600
+max_findings_per_cycle = 20
+max_proposals_per_cycle = 3
+min_composite_score = 0.5
+budget_limit_per_cycle_usd = 1.0
+hil_timeout_seconds = 86400
+max_pending_proposals = 10
+search_topics = [
+    "Python asyncio patterns",
+    "FastAPI best practices",
+    "Pydantic v2 patterns",
+    "LLM agent architecture",
+    "cognitive architecture AI",
+]
+
 [api_keys]
 # Do NOT put keys here. Set as environment variables: OPENAI_API_KEY, ANTHROPIC_API_KEY

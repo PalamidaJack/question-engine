@@ -66,6 +66,7 @@
       alert: "M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z M12 9v4 M12 17h.01",
       system: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5",
       settings: "M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z M12 8a4 4 0 100 8 4 4 0 000-8z",
+      scout: "M12 2L2 22h20L12 2z M12 8v6 M12 16h.01",
     };
 
     const Badge = ({ children, color = palette.accent, bg }) => (
@@ -1041,6 +1042,12 @@
       const [claims, setClaims] = useState([]);
       const [events, setEvents] = useState([]);
       const [hilQueue, setHilQueue] = useState([]);
+      const [scoutProposals, setScoutProposals] = useState([]);
+      const [scoutStatus, setScoutStatus] = useState(null);
+      const [scoutFilter, setScoutFilter] = useState("all");
+      const [scoutExpandedDiffs, setScoutExpandedDiffs] = useState({});
+      const [scoutExpandedTests, setScoutExpandedTests] = useState({});
+      const [scoutRejectReasons, setScoutRejectReasons] = useState({});
       const [services, setServices] = useState([]);
       const [entities, setEntities] = useState([]);
       const [engineRunning, setEngineRunning] = useState(false);
@@ -1116,6 +1123,7 @@
                 if (data.topic === "claims.contradiction_detected") {
                   setContradictions(prev => [data.payload, ...prev].slice(0, 50));
                 }
+                if (data.topic && data.topic.startsWith("scout.")) fetchScout();
               }
             } catch {}
           };
@@ -1166,7 +1174,18 @@
         } catch {}
       };
 
-      useEffect(() => { fetchClaims(); fetchHil(); fetchEntities(); }, []);
+      const fetchScout = async () => {
+        try {
+          const [propRes, statusRes] = await Promise.all([
+            fetch(`${API}/api/scout/proposals?limit=50`),
+            fetch(`${API}/api/scout/status`),
+          ]);
+          if (propRes.ok) { setScoutProposals((await propRes.json()).proposals || []); }
+          if (statusRes.ok) { setScoutStatus(await statusRes.json()); }
+        } catch {}
+      };
+
+      useEffect(() => { fetchClaims(); fetchHil(); fetchEntities(); fetchScout(); }, []);
 
       // Fetch settings on mount
       useEffect(() => {
@@ -1421,6 +1440,7 @@
         { id: "entities", label: "Entities", icon: Icons.entities, count: entities.length },
         { id: "hil", label: "HIL Queue", icon: Icons.hil, count: pendingHil },
         { id: "bus", label: "Event Bus", icon: Icons.bus, count: events.length },
+        { id: "scout", label: "Scout", icon: Icons.scout, count: scoutProposals.filter(p => p.status === "pending_review").length },
         { id: "settings", label: "Settings", icon: Icons.settings },
       ];
 
@@ -2023,6 +2043,190 @@
             })()}
 
             {/* SETTINGS */}
+            {/* SCOUT TAB */}
+            {activeTab === "scout" && (() => {
+              const filtered = scoutFilter === "all" ? scoutProposals
+                : scoutProposals.filter(p => {
+                  if (scoutFilter === "pending_review") return p.status === "pending_review";
+                  if (scoutFilter === "applied") return p.status === "applied";
+                  if (scoutFilter === "rejected") return p.status === "rejected";
+                  return true;
+                });
+              const statusColors = { pending_review: palette.yellow || "#f59e0b", applied: palette.green, rejected: palette.red, test_passed: palette.green, test_failed: palette.red, draft: palette.textDim, testing: palette.accent };
+              const statusLabels = { pending_review: "PENDING", applied: "APPLIED", rejected: "REJECTED", test_passed: "TESTS OK", test_failed: "TESTS FAIL", draft: "DRAFT", testing: "TESTING" };
+              const pendingCount = scoutProposals.filter(p => p.status === "pending_review").length;
+              const appliedCount = scoutProposals.filter(p => p.status === "applied").length;
+              const rejectedCount = scoutProposals.filter(p => p.status === "rejected").length;
+              const approvalRate = (appliedCount + rejectedCount) > 0 ? Math.round(appliedCount / (appliedCount + rejectedCount) * 100) : 0;
+
+              const handleApprove = async (id) => {
+                try {
+                  await fetch(`${API}/api/scout/proposals/${id}/approve`, { method: "POST" });
+                  fetchScout();
+                } catch {}
+              };
+              const handleReject = async (id) => {
+                const reason = scoutRejectReasons[id] || "";
+                try {
+                  await fetch(`${API}/api/scout/proposals/${id}/reject`, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ reason }),
+                  });
+                  fetchScout();
+                } catch {}
+              };
+
+              return (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+                  <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, margin: 0 }}>Innovation Scout</h1>
+                  {scoutStatus && <Badge color={scoutStatus.running ? palette.green : palette.textDim}>{scoutStatus.running ? "Running" : "Stopped"}</Badge>}
+                </div>
+                <p style={{ fontSize: 13, color: palette.textDim, marginBottom: 16, fontFamily: FONT_MONO }}>
+                  Cycles: {scoutStatus?.cycles_completed || 0} | Proposals: {scoutProposals.length} | Approved: {appliedCount} | Rate: {approvalRate}%
+                </p>
+
+                {/* Filter tabs */}
+                <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
+                  {[
+                    { key: "all", label: `All (${scoutProposals.length})` },
+                    { key: "pending_review", label: `Pending (${pendingCount})` },
+                    { key: "applied", label: `Applied (${appliedCount})` },
+                    { key: "rejected", label: `Rejected (${rejectedCount})` },
+                  ].map(f => (
+                    <button key={f.key} onClick={() => setScoutFilter(f.key)} style={{
+                      padding: "6px 14px", borderRadius: 5, fontSize: 11, fontFamily: FONT_MONO, fontWeight: 600,
+                      border: `1px solid ${scoutFilter === f.key ? palette.accent + "60" : palette.border}`,
+                      background: scoutFilter === f.key ? palette.accentDim : "transparent",
+                      color: scoutFilter === f.key ? palette.accent : palette.textDim, cursor: "pointer",
+                    }}>{f.label}</button>
+                  ))}
+                </div>
+
+                {filtered.length === 0 ? (
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
+                    <EmptyState icon={Icons.scout} message="No proposals yet. Enable the innovation_scout flag to start scouting." />
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {filtered.map(p => {
+                      const idea = p.idea || {};
+                      const color = statusColors[p.status] || palette.textDim;
+                      const label = statusLabels[p.status] || p.status.toUpperCase();
+                      const isPending = p.status === "pending_review";
+                      const diffExpanded = scoutExpandedDiffs[p.proposal_id];
+                      const testExpanded = scoutExpandedTests[p.proposal_id];
+                      const changes = p.changes || [];
+                      const test = p.test_result;
+
+                      return (
+                        <div key={p.proposal_id} style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "16px 20px" }}>
+                          {/* Header */}
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                            <Badge color={color}>{label}</Badge>
+                            {idea.category && <Badge color={palette.accent}>{idea.category}</Badge>}
+                            {idea.feasibility_score >= 0.7 && <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>easy</span>}
+                          </div>
+
+                          {/* Title & source */}
+                          <div style={{ fontSize: 14, fontWeight: 600, color: palette.textBright, marginBottom: 4 }}>{idea.title || "Untitled"}</div>
+                          {idea.source_url && (
+                            <a href={idea.source_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.accent, textDecoration: "none" }}>
+                              {idea.source_url.slice(0, 60)}...
+                            </a>
+                          )}
+
+                          {/* Impact & Risk */}
+                          {(p.impact_assessment || p.risk_assessment) && (
+                            <div style={{ marginTop: 10, fontSize: 12, color: palette.text, lineHeight: 1.5 }}>
+                              {p.impact_assessment && <div><strong style={{ color: palette.textBright }}>Impact:</strong> {p.impact_assessment}</div>}
+                              {p.risk_assessment && <div><strong style={{ color: palette.textBright }}>Risk:</strong> {p.risk_assessment}</div>}
+                            </div>
+                          )}
+
+                          {/* Code Changes (collapsible) */}
+                          {changes.length > 0 && (
+                            <div style={{ marginTop: 12 }}>
+                              <button onClick={() => setScoutExpandedDiffs(prev => ({ ...prev, [p.proposal_id]: !prev[p.proposal_id] }))} style={{
+                                background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 12, fontFamily: FONT_MONO, color: palette.accent, fontWeight: 600,
+                              }}>{diffExpanded ? "\u25BC" : "\u25B6"} Code Changes ({changes.length} file{changes.length !== 1 ? "s" : ""})</button>
+                              {diffExpanded && (
+                                <div style={{ marginTop: 8 }}>
+                                  {changes.map((c, i) => (
+                                    <div key={i} style={{ marginBottom: 8 }}>
+                                      <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textBright, marginBottom: 4 }}>{c.file_path}</div>
+                                      {c.diff && (
+                                        <pre style={{ background: palette.bg, border: `1px solid ${palette.border}`, borderRadius: 6, padding: 10, fontSize: 11, fontFamily: FONT_MONO, color: palette.text, overflow: "auto", maxHeight: 300, margin: 0, whiteSpace: "pre-wrap" }}>{
+                                          c.diff.split("\n").map((line, li) => {
+                                            let lc = palette.text;
+                                            if (line.startsWith("+") && !line.startsWith("+++")) lc = palette.green;
+                                            else if (line.startsWith("-") && !line.startsWith("---")) lc = palette.red;
+                                            else if (line.startsWith("@@")) lc = palette.accent;
+                                            return <span key={li} style={{ color: lc }}>{line + "\n"}</span>;
+                                          })
+                                        }</pre>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Test Results (collapsible) */}
+                          {test && (
+                            <div style={{ marginTop: 8 }}>
+                              <button onClick={() => setScoutExpandedTests(prev => ({ ...prev, [p.proposal_id]: !prev[p.proposal_id] }))} style={{
+                                background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 12, fontFamily: FONT_MONO, color: palette.accent, fontWeight: 600,
+                              }}>{testExpanded ? "\u25BC" : "\u25B6"} Test Results: {test.passed ? "\u2705" : "\u274C"} {test.passed_tests} passed, {test.failed_tests} failed ({test.duration_s}s)</button>
+                              {testExpanded && test.stdout && (
+                                <pre style={{ background: palette.bg, border: `1px solid ${palette.border}`, borderRadius: 6, padding: 10, fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, overflow: "auto", maxHeight: 200, marginTop: 6, whiteSpace: "pre-wrap" }}>{test.stdout}</pre>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Branch name */}
+                          {p.branch_name && (
+                            <div style={{ marginTop: 8, fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>Branch: {p.branch_name}</div>
+                          )}
+
+                          {/* Approve/Reject buttons */}
+                          {isPending && (
+                            <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 10 }}>
+                              <button onClick={() => handleApprove(p.proposal_id)} style={{
+                                padding: "7px 18px", borderRadius: 5, fontSize: 12, fontWeight: 700, border: "none", cursor: "pointer",
+                                background: palette.green, color: "#fff",
+                              }}>Approve</button>
+                              <button onClick={() => handleReject(p.proposal_id)} style={{
+                                padding: "7px 18px", borderRadius: 5, fontSize: 12, fontWeight: 700, border: "none", cursor: "pointer",
+                                background: palette.red, color: "#fff",
+                              }}>Reject</button>
+                              <input
+                                type="text"
+                                placeholder="Rejection reason..."
+                                value={scoutRejectReasons[p.proposal_id] || ""}
+                                onChange={e => setScoutRejectReasons(prev => ({ ...prev, [p.proposal_id]: e.target.value }))}
+                                style={{
+                                  flex: 1, padding: "7px 10px", borderRadius: 5, fontSize: 12, fontFamily: FONT_MONO,
+                                  border: `1px solid ${palette.border}`, background: palette.bg, color: palette.text, outline: "none",
+                                }}
+                              />
+                            </div>
+                          )}
+
+                          {/* Rejection feedback */}
+                          {p.status === "rejected" && p.reviewer_feedback && (
+                            <div style={{ marginTop: 8, fontSize: 11, fontFamily: FONT_MONO, color: palette.red }}>Reason: {p.reviewer_feedback}</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              );
+            })()}
+
             {activeTab === "settings" && (
               <div>
                 <h1 style={{ fontSize: 22, fontWeight: 700, color: palette.textBright, marginBottom: 4 }}>Settings</h1>
