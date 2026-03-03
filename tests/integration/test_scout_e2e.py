@@ -10,9 +10,9 @@ from qe.models.scout import (
     CodeChange,
     ImprovementIdea,
     ImprovementProposal,
+    SandboxTestResult,
     ScoutFeedbackRecord,
     ScoutFinding,
-    TestResult,
 )
 from qe.substrate.scout_store import ScoutStore
 
@@ -83,7 +83,7 @@ async def test_store_proposal_roundtrip(tmp_path):
         affected_files=["src/qe/tools/web_fetch.py"],
     )
 
-    test_result = TestResult(
+    test_result = SandboxTestResult(
         passed=True,
         total_tests=1950,
         passed_tests=1950,

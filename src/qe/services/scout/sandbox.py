@@ -7,7 +7,7 @@ import logging
 import re
 from pathlib import Path
 
-from qe.models.scout import CodeChange, TestResult
+from qe.models.scout import CodeChange, SandboxTestResult
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class ScoutSandbox:
         self,
         worktree_path: str,
         timeout: int = 120,  # noqa: ASYNC109
-    ) -> TestResult:
+    ) -> SandboxTestResult:
         """Run pytest in the worktree and capture results."""
         import time
 
@@ -122,7 +122,7 @@ class ScoutSandbox:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            return TestResult(
+            return SandboxTestResult(
                 passed=False,
                 stdout="Test execution timed out",
                 stderr="",
@@ -137,7 +137,7 @@ class ScoutSandbox:
         passed_tests, failed_tests, total_tests = _parse_pytest_output(stdout)
         passed = proc.returncode == 0
 
-        return TestResult(
+        return SandboxTestResult(
             passed=passed,
             total_tests=total_tests,
             passed_tests=passed_tests,

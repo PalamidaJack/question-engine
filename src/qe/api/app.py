@@ -118,6 +118,7 @@ _scout_service = None
 _scout_store = None
 _harvest_service = None
 _last_inquiry_profile: dict[str, Any] = {}
+_mcp_bridge = None
 _inquiry_profiling_store = InquiryProfilingStore()
 
 _mass_intelligence_store = None
@@ -556,6 +557,7 @@ async def _shutdown_services() -> None:
     global _scout_service, _scout_store, _harvest_service
     global _mass_intelligence_store, _mass_intelligence_market_agent, _mass_intelligence_executor
     global _prompt_registry
+    global _mcp_bridge, _peer_registry
 
     # Shutdown — EngramCache cleanup
     try:
@@ -575,9 +577,9 @@ async def _shutdown_services() -> None:
                 log.debug(f"shutdown.{name}_stop_failed")
 
     # Stop services in reverse dependency order
-    if "_mcp_bridge" in globals() and globals()["_mcp_bridge"]:
+    if _mcp_bridge:
         try:
-            globals()["_mcp_bridge"].stop()
+            _mcp_bridge.stop()
         except Exception:
             log.debug("shutdown.mcp_bridge_stop_failed")
 
@@ -649,6 +651,7 @@ async def _shutdown_services() -> None:
     _inquiry_engine = None
     _synthesizer = None
     _peer_registry = None
+    _mcp_bridge = None
 
 
 @asynccontextmanager
@@ -665,6 +668,7 @@ async def lifespan(app: FastAPI):
     global _discovery_service
     global _scout_service, _scout_store, _harvest_service
     global _mass_intelligence_store, _mass_intelligence_market_agent, _mass_intelligence_executor
+    global _mcp_bridge
 
     settings = get_settings()
     configure_from_config(settings)

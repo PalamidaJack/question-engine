@@ -13,9 +13,9 @@ from qe.models.scout import (
     CodeChange,
     ImprovementIdea,
     ImprovementProposal,
+    SandboxTestResult,
     ScoutFeedbackRecord,
     ScoutFinding,
-    TestResult,
 )
 
 log = logging.getLogger(__name__)
@@ -302,7 +302,7 @@ def _row_to_proposal(row) -> ImprovementProposal:
     changes = [CodeChange.model_validate(c) for c in changes_raw]
     test_result = None
     if row["test_result_json"]:
-        test_result = TestResult.model_validate_json(row["test_result_json"])
+        test_result = SandboxTestResult.model_validate_json(row["test_result_json"])
 
     return ImprovementProposal(
         proposal_id=row["proposal_id"],

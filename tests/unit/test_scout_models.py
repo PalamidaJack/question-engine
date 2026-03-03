@@ -11,9 +11,9 @@ from qe.models.scout import (
     CodeChange,
     ImprovementIdea,
     ImprovementProposal,
+    SandboxTestResult,
     ScoutFeedbackRecord,
     ScoutFinding,
-    TestResult,
 )
 
 
@@ -196,9 +196,9 @@ class TestCodeChange:
             assert c.change_type == ct
 
 
-class TestTestResult:
+class TestSandboxTestResult:
     def test_construction_with_defaults(self):
-        r = TestResult(passed=True)
+        r = SandboxTestResult(passed=True)
         assert r.passed is True
         assert r.total_tests == 0
         assert r.passed_tests == 0
@@ -208,7 +208,7 @@ class TestTestResult:
         assert r.duration_s == 0.0
 
     def test_full_construction(self):
-        r = TestResult(
+        r = SandboxTestResult(
             passed=False,
             total_tests=10,
             passed_tests=8,
@@ -224,9 +224,9 @@ class TestTestResult:
         assert r.duration_s == pytest.approx(3.14)
 
     def test_serialization_roundtrip(self):
-        r = TestResult(passed=True, total_tests=5, passed_tests=5, duration_s=1.23)
+        r = SandboxTestResult(passed=True, total_tests=5, passed_tests=5, duration_s=1.23)
         data = r.model_dump(mode="json")
-        r2 = TestResult.model_validate(data)
+        r2 = SandboxTestResult.model_validate(data)
         assert r2.passed is True
         assert r2.total_tests == 5
         assert r2.duration_s == pytest.approx(1.23)
@@ -280,7 +280,7 @@ class TestImprovementProposal:
 
     def test_nested_serialization_roundtrip(self, sample_idea):
         change = CodeChange(file_path="src/cache.py", change_type="create", diff="+cache")
-        test_res = TestResult(passed=True, total_tests=3, passed_tests=3)
+        test_res = SandboxTestResult(passed=True, total_tests=3, passed_tests=3)
         p = ImprovementProposal(
             idea=sample_idea,
             status="test_passed",

@@ -9,8 +9,8 @@ import pytest
 from qe.models.scout import (
     CodeChange,
     ImprovementIdea,
+    SandboxTestResult,
     ScoutFinding,
-    TestResult,
 )
 from qe.services.scout.pipeline import ScoutPipeline
 
@@ -64,7 +64,7 @@ async def test_run_cycle_basic_flow():
     """Full cycle: sources → analysis → codegen → sandbox → submit."""
     finding = _make_finding()
     idea = _make_idea()
-    test_result = TestResult(passed=True, total_tests=100, passed_tests=100)
+    test_result = SandboxTestResult(passed=True, total_tests=100, passed_tests=100)
 
     pipeline = _make_pipeline()
     pipeline._sources.generate_queries = AsyncMock(return_value=["query1"])
@@ -119,7 +119,7 @@ async def test_run_cycle_test_failure_skips_proposal():
     """If tests fail, proposal is not submitted."""
     finding = _make_finding()
     idea = _make_idea()
-    test_result = TestResult(passed=False, total_tests=100, failed_tests=5, passed_tests=95)
+    test_result = SandboxTestResult(passed=False, total_tests=100, failed_tests=5, passed_tests=95)
 
     pipeline = _make_pipeline()
     pipeline._sources.generate_queries = AsyncMock(return_value=["q"])
@@ -246,7 +246,7 @@ async def test_hil_envelope_published_for_passing_proposal():
     """A hil.approval_required envelope is published for test-passing proposals."""
     finding = _make_finding()
     idea = _make_idea()
-    test_result = TestResult(passed=True, total_tests=50, passed_tests=50)
+    test_result = SandboxTestResult(passed=True, total_tests=50, passed_tests=50)
 
     pipeline = _make_pipeline()
     pipeline._sources.generate_queries = AsyncMock(return_value=["q"])

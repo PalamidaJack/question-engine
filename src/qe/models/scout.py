@@ -59,7 +59,7 @@ class CodeChange(BaseModel):
     diff: str = ""
 
 
-class TestResult(BaseModel):
+class SandboxTestResult(BaseModel):
     """Result of running tests in the sandbox."""
 
     passed: bool
@@ -83,7 +83,7 @@ class ImprovementProposal(BaseModel):
         "pending_review", "approved", "rejected", "applied", "reverted",
     ] = "draft"
     changes: list[CodeChange] = Field(default_factory=list)
-    test_result: TestResult | None = None
+    test_result: SandboxTestResult | None = None
     impact_assessment: str = ""
     risk_assessment: str = ""
     rollback_plan: str = ""

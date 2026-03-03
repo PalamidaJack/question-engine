@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from qe.models.scout import CodeChange, TestResult
+from qe.models.scout import CodeChange, SandboxTestResult
 from qe.services.scout.sandbox import ScoutSandbox, _parse_pytest_output
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ async def test_apply_changes_runs_git_add_and_commit(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_tests_success():
-    """run_tests returns a passing TestResult when pytest exits 0."""
+    """run_tests returns a passing SandboxTestResult when pytest exits 0."""
     pytest_output = b"50 passed in 12.34s"
     proc = _make_proc(returncode=0, stdout=pytest_output, stderr=b"")
 
@@ -156,7 +156,7 @@ async def test_run_tests_success():
         sandbox = ScoutSandbox()
         result = await sandbox.run_tests("/tmp/fake-worktree", timeout=120)
 
-    assert isinstance(result, TestResult)
+    assert isinstance(result, SandboxTestResult)
     assert result.passed is True
     assert result.passed_tests == 50
     assert result.failed_tests == 0
@@ -166,7 +166,7 @@ async def test_run_tests_success():
 
 @pytest.mark.asyncio
 async def test_run_tests_failure():
-    """run_tests returns a failing TestResult when pytest reports failures."""
+    """run_tests returns a failing SandboxTestResult when pytest reports failures."""
     pytest_output = b"5 failed, 45 passed in 15.00s"
     proc = _make_proc(returncode=1, stdout=pytest_output, stderr=b"")
 
@@ -176,7 +176,7 @@ async def test_run_tests_failure():
         sandbox = ScoutSandbox()
         result = await sandbox.run_tests("/tmp/fake-worktree")
 
-    assert isinstance(result, TestResult)
+    assert isinstance(result, SandboxTestResult)
     assert result.passed is False
     assert result.passed_tests == 45
     assert result.failed_tests == 5
@@ -193,7 +193,7 @@ async def test_run_tests_timeout():
         sandbox = ScoutSandbox()
         result = await sandbox.run_tests("/tmp/fake-worktree", timeout=5)
 
-    assert isinstance(result, TestResult)
+    assert isinstance(result, SandboxTestResult)
     assert result.passed is False
     assert "timed out" in result.stdout.lower()
     assert result.duration_s > 0
