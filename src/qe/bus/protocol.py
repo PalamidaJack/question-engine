@@ -152,6 +152,11 @@ TOPICS = {
     "arena.divergence_checked",
     "arena.sycophancy_fallback",
     "arena.elo_updated",
+    # A2A protocol
+    "a2a.task_received",
+    "a2a.task_completed",
+    "a2a.message_received",
+    "a2a.task_failed",
     # Goal Orchestration Pipeline
     "tasks.contract_violated",
     "goals.synthesized",
@@ -176,6 +181,9 @@ TOPICS = {
     "harvest.gap_explored",
     "harvest.premium_sprint_executed",
     "harvest.model_profiled",
+    # Guardrails
+    "guardrails.triggered",
+    "guardrails.blocked",
 }
 
 

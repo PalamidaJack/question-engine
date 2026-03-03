@@ -276,6 +276,23 @@ _CHAT_TOOL_SCHEMAS: list[dict] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_to_agent",
+            "description": (
+                "Delegate a subtask to an external A2A-compatible agent. Provide agent_url and task_description."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_url": {"type": "string"},
+                    "task_description": {"type": "string"},
+                },
+                "required": ["agent_url", "task_description"],
+            },
+        },
+    },
 ]
 
 
@@ -1144,6 +1161,19 @@ class ChatService:
             log.exception("Knowledge consolidation failed")
             return f"Consolidation error: {e}"
 
+    async def _tool_delegate_to_agent(self, agent_url: str, task_description: str) -> str:
+        """Delegate a subtask to an external A2A-compatible agent using A2AClient."""
+        try:
+            from qe.runtime.a2a_client import A2AClient
+
+            client = A2AClient(agent_url)
+            resp = await client.send_task(description=task_description)
+            task_id = resp.get("task_id") or resp.get("id") or ""
+            return f"Delegated to {agent_url} as task {task_id}"
+        except Exception as e:
+            log.exception("delegate_to_agent_failed")
+            return f"Delegate error: {e}"
+
     # ── Model selection ─────────────────────────────────────────────────
 
     def _select_model_for_iteration(
@@ -1514,6 +1544,9 @@ class ChatService:
             ),
             "consolidate_knowledge": (
                 lambda _p: self._tool_consolidate_knowledge()
+            ),
+            "delegate_to_agent": lambda p: self._tool_delegate_to_agent(
+                p["agent_url"], p["task_description"]
             ),
         }
 

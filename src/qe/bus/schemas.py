@@ -396,6 +396,74 @@ class KnowledgeHypothesisUpdatedPayload(BaseModel):
     probability: float = 0.5
 
 
+# ── Guardrails payloads (Phase 2) ───────────────────────────────────────────
+
+
+class GuardrailResultItem(BaseModel):
+    rule_name: str
+    passed: bool
+    severity: Literal["info", "warning", "block"] = "info"
+    message: str = ""
+
+
+class GuardrailsTriggeredPayload(BaseModel):
+    """Published when guardrails run and report results."""
+
+    request_id: str = ""
+    origin: str = ""
+    results: list[GuardrailResultItem] = Field(default_factory=list)
+
+
+class GuardrailsBlockedPayload(BaseModel):
+    """Published when a guardrail blocks a request."""
+
+    request_id: str = ""
+    origin: str = ""
+    blocking_rule: str = ""
+    reason: str = ""
+
+
+# ── A2A payloads (Phase 4) ───────────────────────────────────────────────
+
+
+class AgentCapability(BaseModel):
+    name: str
+    description: str = ""
+
+
+class AgentSkill(BaseModel):
+    name: str
+    description: str = ""
+
+
+class AgentCardPayload(BaseModel):
+    name: str = "Question Engine"
+    description: str = "Cognitive architecture for autonomous knowledge discovery"
+    url: str = ""
+    version: str = "1.0"
+    capabilities: list[AgentCapability] = Field(default_factory=list)
+    skills: list[AgentSkill] = Field(default_factory=list)
+
+
+class A2ATaskPayload(BaseModel):
+    id: str
+    status: Literal["submitted", "working", "input-required", "completed", "failed"] = "submitted"
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class A2AMessagePayload(BaseModel):
+    task_id: str
+    sender: str = "external"
+    content: dict[str, Any] = Field(default_factory=dict)
+
+
+class A2ATaskStatusPayload(BaseModel):
+    task_id: str
+    status: str
+    reason: str = ""
+
+
 # ── Inquiry Bridge payloads ────────────────────────────────────────────────
 
 

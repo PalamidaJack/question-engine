@@ -94,6 +94,8 @@ class KnowledgeLoop:
         self._contradictions_total = 0
         self._last_cycle_at: datetime | None = None
         self._last_cycle_result: ConsolidationResult | None = None
+        # Cycle history cache (most recent consolidation results)
+        self._cycle_history: list[ConsolidationResult] = []
         self._retired_template_ids: set[str] = set()
         self._retired_sequence_ids: set[str] = set()
 
@@ -280,6 +282,14 @@ class KnowledgeLoop:
         self._contradictions_total += result.contradictions_found
         self._last_cycle_at = datetime.now(UTC)
         self._last_cycle_result = result
+        # Append to cycle history (bounded cache)
+        try:
+            self._cycle_history.append(result)
+            # keep most recent 100 entries
+            if len(self._cycle_history) > 100:
+                self._cycle_history = self._cycle_history[-100:]
+        except Exception:
+            log.debug("knowledge_loop.cycle_history_append_failed")
 
         self._publish("knowledge.consolidation_completed", {
             "episodes_scanned": result.episodes_scanned,
@@ -358,3 +368,13 @@ class KnowledgeLoop:
             )
         except Exception:
             log.debug("knowledge_loop.publish_failed topic=%s", topic)
+
+    def get_history(self, limit: int = 20) -> list[ConsolidationResult]:
+        """Return most recent consolidation results (most-recent-first).
+
+        This is a synchronous accessor intended for lightweight API use.
+        """
+        if limit <= 0:
+            return []
+        # return copies to avoid accidental mutation
+        return list(reversed(self._cycle_history[-limit:]))
