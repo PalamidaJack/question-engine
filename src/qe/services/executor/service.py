@@ -15,6 +15,8 @@ from qe.models.envelope import Envelope
 from qe.models.goal import SubtaskResult
 from qe.runtime.budget import BudgetTracker
 from qe.runtime.rate_limiter import get_rate_limiter
+from qe.runtime.retry import RetryPolicy, CircuitBreaker
+from qe.runtime import otel
 
 log = logging.getLogger(__name__)
 
@@ -91,19 +93,24 @@ class ExecutorService:
         self.tool_registry = tool_registry
         self.tool_gate = tool_gate
         self.workspace_manager = workspace_manager
+        # per-executor policies
+        self._retry_policy = RetryPolicy(max_attempts=5)
+        self._circuit_breaker = CircuitBreaker(failure_threshold=10, recovery_timeout_s=30)
 
     async def start(self) -> None:
-        self.bus.subscribe("tasks.dispatched", self._handle_dispatched)
-        log.info(
-            "executor.started model=%s concurrency=%d tools=%s",
-            self.model,
-            self._semaphore._value,
-            self.tool_registry is not None,
-        )
+        with otel.start_span("executor.start", {"agent_id": self.agent_id}):
+            self.bus.subscribe("tasks.dispatched", self._handle_dispatched)
+            log.info(
+                "executor.started model=%s concurrency=%d tools=%s",
+                self.model,
+                self._semaphore._value,
+                self.tool_registry is not None,
+            )
 
     async def stop(self) -> None:
-        self.bus.unsubscribe("tasks.dispatched", self._handle_dispatched)
-        log.info("executor.stopped")
+        with otel.start_span("executor.stop", {"agent_id": self.agent_id}):
+            self.bus.unsubscribe("tasks.dispatched", self._handle_dispatched)
+            log.info("executor.stopped")
 
     async def _handle_dispatched(self, envelope: Envelope) -> None:
         # Agent routing filter: skip if assigned to a different agent
@@ -128,10 +135,14 @@ class ExecutorService:
 
         for attempt in range(max_retries + 1):
             try:
+                if not self._circuit_breaker.allow_request():
+                    raise RuntimeError("executor.circuit_open")
                 output = await self._execute_task(
                     task_type, description, payload,
                     dependency_context=dependency_context,
                 )
+                # success → reset circuit breaker
+                self._circuit_breaker.record_success()
                 output["_agent_id"] = self.agent_id
                 latency_ms = int((time.monotonic() - start) * 1000)
                 result = SubtaskResult(
@@ -161,7 +172,8 @@ class ExecutorService:
                 })
 
                 if classified.is_retryable and attempt < max_retries:
-                    delay_s = classified.retry_delay_ms / 1000
+                    # use configured retry policy for delay if available
+                    delay_s = self._retry_policy.get_delay(attempt + 1)
                     log.warning(
                         "executor.retry goal_id=%s subtask_id=%s attempt=%d/%d "
                         "delay=%.1fs error=%s",
@@ -186,6 +198,11 @@ class ExecutorService:
                     "executor.failed goal_id=%s subtask_id=%s type=%s error=%s attempts=%d",
                     goal_id, subtask_id, task_type, str(exc), attempt + 1,
                 )
+                # permanent failure → record on circuit breaker
+                try:
+                    self._circuit_breaker.record_failure()
+                except Exception:
+                    pass
                 break
 
         self.bus.publish(
