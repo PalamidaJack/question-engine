@@ -1386,7 +1386,10 @@ class TestSessionPatterns:
 
         svc = _make_service(procedural_memory=mock_pm)
         audit = [
-            {"tool": "deep_research", "params": {}, "result": "Tool error: timeout", "blocked": False},
+            {
+                "tool": "deep_research", "params": {},
+                "result": "Tool error: timeout", "blocked": False,
+            },
         ]
         await svc._extract_session_patterns(audit, 0.002)
 

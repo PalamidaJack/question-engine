@@ -108,6 +108,15 @@ class OpenTelemetryConfig(BaseModel):
     service_name: str = "question-engine"
 
 
+class A2AConfig(BaseModel):
+    enabled: bool = False
+    agent_name: str = "Question Engine"
+    agent_description: str = "Cognitive architecture for autonomous knowledge discovery"
+    require_auth: bool = True
+
+    model_config = {"extra": "allow"}
+
+
 class QEConfig(BaseModel):
     """Root configuration model for config.toml."""
 
@@ -122,21 +131,6 @@ class QEConfig(BaseModel):
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     otel: OpenTelemetryConfig = Field(default_factory=OpenTelemetryConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
-    
-
-class A2AConfig(BaseModel):
-    enabled: bool = False
-    agent_name: str = "Question Engine"
-    agent_description: str = "Cognitive architecture for autonomous knowledge discovery"
-    require_auth: bool = True
-
-
-    class Config:
-        extra = "allow"
-
-# add to QEConfig? keep as top-level attr for load_config convenience
-
-    model_config = {"extra": "allow"}
 
 
 def load_config(path: Path | None = None) -> QEConfig:

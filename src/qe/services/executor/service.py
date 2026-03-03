@@ -13,10 +13,10 @@ import litellm
 from qe.errors import ExecutorContractError, ExecutorToolError, classify_error
 from qe.models.envelope import Envelope
 from qe.models.goal import SubtaskResult
+from qe.runtime import otel
 from qe.runtime.budget import BudgetTracker
 from qe.runtime.rate_limiter import get_rate_limiter
-from qe.runtime.retry import RetryPolicy, CircuitBreaker
-from qe.runtime import otel
+from qe.runtime.retry import CircuitBreaker, RetryPolicy
 
 log = logging.getLogger(__name__)
 

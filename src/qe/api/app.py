@@ -19,11 +19,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from qe.api.a2a import register_a2a_routes
 from qe.api.endpoints.goals import register_goal_routes
+from qe.api.endpoints.guardrails import register_guardrails_routes
 from qe.api.endpoints.memory import register_memory_routes
 from qe.api.endpoints.memory_ops import register_memory_ops_routes
-from qe.api.endpoints.guardrails import register_guardrails_routes
-from qe.api.a2a import register_a2a_routes
 from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTimingMiddleware
 from qe.api.profiling import InquiryProfilingStore
 from qe.api.setup import (
@@ -112,6 +112,7 @@ _synthesizer = None
 _tool_registry = None
 _tool_gate = None
 _workspace_manager = None
+_peer_registry = None
 _discovery_service = None
 _scout_service = None
 _scout_store = None
@@ -542,6 +543,114 @@ def _bus_to_ws_bridge() -> None:
         bus.subscribe(topic, _forward)
 
 
+async def _shutdown_services() -> None:
+    """Gracefully shut down all active services and clear global references."""
+    global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
+    global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
+    global _memory_store, _inquiry_engine
+    global _cognitive_pool, _competitive_arena, _strategy_evolver, _prompt_mutator, _knowledge_loop
+    global _inquiry_bridge, _synthesizer
+    global _elastic_scaler, _episodic_memory
+    global _tool_registry, _tool_gate, _workspace_manager
+    global _discovery_service
+    global _scout_service, _scout_store, _harvest_service
+    global _mass_intelligence_store, _mass_intelligence_market_agent, _mass_intelligence_executor
+    global _prompt_registry
+
+    # Shutdown — EngramCache cleanup
+    try:
+        from qe.runtime.engram_cache import get_engram_cache as _get_cache
+        _cache = _get_cache()
+        cleared = _cache.clear()
+        log.info("engram_cache.cleared count=%d", cleared)
+    except Exception:
+        log.debug("shutdown.engram_cache_clear_failed")
+
+    # Helper to stop a service safely
+    async def _stop_svc(svc, name):
+        if svc:
+            try:
+                await svc.stop()
+            except Exception:
+                log.debug(f"shutdown.{name}_stop_failed")
+
+    # Stop services in reverse dependency order
+    if "_mcp_bridge" in globals() and globals()["_mcp_bridge"]:
+        try:
+            globals()["_mcp_bridge"].stop()
+        except Exception:
+            log.debug("shutdown.mcp_bridge_stop_failed")
+
+    await _stop_svc(_mass_intelligence_market_agent, "mass_intelligence_market_agent")
+
+    if _mass_intelligence_store:
+        try:
+            await _mass_intelligence_store.close()
+        except Exception:
+            log.debug("shutdown.mass_intelligence_store_close_failed")
+
+    await _stop_svc(_discovery_service, "discovery")
+    await _stop_svc(_scout_service, "scout")
+    await _stop_svc(_harvest_service, "harvest")
+    await _stop_svc(_inquiry_bridge, "inquiry_bridge")
+    await _stop_svc(_knowledge_loop, "knowledge_loop")
+    await _stop_svc(_strategy_evolver, "strategy_evolver")
+    await _stop_svc(_prompt_mutator, "prompt_mutator")
+
+    if _prompt_registry:
+        try:
+            await _prompt_registry.persist()
+        except Exception:
+            log.debug("shutdown.prompt_registry_persist_failed")
+
+    # Clear shared refs
+    try:
+        BaseService._shared_episodic_memory = None
+        BaseService._shared_bayesian_belief = None
+        BaseService._shared_context_curator = None
+        BaseService._shared_metacognitor = None
+        BaseService._shared_epistemic_reasoner = None
+        BaseService._shared_dialectic_engine = None
+        BaseService._shared_persistence_engine = None
+        BaseService._shared_insight_crystallizer = None
+        BaseService._shared_tool_registry = None
+        BaseService._shared_tool_gate = None
+    except Exception:
+        log.debug("shutdown.clear_shared_refs_failed")
+
+    for adapter in _active_adapters:
+        try:
+            await adapter.stop()
+        except Exception:
+            log.exception("channel.stop_failed adapter=%s", adapter.channel_name)
+
+    await _stop_svc(_synthesizer, "synthesizer")
+    await _stop_svc(_verification_gate, "verification_gate")
+    await _stop_svc(_executor, "executor")
+    await _stop_svc(_doctor, "doctor")
+    await _stop_svc(_supervisor, "supervisor")
+
+    # Clear globals
+    _mass_intelligence_market_agent = None
+    _mass_intelligence_executor = None
+    _mass_intelligence_store = None
+    _scout_service = None
+    _scout_store = None
+    _harvest_service = None
+    _inquiry_bridge = None
+    _knowledge_loop = None
+    _cognitive_pool = None
+    _competitive_arena = None
+    _strategy_evolver = None
+    _elastic_scaler = None
+    _episodic_memory = None
+    _prompt_mutator = None
+    _prompt_registry = None
+    _inquiry_engine = None
+    _synthesizer = None
+    _peer_registry = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
@@ -549,6 +658,7 @@ async def lifespan(app: FastAPI):
     global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
     global _memory_store, _extra_routes_registered, _inquiry_engine
     global _cognitive_pool, _competitive_arena, _strategy_evolver, _prompt_mutator, _knowledge_loop
+    global _peer_registry
     global _inquiry_bridge, _synthesizer
     global _elastic_scaler, _episodic_memory
     global _tool_registry, _tool_gate, _workspace_manager
@@ -604,8 +714,8 @@ async def lifespan(app: FastAPI):
     readiness.mark_ready("substrate_ready")
 
     # Initialize Mass Intelligence services (always available, even before setup)
+    from qe.services.mass_intelligence import MassIntelligenceExecutor, ModelMarketAgent
     from qe.substrate.model_market import ModelMarketStore
-    from qe.services.mass_intelligence import ModelMarketAgent, MassIntelligenceExecutor
 
     _db_path = _substrate.belief_ledger._db_path
     _mass_intelligence_store = ModelMarketStore(db_path=_db_path)
@@ -819,7 +929,9 @@ async def lifespan(app: FastAPI):
 
         from qe.models.arena import ArenaConfig
         from qe.runtime.competitive_arena import CompetitiveArena
+        from qe.runtime.peer_registry import PeerRegistry
 
+        _peer_registry = PeerRegistry()
         _competitive_arena = CompetitiveArena(bus=bus, config=ArenaConfig())
         _cognitive_pool = CognitiveAgentPool(
             bus=bus,
@@ -885,13 +997,18 @@ async def lifespan(app: FastAPI):
         readiness.mark_ready("knowledge_loop_ready")
 
         # Guardrails pipeline (Phase 2)
-        from qe.runtime.guardrails import GuardrailsPipeline
         from qe.config import load_config
+        from qe.runtime.guardrails import GuardrailsPipeline
 
         _guardrails_config = load_config(Path("config.toml")).guardrails
-        _guardrails_pipeline = GuardrailsPipeline.default_pipeline(config=_guardrails_config, bus=bus)
+        _guardrails_pipeline = GuardrailsPipeline.default_pipeline(
+            config=_guardrails_config, bus=bus,
+        )
         # expose to module globals for endpoints
-        globals().update({"_guardrails_pipeline": _guardrails_pipeline, "_guardrails_config": _guardrails_config})
+        globals().update({
+            "_guardrails_pipeline": _guardrails_pipeline,
+            "_guardrails_config": _guardrails_config,
+        })
         try:
             register_guardrails_routes(app=app, pipeline=_guardrails_pipeline)
         except Exception:
@@ -909,7 +1026,7 @@ async def lifespan(app: FastAPI):
         _inquiry_bridge.start()
 
         # Innovation Scout — self-improving meta-agent (disabled by default)
-        from qe.config import ScoutConfig, load_config
+        from qe.config import load_config
         from qe.services.scout import InnovationScoutService
         from qe.substrate.scout_store import ScoutStore as _ScoutStoreClass
 
@@ -931,7 +1048,6 @@ async def lifespan(app: FastAPI):
         await _scout_service.start()
 
         # Harvest Service — autonomous knowledge improvement via free models
-        from qe.config import HarvestConfig
         from qe.services.harvest import HarvestService
 
         _harvest_config = load_config(Path("config.toml")).harvest
@@ -1125,164 +1241,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Shutdown — EngramCache cleanup
-        try:
-            from qe.runtime.engram_cache import get_engram_cache as _get_cache
-
-            _cache = _get_cache()
-            cleared = _cache.clear()
-            log.info("engram_cache.cleared count=%d", cleared)
-        except Exception:
-            log.debug("shutdown.engram_cache_clear_failed")
-
-        # Shutdown — MCP Bridge
-        try:
-            if "_mcp_bridge" in dir() and _mcp_bridge is not None:
-                _mcp_bridge.stop()
-        except Exception:
-            log.debug("shutdown.mcp_bridge_stop_failed")
-
-        # Shutdown — Mass Intelligence
-        try:
-            if _mass_intelligence_market_agent is not None:
-                await _mass_intelligence_market_agent.stop()
-        except Exception:
-            log.debug("shutdown.mass_intelligence_market_agent_stop_failed")
-
-        try:
-            if _mass_intelligence_store is not None:
-                await _mass_intelligence_store.close()
-        except Exception:
-            log.debug("shutdown.mass_intelligence_store_close_failed")
-
-        _mass_intelligence_market_agent = None
-        _mass_intelligence_executor = None
-        _mass_intelligence_store = None
-
-        # Shutdown — Model Discovery
-        try:
-            if _discovery_service is not None:
-                await _discovery_service.stop()
-        except Exception:
-            log.debug("shutdown.discovery_stop_failed")
-
-        # Shutdown — Innovation Scout
-        try:
-            if _scout_service is not None:
-                await _scout_service.stop()
-        except Exception:
-            log.debug("shutdown.scout_stop_failed")
-        _scout_service = None
-        _scout_store = None
-
-        # Shutdown — Harvest Service
-        try:
-            if _harvest_service is not None:
-                await _harvest_service.stop()
-        except Exception:
-            log.debug("shutdown.harvest_stop_failed")
-        _harvest_service = None
-
-        # Shutdown — Inquiry Bridge
-        try:
-            if _inquiry_bridge is not None:
-                await _inquiry_bridge.stop()
-        except Exception:
-            log.debug("shutdown.inquiry_bridge_stop_failed")
-        _inquiry_bridge = None
-
-        # Shutdown — Knowledge Loop
-        try:
-            if _knowledge_loop is not None:
-                await _knowledge_loop.stop()
-        except Exception:
-            log.debug("shutdown.knowledge_loop_stop_failed")
-        _knowledge_loop = None
-
-        # Shutdown — Phase 4 strategy loop
-        try:
-            if _strategy_evolver is not None:
-                await _strategy_evolver.stop()
-        except Exception:
-            log.debug("shutdown.strategy_evolver_stop_failed")
-
-        _cognitive_pool = None
-        _competitive_arena = None
-        _strategy_evolver = None
-        _elastic_scaler = None
-        _episodic_memory = None
-
-        # Shutdown — prompt mutator
-        try:
-            if _prompt_mutator is not None:
-                await _prompt_mutator.stop()
-        except Exception:
-            log.debug("shutdown.prompt_mutator_stop_failed")
-        _prompt_mutator = None
-
-        # Shutdown — persist prompt registry
-        try:
-            if _prompt_registry is not None:
-                await _prompt_registry.persist()
-        except Exception:
-            log.debug("shutdown.prompt_registry_persist_failed")
-        _prompt_registry = None
-
-        # Shutdown — clear Phase 3 refs
-        _inquiry_engine = None
-
-        # Shutdown — clear cognitive layer + tool refs
-        try:
-            BaseService._shared_episodic_memory = None
-            BaseService._shared_bayesian_belief = None
-            BaseService._shared_context_curator = None
-            BaseService._shared_metacognitor = None
-            BaseService._shared_epistemic_reasoner = None
-            BaseService._shared_dialectic_engine = None
-            BaseService._shared_persistence_engine = None
-            BaseService._shared_insight_crystallizer = None
-            BaseService._shared_tool_registry = None
-            BaseService._shared_tool_gate = None
-        except Exception:
-            log.debug("shutdown.clear_shared_refs_failed")
-
-        for adapter in _active_adapters:
-            try:
-                await adapter.stop()
-            except Exception:
-                log.exception("channel.stop_failed adapter=%s", adapter.channel_name)
-
-        # Shutdown — Synthesizer
-        try:
-            if _synthesizer is not None:
-                await _synthesizer.stop()
-        except Exception:
-            log.debug("shutdown.synthesizer_stop_failed")
-        _synthesizer = None
-
-        try:
-            if _verification_gate:
-                await _verification_gate.stop()
-        except Exception:
-            log.debug("shutdown.verification_gate_stop_failed")
-
-        try:
-            if _executor:
-                await _executor.stop()
-        except Exception:
-            log.debug("shutdown.executor_stop_failed")
-
-        try:
-            if _doctor:
-                await _doctor.stop()
-        except Exception:
-            log.debug("shutdown.doctor_stop_failed")
-
-        try:
-            if _supervisor:
-                await _supervisor.stop()
-        except Exception:
-            log.debug("shutdown.supervisor_stop_failed")
+        await _shutdown_services()
 
         if relay_task:
             relay_task.cancel()
@@ -1764,10 +1723,10 @@ async def mass_intelligence_status():
     """Return mass intelligence services status."""
     if _mass_intelligence_market_agent is None:
         return {"running": False}
-    
+
     stats = await _mass_intelligence_market_agent.get_stats()
     agent_status = _mass_intelligence_market_agent.status()
-    
+
     return {
         "running": agent_status["running"],
         "poll_interval_seconds": agent_status["poll_interval_seconds"],
@@ -1780,7 +1739,7 @@ async def mass_intelligence_models():
     """Return list of available free models."""
     if _mass_intelligence_store is None:
         return {"models": [], "error": "Service not initialized"}
-    
+
     models = await _mass_intelligence_store.get_available_models()
     return {"models": models, "count": len(models)}
 
@@ -1790,12 +1749,12 @@ async def mass_intelligence_query(prompt: str, system_message: str | None = None
     """Execute a prompt across all available free models."""
     if _mass_intelligence_executor is None:
         return {"error": "Service not initialized", "responses": []}
-    
+
     result = await _mass_intelligence_executor.execute(
         prompt=prompt,
         system_message=system_message,
     )
-    
+
     return {
         "prompt": result.prompt,
         "total_models": result.total_models,
@@ -1822,12 +1781,12 @@ async def mass_intelligence_quick(prompt: str, max_models: int = 5):
     """Quick query with limited models for faster response."""
     if _mass_intelligence_executor is None:
         return {"error": "Service not initialized", "responses": []}
-    
+
     result = await _mass_intelligence_executor.quick_query(
         prompt=prompt,
         max_models=max_models,
     )
-    
+
     return {
         "prompt": result.prompt,
         "total_models": result.total_models,
@@ -1854,10 +1813,10 @@ async def mass_intelligence_refresh():
     """Force refresh of model inventory from providers."""
     if _mass_intelligence_market_agent is None:
         return {"error": "Service not initialized"}
-    
+
     await _mass_intelligence_market_agent._scrape_all_providers()
     models = await _mass_intelligence_store.get_available_models()
-    
+
     return {
         "success": True,
         "models_count": len(models),
@@ -1925,7 +1884,7 @@ async def scout_approve(proposal_id: str):
 
     # Write HIL decision file
     hil_dir = Path("data/hil_queue/completed")
-    hil_dir.mkdir(parents=True, exist_ok=True)
+    hil_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
     if proposal.hil_envelope_id:
         decision_file = hil_dir / f"{proposal.hil_envelope_id}.json"
         decision_file.write_text(
@@ -1959,7 +1918,7 @@ async def scout_reject(proposal_id: str, body: dict[str, Any] | None = None):
 
     # Write HIL decision file
     hil_dir = Path("data/hil_queue/completed")
-    hil_dir.mkdir(parents=True, exist_ok=True)
+    hil_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
     if proposal.hil_envelope_id:
         decision_file = hil_dir / f"{proposal.hil_envelope_id}.json"
         decision_file.write_text(
@@ -3050,7 +3009,6 @@ async def chat_stream(message: str = "", session_id: str | None = None):
     """SSE chat stream endpoint. Spawns `ChatService.handle_message` and
     streams typed progress events as Server-Sent Events.
     """
-    from qe.services.chat.events import ChatProgressEvent
 
     if _chat_service is None:
         return JSONResponse({"error": "chat service not available"}, status_code=503)
@@ -3078,3 +3036,298 @@ async def chat_stream(message: str = "", session_id: str | None = None):
                 task.cancel()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ── A2A Peer Registry Endpoints ─────────────────────────────────────
+
+
+@app.get("/api/a2a/peers")
+async def list_peers():
+    """List all registered A2A peers."""
+    if _peer_registry is None:
+        return {"total_peers": 0, "healthy_peers": 0, "peers": []}
+    return _peer_registry.status()
+
+
+@app.post("/api/a2a/peers")
+async def register_peer(request: Request):
+    """Register a new peer agent by URL (auto-discovers capabilities)."""
+    if _peer_registry is None:
+        return JSONResponse(
+            {"error": "Peer registry not initialized"}, status_code=503,
+        )
+    body = await request.json()
+    url = body.get("url", "")
+    if not url:
+        return JSONResponse({"error": "url is required"}, status_code=400)
+
+    peer = await _peer_registry.discover_and_register(url)
+    if peer is None:
+        return JSONResponse(
+            {"error": f"Failed to discover agent at {url}"},
+            status_code=502,
+        )
+    return peer.model_dump()
+
+
+@app.delete("/api/a2a/peers/{peer_id}")
+async def remove_peer(peer_id: str):
+    """Remove a registered peer."""
+    if _peer_registry is None:
+        return JSONResponse(
+            {"error": "Peer registry not initialized"}, status_code=503,
+        )
+    removed = _peer_registry.unregister(peer_id)
+    if not removed:
+        return JSONResponse(
+            {"error": f"Peer not found: {peer_id}"}, status_code=404,
+        )
+    return {"removed": peer_id}
+
+
+@app.get("/api/a2a/peers/{peer_id}/health")
+async def check_peer_health(peer_id: str):
+    """Check health of a registered peer."""
+    if _peer_registry is None:
+        return JSONResponse(
+            {"error": "Peer registry not initialized"}, status_code=503,
+        )
+    peer = _peer_registry.get(peer_id)
+    if peer is None:
+        return JSONResponse(
+            {"error": f"Peer not found: {peer_id}"}, status_code=404,
+        )
+    healthy = await _peer_registry.check_health(peer_id)
+    return {"peer_id": peer_id, "healthy": healthy, "url": peer.url}
+
+
+# ── Interactive API Playground ──────────────────────────────────────
+
+
+_PLAYGROUND_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>QE API Playground</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #0f1117; color: #e0e0e0; }
+    .header { background: #1a1d27; padding: 16px 24px; border-bottom: 1px solid #2a2d37;
+              display: flex; align-items: center; gap: 16px; }
+    .header h1 { margin: 0; font-size: 20px; color: #7c8aff; }
+    .header .badge { background: #2a3a2a; color: #4ade80; padding: 2px 8px;
+                     border-radius: 4px; font-size: 12px; }
+    .container { display: flex; height: calc(100vh - 57px); }
+    .sidebar { width: 280px; background: #14161e; border-right: 1px solid #2a2d37;
+               overflow-y: auto; padding: 12px; }
+    .main { flex: 1; padding: 24px; overflow-y: auto; }
+    .group-title { color: #7c8aff; font-size: 13px; font-weight: 600;
+                   text-transform: uppercase; margin: 16px 0 8px; letter-spacing: 0.5px; }
+    .endpoint { padding: 6px 10px; border-radius: 6px; cursor: pointer;
+                font-size: 13px; margin: 2px 0; display: flex; align-items: center; gap: 8px; }
+    .endpoint:hover { background: #1e2130; }
+    .endpoint.active { background: #1e2844; }
+    .method { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
+              min-width: 36px; text-align: center; }
+    .method.get { background: #1a3a2a; color: #4ade80; }
+    .method.post { background: #3a2a1a; color: #fbbf24; }
+    .method.delete { background: #3a1a1a; color: #f87171; }
+    .method.put { background: #1a2a3a; color: #60a5fa; }
+    .method.ws { background: #2a1a3a; color: #c084fc; }
+    .path { color: #a0a0b0; font-family: monospace; font-size: 12px; }
+    .panel { background: #1a1d27; border-radius: 8px; border: 1px solid #2a2d37;
+             padding: 20px; margin-bottom: 16px; }
+    .panel h2 { margin: 0 0 12px; font-size: 16px; color: #e0e0e0; }
+    .input-group { margin-bottom: 12px; }
+    .input-group label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
+    .input-group input, .input-group textarea, .input-group select {
+      width: 100%; padding: 8px 12px; background: #0f1117; border: 1px solid #2a2d37;
+      border-radius: 6px; color: #e0e0e0; font-family: monospace; font-size: 13px;
+      box-sizing: border-box; }
+    .input-group textarea { min-height: 100px; resize: vertical; }
+    .btn { padding: 8px 20px; border-radius: 6px; border: none; cursor: pointer;
+           font-weight: 600; font-size: 13px; }
+    .btn-primary { background: #7c8aff; color: #fff; }
+    .btn-primary:hover { background: #6b79ee; }
+    .response-box { background: #0a0c14; border: 1px solid #2a2d37; border-radius: 6px;
+                    padding: 16px; font-family: monospace; font-size: 13px;
+                    white-space: pre-wrap; overflow-x: auto; min-height: 60px;
+                    max-height: 500px; overflow-y: auto; }
+    .status { display: inline-block; padding: 2px 8px; border-radius: 4px;
+              font-size: 12px; font-weight: 600; margin-right: 8px; }
+    .status.s2xx { background: #1a3a2a; color: #4ade80; }
+    .status.s4xx { background: #3a2a1a; color: #fbbf24; }
+    .status.s5xx { background: #3a1a1a; color: #f87171; }
+    .timing { color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>QE API Playground</h1>
+    <span class="badge">v0.1.0</span>
+    <span style="color:#666;font-size:13px">Interactive API explorer</span>
+    <a href="/docs" style="margin-left:auto;color:#7c8aff;font-size:13px">
+      OpenAPI Docs
+    </a>
+  </div>
+  <div class="container">
+    <div class="sidebar" id="sidebar"></div>
+    <div class="main" id="main">
+      <div class="panel">
+        <h2>Welcome to the QE API Playground</h2>
+        <p style="color:#888;font-size:14px">
+          Select an endpoint from the sidebar to get started.
+          You can send requests and see live responses.
+        </p>
+      </div>
+    </div>
+  </div>
+<script>
+const ENDPOINTS = [
+  {group:"Health",endpoints:[
+    {m:"GET",p:"/api/health",d:"Basic health check"},
+    {m:"GET",p:"/api/health/ready",d:"Readiness probe"},
+    {m:"GET",p:"/api/health/live",d:"Live health from Doctor"},
+    {m:"GET",p:"/api/status",d:"Full engine status"},
+  ]},
+  {group:"Goals",endpoints:[
+    {m:"POST",p:"/api/goals",d:"Submit a new goal",body:'{"description":""}'},
+    {m:"GET",p:"/api/goals",d:"List all goals"},
+    {m:"GET",p:"/api/goals/{goal_id}",d:"Get goal details",params:["goal_id"]},
+    {m:"GET",p:"/api/goals/{goal_id}/progress",d:"Goal progress DAG",params:["goal_id"]},
+    {m:"GET",p:"/api/goals/{goal_id}/result",d:"Goal result",params:["goal_id"]},
+  ]},
+  {group:"Memory",endpoints:[
+    {m:"POST",p:"/api/memory/search",d:"Cross-tier memory search",
+     body:'{"query":"","tier":"all","top_k":10}'},
+    {m:"GET",p:"/api/memory/tiers",d:"Memory tier status"},
+    {m:"GET",p:"/api/memory/procedural",d:"Procedural memory templates"},
+    {m:"GET",p:"/api/memory/export",d:"Export all memory"},
+  ]},
+  {group:"Chat",endpoints:[
+    {m:"POST",p:"/api/chat",d:"Send chat message",
+     body:'{"message":"","session_id":null}'},
+    {m:"GET",p:"/api/chat/stream",d:"SSE chat stream",params:["message"]},
+  ]},
+  {group:"A2A",endpoints:[
+    {m:"GET",p:"/.well-known/agent.json",d:"Agent discovery card"},
+    {m:"GET",p:"/api/a2a/peers",d:"List registered peers"},
+    {m:"POST",p:"/api/a2a/peers",d:"Register a peer",body:'{"url":""}'},
+    {m:"POST",p:"/api/a2a/tasks",d:"Create A2A task",
+     body:'{"description":""}'},
+  ]},
+  {group:"Guardrails",endpoints:[
+    {m:"GET",p:"/api/guardrails/status",d:"Guardrails status"},
+    {m:"POST",p:"/api/guardrails/configure",d:"Update guardrails",
+     body:'{"content_filter_enabled":true}'},
+  ]},
+  {group:"Claims",endpoints:[
+    {m:"GET",p:"/api/claims",d:"List claims"},
+  ]},
+  {group:"Features",endpoints:[
+    {m:"GET",p:"/api/flags",d:"List feature flags"},
+    {m:"POST",p:"/api/flags/{name}/enable",d:"Enable flag",params:["name"]},
+    {m:"POST",p:"/api/flags/{name}/disable",d:"Disable flag",params:["name"]},
+  ]},
+  {group:"Monitoring",endpoints:[
+    {m:"GET",p:"/api/metrics",d:"Engine metrics"},
+    {m:"GET",p:"/api/bus/stats",d:"Bus statistics"},
+    {m:"GET",p:"/api/arena/status",d:"Arena rankings"},
+    {m:"GET",p:"/api/knowledge/status",d:"Knowledge loop status"},
+    {m:"GET",p:"/api/bridge/status",d:"Inquiry bridge status"},
+    {m:"GET",p:"/api/scout/status",d:"Scout status"},
+  ]},
+];
+
+const sidebar = document.getElementById("sidebar");
+const main = document.getElementById("main");
+
+ENDPOINTS.forEach(g => {
+  const title = document.createElement("div");
+  title.className = "group-title";
+  title.textContent = g.group;
+  sidebar.appendChild(title);
+  g.endpoints.forEach(ep => {
+    const div = document.createElement("div");
+    div.className = "endpoint";
+    div.innerHTML = `<span class="method ${ep.m.toLowerCase()}">${ep.m}</span>`
+      + `<span class="path">${ep.p}</span>`;
+    div.onclick = () => showEndpoint(ep, div);
+    sidebar.appendChild(div);
+  });
+});
+
+function showEndpoint(ep, el) {
+  document.querySelectorAll(".endpoint").forEach(e => e.classList.remove("active"));
+  el.classList.add("active");
+  let paramsHtml = "";
+  if (ep.params) {
+    paramsHtml = ep.params.map(p =>
+      `<div class="input-group"><label>${p}</label>`
+      + `<input id="param-${p}" placeholder="${p}" /></div>`
+    ).join("");
+  }
+  let bodyHtml = "";
+  if (ep.body) {
+    bodyHtml = `<div class="input-group"><label>Request Body (JSON)</label>`
+      + `<textarea id="req-body">${ep.body}</textarea></div>`;
+  }
+  main.innerHTML = `
+    <div class="panel">
+      <h2><span class="method ${ep.m.toLowerCase()}">${ep.m}</span> ${ep.p}</h2>
+      <p style="color:#888;font-size:13px">${ep.d}</p>
+      ${paramsHtml}${bodyHtml}
+      <button class="btn btn-primary" onclick="sendRequest()">Send Request</button>
+    </div>
+    <div class="panel" id="response-panel" style="display:none">
+      <h2>Response <span id="resp-status"></span><span class="timing" id="resp-time"></span></h2>
+      <div class="response-box" id="resp-body"></div>
+    </div>`;
+  main._ep = ep;
+}
+
+async function sendRequest() {
+  const ep = main._ep;
+  if (!ep) return;
+  let path = ep.p;
+  if (ep.params) {
+    ep.params.forEach(p => {
+      const v = document.getElementById("param-"+p)?.value || "";
+      path = path.replace("{"+p+"}", encodeURIComponent(v));
+    });
+  }
+  const opts = {method: ep.m, headers: {"Content-Type":"application/json"}};
+  if (ep.body) {
+    const bodyEl = document.getElementById("req-body");
+    if (bodyEl) opts.body = bodyEl.value;
+  }
+  const panel = document.getElementById("response-panel");
+  panel.style.display = "block";
+  document.getElementById("resp-body").textContent = "Loading...";
+  const t0 = performance.now();
+  try {
+    const resp = await fetch(path, opts);
+    const elapsed = Math.round(performance.now() - t0);
+    const statusEl = document.getElementById("resp-status");
+    const sc = resp.status < 300 ? "s2xx" : resp.status < 500 ? "s4xx" : "s5xx";
+    statusEl.innerHTML = `<span class="status ${sc}">${resp.status}</span>`;
+    document.getElementById("resp-time").textContent = `${elapsed}ms`;
+    const text = await resp.text();
+    try { // noqa: E501
+      const j = JSON.stringify(JSON.parse(text),null,2);
+      document.getElementById("resp-body").textContent = j;
+    } catch { document.getElementById("resp-body").textContent = text; }
+  } catch(e) {
+    document.getElementById("resp-body").textContent = "Error: " + e.message;
+  }
+}
+</script>
+</body>
+</html>"""
+
+
+@app.get("/playground", include_in_schema=False)
+async def playground():
+    """Interactive API playground for exploring QE endpoints."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_PLAYGROUND_HTML)

@@ -2,9 +2,10 @@
 """
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Any
 
 router = APIRouter()
 
@@ -50,6 +51,8 @@ async def guardrails_configure(update: GuardrailsConfigUpdate):
     # rebuild pipeline
     from qe.runtime.guardrails import GuardrailsPipeline
 
-    new_pipeline = GuardrailsPipeline.default_pipeline(config=cfg, bus=getattr(_app_module, "_bus", None))
-    setattr(_app_module, "_guardrails_pipeline", new_pipeline)
+    new_pipeline = GuardrailsPipeline.default_pipeline(
+        config=cfg, bus=getattr(_app_module, "_bus", None),
+    )
+    _app_module._guardrails_pipeline = new_pipeline
     return {"status": "ok", "applied": body}

@@ -44,6 +44,14 @@ otel_app = typer.Typer(help="OpenTelemetry commands")
 app.add_typer(otel_app, name="otel")
 guardrails_app = typer.Typer(help="Guardrails commands")
 app.add_typer(guardrails_app, name="guardrails")
+memory_app = typer.Typer(help="Memory subsystem commands")
+app.add_typer(memory_app, name="memory")
+arena_app = typer.Typer(help="Competitive arena commands")
+app.add_typer(arena_app, name="arena")
+models_app = typer.Typer(help="Model configuration commands")
+app.add_typer(models_app, name="models")
+doctor_app = typer.Typer(help="System diagnostics")
+app.add_typer(doctor_app, name="doctor")
 
 console = Console()
 INBOX_DIR = Path("data/runtime_inbox")
@@ -202,7 +210,9 @@ def guardrails_status() -> None:
 
 @guardrails_app.command("set")
 def guardrails_set(
-    content_filter_enabled: bool | None = typer.Option(None, "--content-filter/--no-content-filter"),
+    content_filter_enabled: bool | None = typer.Option(
+        None, "--content-filter/--no-content-filter",
+    ),
     pii_detection_enabled: bool | None = typer.Option(None, "--pii/--no-pii"),
     cost_guard_enabled: bool | None = typer.Option(None, "--cost-guard/--no-cost-guard"),
     cost_guard_threshold_usd: float | None = typer.Option(None, "--cost-threshold"),
@@ -234,7 +244,9 @@ def guardrails_set(
 
     # Write back to config.toml preserving other fields via simple toml dump
     try:
-        import tomllib, tomli_w
+        import tomllib
+
+        import tomli_w
 
         raw = {}
         if Path("config.toml").exists():
@@ -252,6 +264,426 @@ def guardrails_set(
         console.print("Guardrails updated in config.toml")
     except Exception as e:
         console.print(f"Failed to update config.toml: {e}")
+
+
+@a2a_app.command("list-peers")
+def a2a_list_peers(
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """List registered A2A peers."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"{base_url}/api/a2a/peers", timeout=10)
+        data = resp.json()
+        peers = data.get("peers", [])
+        if not peers:
+            console.print("No peers registered.")
+            return
+
+        table = Table(title=f"A2A Peers ({data.get('total_peers', 0)})")
+        table.add_column("peer_id")
+        table.add_column("name")
+        table.add_column("url")
+        table.add_column("healthy")
+        table.add_column("capabilities")
+        for p in peers:
+            table.add_row(
+                p["peer_id"],
+                p.get("name", ""),
+                p["url"],
+                "[green]yes[/green]" if p.get("healthy") else "[red]no[/red]",
+                ", ".join(p.get("capabilities", []))[:40],
+            )
+        console.print(table)
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@a2a_app.command("register-peer")
+def a2a_register_peer(
+    url: str,
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Register a peer agent by URL (discovers capabilities automatically)."""
+    import httpx
+
+    try:
+        resp = httpx.post(
+            f"{base_url}/api/a2a/peers",
+            json={"url": url},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            console.print(
+                f"[green]Registered peer:[/green] {data.get('peer_id', '?')}"
+                f" ({data.get('name', 'unknown')})"
+            )
+        else:
+            console.print(f"[red]Error:[/red] {resp.text}")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@a2a_app.command("remove-peer")
+def a2a_remove_peer(
+    peer_id: str,
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Remove a registered peer."""
+    import httpx
+
+    try:
+        resp = httpx.delete(
+            f"{base_url}/api/a2a/peers/{peer_id}", timeout=10,
+        )
+        if resp.status_code == 200:
+            console.print(f"[green]Removed peer: {peer_id}[/green]")
+        else:
+            console.print(f"[red]Peer not found: {peer_id}[/red]")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@a2a_app.command("check-peer")
+def a2a_check_peer(
+    peer_id: str,
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Check connectivity of a registered peer."""
+    import httpx
+
+    try:
+        resp = httpx.get(
+            f"{base_url}/api/a2a/peers/{peer_id}/health", timeout=10,
+        )
+        data = resp.json()
+        if data.get("healthy"):
+            console.print(f"[green]Peer {peer_id} is healthy[/green]")
+        else:
+            console.print(f"[red]Peer {peer_id} is unreachable[/red]")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+# ── Memory CLI ──────────────────────────────────────────────────────
+
+
+@memory_app.command("search")
+def memory_search(
+    query: str,
+    tier: str = typer.Option("all", "--tier", help="episodic|belief|procedural|all"),
+    top_k: int = typer.Option(10, "--top-k"),
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Search across memory tiers."""
+    import httpx
+
+    try:
+        resp = httpx.post(
+            f"{base_url}/api/memory/search",
+            json={"query": query, "tier": tier, "top_k": top_k},
+            timeout=30,
+        )
+        console.print_json(data=resp.json())
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@memory_app.command("tiers")
+def memory_tiers(
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Show memory tier status and sizes."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"{base_url}/api/memory/tiers", timeout=10)
+        data = resp.json()
+        for tier_name, info in data.items():
+            if isinstance(info, dict):
+                console.print(f"\n[bold]{tier_name}[/bold]")
+                for k, v in info.items():
+                    console.print(f"  {k}: {v}")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@memory_app.command("export")
+def memory_export(
+    output: Path | None = typer.Option(None, "--output"),  # noqa: B008
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Export all memory tiers to JSON."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"{base_url}/api/memory/export", timeout=30)
+        data = resp.json()
+        if output:
+            output.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            console.print(f"[green]Memory exported to {output}[/green]")
+        else:
+            console.print_json(data=data)
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+# ── Arena CLI ───────────────────────────────────────────────────────
+
+
+@arena_app.command("status")
+def arena_status_cmd(
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Show competitive arena status and Elo rankings."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"{base_url}/api/arena/status", timeout=10)
+        data = resp.json()
+        rankings = data.get("rankings", [])
+        if not rankings:
+            console.print("No arena data yet.")
+            console.print_json(data=data)
+            return
+
+        table = Table(title="Agent Elo Rankings")
+        table.add_column("Agent")
+        table.add_column("Elo")
+        table.add_column("W/L/D")
+        for r in rankings:
+            table.add_row(
+                r.get("agent_id", "?"),
+                str(r.get("elo", 1200)),
+                f"{r.get('wins', 0)}/{r.get('losses', 0)}/{r.get('draws', 0)}",
+            )
+        console.print(table)
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+# ── Models CLI ──────────────────────────────────────────────────────
+
+
+@models_app.command("list")
+def models_list() -> None:
+    """Show configured model tiers from config.toml."""
+    from qe.config import load_config
+
+    cfg = load_config(Path("config.toml"))
+    table = Table(title="Configured Model Tiers")
+    table.add_column("Tier")
+    table.add_column("Model ID")
+    table.add_row("fast", cfg.models.fast)
+    table.add_row("balanced", cfg.models.balanced)
+    table.add_row("powerful", cfg.models.powerful)
+    table.add_row("local", cfg.models.local or "(not set)")
+    console.print(table)
+
+
+@models_app.command("check")
+def models_check(
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Check model availability via the running API server."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"{base_url}/api/status", timeout=10)
+        data = resp.json()
+        budget = data.get("budget", {})
+        console.print(f"Budget used: ${budget.get('used_usd', 0):.2f}")
+        console.print(f"Budget limit: ${budget.get('limit_usd', 0):.2f}")
+        cb = data.get("circuit_breakers", {})
+        if cb:
+            console.print("\nCircuit Breakers:")
+            for name, state in cb.items():
+                c = "green" if state == "closed" else "red"
+                console.print(f"  [{c}]{name}: {state}[/{c}]")
+    except httpx.ConnectError:
+        console.print("[red]Cannot connect to QE API server.[/red]")
+        raise typer.Exit(code=1) from None
+
+
+# ── Doctor CLI ──────────────────────────────────────────────────────
+
+
+@doctor_app.command("check")
+def doctor_check() -> None:
+    """Run system health diagnostics."""
+    from qe.config import load_config
+
+    console.print("[bold]QE Doctor — System Diagnostics[/bold]\n")
+
+    # 1. Config validation
+    try:
+        cfg = load_config(Path("config.toml"))
+        console.print("[green]Config:[/green] config.toml is valid")
+    except Exception as exc:
+        console.print(f"[red]Config:[/red] config.toml invalid — {exc}")
+        cfg = None
+
+    # 2. Data directory
+    data_dir = Path("data")
+    if data_dir.exists():
+        db_files = list(data_dir.glob("*.db"))
+        console.print(
+            f"[green]Data:[/green] {len(db_files)} database(s) in data/"
+        )
+    else:
+        console.print("[yellow]Data:[/yellow] data/ directory not found")
+
+    # 3. Environment
+    env_file = Path(".env")
+    if env_file.exists():
+        lines = env_file.read_text().splitlines()
+        key_count = sum(
+            1 for line in lines
+            if line.strip() and not line.strip().startswith("#")
+        )
+        console.print(f"[green]Env:[/green] .env has {key_count} keys")
+    else:
+        console.print("[yellow]Env:[/yellow] .env file not found")
+
+    # 4. Python version
+    import sys
+    console.print(f"[green]Python:[/green] {sys.version.split()[0]}")
+
+    # 5. Key dependencies
+    deps_ok = True
+    for pkg in ["fastapi", "pydantic", "litellm", "instructor"]:
+        try:
+            __import__(pkg)
+            console.print(f"[green]Dep:[/green] {pkg} installed")
+        except ImportError:
+            console.print(f"[red]Dep:[/red] {pkg} NOT installed")
+            deps_ok = False
+
+    # 6. Config summary
+    if cfg:
+        console.print("\n[bold]Config Summary:[/bold]")
+        console.print(f"  Log level: {cfg.runtime.log_level}")
+        console.print(
+            f"  Budget: ${cfg.budget.monthly_limit_usd:.2f}/month"
+        )
+        console.print(
+            f"  Models: {cfg.models.fast} / {cfg.models.balanced}"
+            f" / {cfg.models.powerful}"
+        )
+        console.print(f"  Guardrails: {'enabled' if cfg.guardrails.enabled else 'disabled'}")
+        console.print(f"  OTEL: {'enabled' if cfg.otel.enabled else 'disabled'}")
+        console.print(f"  A2A: {'enabled' if cfg.a2a.enabled else 'disabled'}")
+        console.print(f"  Scout: {'enabled' if cfg.scout.enabled else 'disabled'}")
+
+    if deps_ok:
+        console.print("\n[green]All checks passed.[/green]")
+    else:
+        console.print("\n[yellow]Some issues found. See above.[/yellow]")
+
+
+@doctor_app.command("connectivity")
+def doctor_connectivity(
+    base_url: str = typer.Option("http://localhost:8000", "--url"),
+) -> None:
+    """Test connectivity to the QE API server and its components."""
+    import httpx
+
+    console.print("[bold]Connectivity Check[/bold]\n")
+
+    # API server
+    try:
+        resp = httpx.get(f"{base_url}/api/health", timeout=5)
+        data = resp.json()
+        console.print(
+            f"[green]API Server:[/green] {data.get('status', 'ok')}"
+        )
+    except httpx.ConnectError:
+        console.print("[red]API Server:[/red] unreachable")
+        raise typer.Exit(code=1) from None
+
+    # Readiness
+    try:
+        resp = httpx.get(f"{base_url}/api/health/ready", timeout=5)
+        data = resp.json()
+        ready = data.get("ready", False)
+        c = "green" if ready else "yellow"
+        console.print(f"[{c}]Readiness:[/{c}] {'ready' if ready else 'not ready'}")
+        phases = data.get("phases", {})
+        for phase, done in phases.items():
+            pc = "green" if done else "yellow"
+            console.print(f"  [{pc}]{phase}: {'done' if done else 'pending'}[/{pc}]")
+    except Exception:
+        console.print("[yellow]Readiness:[/yellow] check failed")
+
+
+@app.command("init")
+def init_wizard() -> None:
+    """Interactive first-time setup wizard."""
+    console.print("[bold]Question Engine — First-Time Setup[/bold]\n")
+
+    config_path = Path("config.toml")
+    env_path = Path(".env")
+
+    if config_path.exists():
+        console.print("[yellow]config.toml already exists.[/yellow]")
+        overwrite = typer.confirm("Overwrite?", default=False)
+        if not overwrite:
+            console.print("Keeping existing config.")
+            return
+
+    # Build basic config
+    console.print("\n[bold]Model Configuration[/bold]")
+    fast = typer.prompt("Fast model", default="gpt-4o-mini")
+    balanced = typer.prompt("Balanced model", default="gpt-4o")
+    powerful = typer.prompt("Powerful model", default="o1-preview")
+
+    console.print("\n[bold]Budget[/bold]")
+    budget = typer.prompt(
+        "Monthly budget limit (USD)", default="50.0", type=float,
+    )
+
+    console.print("\n[bold]Runtime[/bold]")
+    log_level = typer.prompt(
+        "Log level (DEBUG/INFO/WARNING/ERROR)", default="INFO",
+    )
+
+    # Write config.toml
+    config_content = (
+        f'[budget]\nmonthly_limit_usd = {budget}\n\n'
+        f'[runtime]\nlog_level = "{log_level}"\n\n'
+        f'[models]\nfast = "{fast}"\n'
+        f'balanced = "{balanced}"\n'
+        f'powerful = "{powerful}"\n'
+    )
+    config_path.write_text(config_content, encoding="utf-8")
+    console.print(f"\n[green]Wrote {config_path}[/green]")
+
+    # API key setup
+    if not env_path.exists():
+        console.print("\n[bold]API Key Setup[/bold]")
+        api_key = typer.prompt(
+            "OpenAI/LLM API key (or press Enter to skip)", default="",
+        )
+        if api_key:
+            env_path.write_text(
+                f"OPENAI_API_KEY={api_key}\n", encoding="utf-8",
+            )
+            console.print(f"[green]Wrote {env_path}[/green]")
+
+    # Create data directory
+    Path("data").mkdir(exist_ok=True)
+    console.print("[green]Created data/ directory[/green]")
+    console.print("\n[green]Setup complete! Run `qe serve` to start.[/green]")
 
 
 @app.command()

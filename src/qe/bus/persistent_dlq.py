@@ -11,9 +11,8 @@ import logging
 import time
 from typing import Any
 
-import aiosqlite
-
 from qe.models.envelope import Envelope
+from qe.runtime.connection_pool import get_pool_manager
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +48,7 @@ class PersistentDLQ:
 
     async def initialize(self) -> None:
         """Create the DLQ table if it doesn't exist."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             await db.executescript(_CREATE_TABLE)
             await db.commit()
         log.debug("persistent_dlq.initialized db=%s", self._db_path)
@@ -62,7 +61,7 @@ class PersistentDLQ:
         attempts: int,
     ) -> None:
         """Add a failed envelope to the persistent DLQ."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO dead_letter_queue
@@ -91,7 +90,7 @@ class PersistentDLQ:
 
     async def list_entries(self, limit: int = 100) -> list[dict[str, Any]]:
         """List DLQ entries, most recent first."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             cursor = await db.execute(
                 """
                 SELECT envelope_id, topic, source_service_id,
@@ -121,7 +120,7 @@ class PersistentDLQ:
 
     async def get_entry(self, envelope_id: str) -> dict[str, Any] | None:
         """Get a specific DLQ entry by envelope ID."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             cursor = await db.execute(
                 """
                 SELECT envelope_id, topic, source_service_id,
@@ -151,7 +150,7 @@ class PersistentDLQ:
 
     async def remove(self, envelope_id: str) -> bool:
         """Mark a DLQ entry as replayed (soft delete). Returns True if found."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             cursor = await db.execute(
                 """
                 UPDATE dead_letter_queue
@@ -172,7 +171,7 @@ class PersistentDLQ:
 
     async def size(self) -> int:
         """Count active (non-replayed) DLQ entries."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             cursor = await db.execute(
                 "SELECT COUNT(*) FROM dead_letter_queue WHERE replayed = 0"
             )
@@ -181,7 +180,7 @@ class PersistentDLQ:
 
     async def purge(self) -> int:
         """Remove all active DLQ entries. Returns count purged."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             cursor = await db.execute(
                 "DELETE FROM dead_letter_queue WHERE replayed = 0"
             )
@@ -192,7 +191,7 @@ class PersistentDLQ:
 
     async def stats(self) -> dict[str, Any]:
         """Return DLQ statistics."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             cursor = await db.execute(
                 """
                 SELECT

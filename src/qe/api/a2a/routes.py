@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 
-from qe.api.a2a.models import AgentCard, A2AMessage, A2ATask
+from qe.api.a2a.models import A2AMessage, A2ATask, AgentCard
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ async def agent_card():
 @router.post("/api/a2a/tasks")
 async def create_task(payload: dict[str, Any]):
     task_id = payload.get("id") or f"a2a_{uuid.uuid4().hex[:12]}"
-    task = A2ATask(id=task_id)
+    _task = A2ATask(id=task_id)
 
     # Map to an internal goal if planner available
     try:
@@ -62,7 +62,10 @@ async def create_task(payload: dict[str, Any]):
     # publish bus event
     if bus is not None:
         try:
-            bus.publish({"topic": "a2a.task_received", "payload": {"task_id": task_id, "goal_id": goal_id}})
+            bus.publish({
+                "topic": "a2a.task_received",
+                "payload": {"task_id": task_id, "goal_id": goal_id},
+            })
         except Exception:
             pass
 
@@ -88,7 +91,10 @@ async def post_message(task_id: str, request: Request):
         from qe.api import app as _app_module  # type: ignore
         bus = getattr(_app_module, "_bus", None)
         if bus is not None:
-            bus.publish({"topic": "a2a.message_received", "payload": {"task_id": task_id, "message": msg.model_dump()}})
+            bus.publish({
+                "topic": "a2a.message_received",
+                "payload": {"task_id": task_id, "message": msg.model_dump()},
+            })
     except Exception:
         pass
 

@@ -2,13 +2,14 @@
 """
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
-from typing import Any, List
 
 
 class AgentCapabilities(BaseModel):
-    intents: List[str] = Field(default_factory=list)
-    tools: List[str] = Field(default_factory=list)
+    intents: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
 
 
 class AgentSkill(BaseModel):
@@ -22,7 +23,7 @@ class AgentCard(BaseModel):
     url: str = ""
     version: str = "1.0"
     capabilities: AgentCapabilities = Field(default_factory=AgentCapabilities)
-    skills: List[AgentSkill] = Field(default_factory=list)
+    skills: list[AgentSkill] = Field(default_factory=list)
 
 
 class A2AMessage(BaseModel):
@@ -39,5 +40,5 @@ class A2AArtifact(BaseModel):
 class A2ATask(BaseModel):
     id: str
     status: str = "submitted"
-    messages: List[A2AMessage] = Field(default_factory=list)
-    artifacts: List[A2AArtifact] = Field(default_factory=list)
+    messages: list[A2AMessage] = Field(default_factory=list)
+    artifacts: list[A2AArtifact] = Field(default_factory=list)

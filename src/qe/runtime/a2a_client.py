@@ -5,7 +5,8 @@ other A2A-compatible agents. Uses `httpx.AsyncClient` with sensible timeouts.
 """
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 

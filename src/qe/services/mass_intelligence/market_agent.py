@@ -594,21 +594,29 @@ class ModelMarketAgent:
                 await self.store.mark_model_unavailable(
                     provider, model_id, f"{error_code}: {error_message}"
                 )
-                await self.store.resolve_error(error_id, "Marked unavailable based on error analysis")
+                await self.store.resolve_error(
+                    error_id,
+                    "Marked unavailable based on error analysis",
+                )
 
             elif resolution["action"] == "backoff":
                 await self.store.record_failure(provider, model_id, error_message)
-                await self.store.resolve_error(error_id, f"Rate limited - backing off: {resolution['note']}")
+                await self.store.resolve_error(
+                    error_id,
+                    f"Rate limited - backing off: {resolution['note']}",
+                )
 
             elif resolution["action"] == "retry":
-                await self.store.resolve_error(error_id, "Retryable error - will retry on next query")
+                await self.store.resolve_error(
+                    error_id,
+                    "Retryable error - will retry on next query",
+                )
 
             else:
                 await self.store.resolve_error(error_id, f"No action needed: {resolution['note']}")
 
     def _analyze_error(self, error_code: str, error_message: str) -> dict[str, str]:
         """Analyze an error and determine what action to take."""
-        error_code_lower = str(error_code).lower()
         message_lower = error_message.lower()
 
         if error_code in ["404", "model_not_found", "not_found"]:
@@ -629,7 +637,10 @@ class ModelMarketAgent:
                 "note": "Reduce request frequency",
             }
 
-        if error_code in ["500", "502", "503", "504", "internal_error", "bad_gateway", "service_unavailable"]:
+        if error_code in [
+            "500", "502", "503", "504",
+            "internal_error", "bad_gateway", "service_unavailable",
+        ]:
             return {
                 "action": "retry",
                 "note": "Server error - will retry",

@@ -1,0 +1,37 @@
+{
+  "name": "qe-sdk-ts",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Question Engine OS",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/question-engine/os-sdk"
+  },
+  "license": "MIT",
+  "keywords": ["question-engine", "sdk", "api", "client", "a2a", "guardrails"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  }
+}

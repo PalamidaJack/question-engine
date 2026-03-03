@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, List
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -26,7 +26,9 @@ class GuardrailRule:
     name: str = "base"
     enabled: bool = True
 
-    async def check(self, content: str, context: dict[str, Any]) -> GuardrailResult:  # type: ignore[override]
+    async def check(  # type: ignore[override]
+        self, content: str, context: dict[str, Any],
+    ) -> GuardrailResult:
         return GuardrailResult(passed=True, rule_name=self.name)
 
 
@@ -40,7 +42,11 @@ class ContentFilterRule(GuardrailRule):
     async def check(self, content: str, context: dict[str, Any]) -> GuardrailResult:
         for p in self._patterns:
             if re.search(p, content, re.IGNORECASE):
-                return GuardrailResult(passed=False, rule_name=self.name, message=f"pattern matched: {p}", severity="block")
+                return GuardrailResult(
+                    passed=False, rule_name=self.name,
+                    message=f"pattern matched: {p}",
+                    severity="block",
+                )
         return GuardrailResult(passed=True, rule_name=self.name)
 
 
@@ -55,7 +61,10 @@ class PiiDetectorRule(GuardrailRule):
 
     async def check(self, content: str, context: dict[str, Any]) -> GuardrailResult:
         if self._email.search(content) or self._phone.search(content) or self._ssn.search(content):
-            return GuardrailResult(passed=False, rule_name=self.name, message="PII detected", severity="warning")
+            return GuardrailResult(
+                passed=False, rule_name=self.name,
+                message="PII detected", severity="warning",
+            )
         return GuardrailResult(passed=True, rule_name=self.name)
 
 
@@ -66,10 +75,15 @@ class CostGuardRule(GuardrailRule):
         self._threshold = threshold_usd
 
     async def check(self, content: str, context: dict[str, Any]) -> GuardrailResult:
-        # budget tracker lives in context optionally; we simulate by checking context.get('estimated_cost')
+        # budget tracker lives in context optionally;
+        # we simulate by checking context.get('estimated_cost')
         est = float(context.get("estimated_cost_usd", 0.0))
         if est > self._threshold:
-            return GuardrailResult(passed=False, rule_name=self.name, message=f"estimated_cost_usd={est} > threshold", severity="block")
+            return GuardrailResult(
+                passed=False, rule_name=self.name,
+                message=f"estimated_cost_usd={est} > threshold",
+                severity="block",
+            )
         return GuardrailResult(passed=True, rule_name=self.name)
 
 
@@ -77,11 +91,16 @@ class OutputSchemaValidatorRule(GuardrailRule):
     name = "OutputSchemaValidator"
 
     async def check(self, content: str, context: dict[str, Any]) -> GuardrailResult:
-        # If a response schema is present in context, perform a lightweight check (presence of key names)
+        # If a response schema is present in context, perform a
+        # lightweight check (presence of key names)
         schema_keys = context.get("expected_schema_keys") or []
         missing = [k for k in schema_keys if f'"{k}"' not in content and f"'{k}'" not in content]
         if missing:
-            return GuardrailResult(passed=False, rule_name=self.name, message=f"missing keys: {missing}", severity="warning")
+            return GuardrailResult(
+                passed=False, rule_name=self.name,
+                message=f"missing keys: {missing}",
+                severity="warning",
+            )
         return GuardrailResult(passed=True, rule_name=self.name)
 
 
@@ -89,9 +108,14 @@ class HallucinationGuardRule(GuardrailRule):
     name = "HallucinationGuard"
 
     async def check(self, content: str, context: dict[str, Any]) -> GuardrailResult:
-        # Basic heuristic: if content contains phrases like "I think" or "might be" with facts, mark warning
+        # Basic heuristic: if content contains phrases like
+        # "I think" or "might be" with facts, mark warning
         if re.search(r"\b(I think|might be|possibly|could be)\b", content, re.IGNORECASE):
-            return GuardrailResult(passed=True, rule_name=self.name, message="hedging language detected", severity="warning")
+            return GuardrailResult(
+                passed=True, rule_name=self.name,
+                message="hedging language detected",
+                severity="warning",
+            )
         return GuardrailResult(passed=True, rule_name=self.name)
 
 
@@ -101,7 +125,9 @@ class GuardrailsPipeline:
         self._rules: list[GuardrailRule] = rules or []
 
     @classmethod
-    def default_pipeline(cls, config: Any | None = None, bus: Any | None = None) -> "GuardrailsPipeline":
+    def default_pipeline(
+        cls, config: Any | None = None, bus: Any | None = None,
+    ) -> GuardrailsPipeline:
         cfg = config or {}
         rules: list[GuardrailRule] = []
         rules.append(ContentFilterRule())
@@ -137,14 +163,17 @@ class GuardrailsPipeline:
         # for now, same as run_input
         return await self.run_input(text, context)
 
-    def _publish_trigger(self, text: str, context: dict[str, Any], results: list[GuardrailResult]) -> None:
+    def _publish_trigger(
+        self, text: str, context: dict[str, Any],
+        results: list[GuardrailResult],
+    ) -> None:
         if self._bus is None:
             return
         try:
             payload = {
                 "request_id": context.get("request_id", ""),
                 "origin": context.get("origin", ""),
-                "results": [r.dict() for r in results],
+                "results": [r.model_dump() for r in results],
             }
             self._bus.publish({"topic": "guardrails.triggered", "payload": payload})
         except Exception:
@@ -163,4 +192,3 @@ class GuardrailsPipeline:
             self._bus.publish({"topic": "guardrails.blocked", "payload": payload})
         except Exception:
             log.debug("guardrails.publish_block_failed")
-*** End Patch

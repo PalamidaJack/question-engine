@@ -15,6 +15,12 @@ from dotenv import load_dotenv
 
 from qe.models.envelope import Envelope
 from qe.runtime.budget import BudgetTracker
+from qe.services.chat.events import (
+    CompleteEvent,
+    ErrorEvent,
+    LLMCompleteEvent,
+    ToolCompleteEvent,
+)
 from qe.services.chat.schemas import ChatIntent, ChatResponsePayload
 from qe.services.inquiry.schemas import InquiryConfig
 from qe.substrate import Substrate
@@ -281,7 +287,8 @@ _CHAT_TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "delegate_to_agent",
             "description": (
-                "Delegate a subtask to an external A2A-compatible agent. Provide agent_url and task_description."
+                "Delegate a subtask to an external A2A-compatible agent."
+                " Provide agent_url and task_description."
             ),
             "parameters": {
                 "type": "object",
@@ -1218,7 +1225,38 @@ class ChatService:
         def _emit(event: dict) -> None:
             if progress_queue is None:
                 return
-            event.setdefault("type", "chat_progress")
+            phase = event.get("phase", "")
+            iteration = event.get("iteration", 0)
+            # Build typed event models for SSE consumers
+            typed: dict = {}
+            if phase == "llm_complete":
+                typed = LLMCompleteEvent(
+                    iteration=iteration,
+                    model=event.get("model", ""),
+                    call_tokens=event.get("call_tokens", {}),
+                    call_cost_usd=event.get("call_cost_usd", 0.0),
+                    has_tool_calls=event.get("has_tool_calls", False),
+                ).model_dump()
+            elif phase == "tool_complete":
+                typed = ToolCompleteEvent(
+                    iteration=iteration,
+                    tool_name=event.get("tool_name", ""),
+                    result_preview=event.get("result_preview", ""),
+                    duration_ms=event.get("duration_ms", 0.0),
+                ).model_dump()
+            elif phase == "complete":
+                typed = CompleteEvent(
+                    iteration=iteration,
+                    summary=event.get("summary", ""),
+                ).model_dump()
+            elif phase == "error":
+                typed = ErrorEvent(
+                    iteration=iteration,
+                    message=event.get("message", ""),
+                ).model_dump()
+            # Merge typed fields into raw event (typed fields win)
+            event.update(typed)
+            event.setdefault("type", phase or "chat_progress")
             event["elapsed_ms"] = int((time.monotonic() - _loop_start) * 1000)
             event["cumulative_tokens"] = dict(_cumulative_tokens)
             event["cumulative_cost_usd"] = round(_cumulative_cost, 6)

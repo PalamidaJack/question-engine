@@ -73,13 +73,13 @@ class MassIntelligenceExecutor:
     ) -> MassIntelligenceResult:
         """
         Execute a prompt across all available free models.
-        
+
         Args:
             prompt: The user prompt to send to all models
             system_message: Optional system message
             max_concurrent: Max parallel requests (default from init)
             timeout_seconds: Per-model timeout (default from init)
-        
+
         Returns:
             MassIntelligenceResult with all responses
         """
@@ -161,7 +161,7 @@ class MassIntelligenceExecutor:
         prompt: str,
         system_message: str | None,
         semaphore: asyncio.Semaphore,
-        timeout: float,
+        timeout: float,  # noqa: ASYNC109
     ) -> ModelResponse:
         """Call a single model with timeout and error handling."""
         async with semaphore:

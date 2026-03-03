@@ -5,16 +5,14 @@ lightweight circuit breaker to prevent thundering failures.
 """
 from __future__ import annotations
 
-import math
 import random
 import time
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from threading import Lock
-from typing import Callable
 
 
-class CBState(str, Enum):
+class CBState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"

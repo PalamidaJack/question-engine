@@ -7,8 +7,8 @@ or in test environments.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 import logging
+from contextlib import contextmanager
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -23,7 +23,11 @@ except Exception:  # pragma: no cover - optional dependency
     _OTEL_AVAILABLE = False
 
 
-def init_tracing(service_name: str = "question-engine", exporter: str = "console", otlp_endpoint: str | None = None) -> None:
+def init_tracing(
+    service_name: str = "question-engine",
+    exporter: str = "console",
+    otlp_endpoint: str | None = None,
+) -> None:
     """Initialize tracing provider if OpenTelemetry SDK is available.
 
     exporter: "console" or "otlp"
@@ -44,7 +48,10 @@ def init_tracing(service_name: str = "question-engine", exporter: str = "console
             exporter_inst = OTLPSpanExporter(endpoint=otlp_endpoint)
             provider.add_span_processor(BatchSpanProcessor(exporter_inst))
         except Exception:
-            log.exception("otel.init_tracing: failed to configure OTLP exporter; falling back to console")
+            log.exception(
+                "otel.init_tracing: failed to configure OTLP exporter;"
+                " falling back to console",
+            )
             provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 
 
@@ -58,7 +65,7 @@ class _NoopSpan:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         pass
 
-    def __enter__(self) -> "_NoopSpan":
+    def __enter__(self) -> _NoopSpan:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]

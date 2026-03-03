@@ -7,7 +7,6 @@ export helpers.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -51,7 +50,12 @@ async def memory_search(
     async def _episodic_search():
         if episodic is None:
             return []
-        return [ep.model_dump() for ep in await episodic.recall(query=query, top_k=top_k, goal_id=goal_id)]
+        return [
+            ep.model_dump()
+            for ep in await episodic.recall(
+                query=query, top_k=top_k, goal_id=goal_id,
+            )
+        ]
 
     async def _belief_search():
         if substrate is None:
@@ -137,7 +141,10 @@ async def tiers_status() -> dict[str, Any]:
 
     # Procedural (Tier 3)
     if procedural is not None:
-        resp["procedural"] = {"templates": len(getattr(procedural, "_templates", {})), "sequences": len(getattr(procedural, "_sequences", {}))}
+        resp["procedural"] = {
+            "templates": len(getattr(procedural, "_templates", {})),
+            "sequences": len(getattr(procedural, "_sequences", {})),
+        }
     else:
         resp["procedural"] = {}
 
@@ -153,7 +160,10 @@ async def procedural_best(domain: str = "general", top_k: int = 5) -> dict[str, 
 
     templates = await procedural.get_best_templates(domain=domain, top_k=top_k)
     sequences = await procedural.get_best_sequences(domain=domain, top_k=top_k)
-    return {"templates": [t.model_dump() for t in templates], "sequences": [s.model_dump() for s in sequences]}
+    return {
+        "templates": [t.model_dump() for t in templates],
+        "sequences": [s.model_dump() for s in sequences],
+    }
 
 
 @router.get("/working/{goal_id}")
@@ -187,8 +197,11 @@ async def consolidation_history(limit: int = 20) -> dict[str, Any]:
     try:
         hist = kl.get_history(limit=limit)
         return {"history": [h.model_dump() for h in hist]}
-    except Exception:
-        raise HTTPException(status_code=500, detail="failed to retrieve consolidation history")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="failed to retrieve consolidation history",
+        ) from exc
 
 
 @router.post("/export")

@@ -409,6 +409,20 @@ class Metacognitor:
         self._approach_roots.pop(goal_id, None)
         self._current_nodes.pop(goal_id, None)
 
+    def prune_trees(self, max_trees: int = 100) -> int:
+        """Prune oldest approach trees to prevent memory leaks."""
+        if len(self._approach_trees) <= max_trees:
+            return 0
+
+        # Simple FIFO pruning based on insertion order (dict is ordered in Python 3.7+)
+        excess = len(self._approach_trees) - max_trees
+        keys_to_remove = list(self._approach_trees.keys())[:excess]
+
+        for k in keys_to_remove:
+            self.clear_goal(k)
+
+        return len(keys_to_remove)
+
     def status(self) -> dict[str, Any]:
         """Monitoring snapshot."""
         return {

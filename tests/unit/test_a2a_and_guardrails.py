@@ -1,11 +1,9 @@
-import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from fastapi import FastAPI
 from qe.api.a2a import register_a2a_routes
 from qe.api.endpoints.guardrails import register_guardrails_routes
 from qe.api.endpoints.memory_ops import register_memory_ops_routes
-
 
 app = FastAPI()
 register_a2a_routes(app=app)
@@ -31,7 +29,10 @@ def test_create_task_and_messages():
     task_id = j["task_id"]
 
     # post a message
-    r2 = client.post(f"/api/a2a/tasks/{task_id}/messages", json={"sender": "external", "content": {"k": "v"}})
+    r2 = client.post(
+        f"/api/a2a/tasks/{task_id}/messages",
+        json={"sender": "external", "content": {"k": "v"}},
+    )
     assert r2.status_code == 200
     assert r2.json().get("status") == "ok"
 

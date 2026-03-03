@@ -1,6 +1,5 @@
 """Tests for the MCP Bridge."""
 
-import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 

@@ -48,69 +48,77 @@ def _make_evolver(**overrides):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+MOCK_TIERS = {
+    "fast": "openai/google/gemini-2.0-flash",
+    "balanced": "openai/anthropic/claude-sonnet-4",
+    "powerful": "o1-preview",
+}
+
+
+@patch("qe.api.setup.get_current_tiers", return_value=MOCK_TIERS)
 class TestStrategyToInquiryConfig:
     """Tests for the strategy_to_inquiry_config() mapping function."""
 
-    def test_maps_question_batch_size(self):
+    def test_maps_question_batch_size(self, _mock_tiers):
         s = StrategyConfig(name="test", question_batch_size=7)
         cfg = strategy_to_inquiry_config(s)
         assert cfg.questions_per_iteration == 7
 
-    def test_maps_max_depth(self):
+    def test_maps_max_depth(self, _mock_tiers):
         s = StrategyConfig(name="test", max_depth=12)
         cfg = strategy_to_inquiry_config(s)
         assert cfg.max_iterations == 12
 
-    def test_maps_exploration_rate_to_inverse_confidence(self):
+    def test_maps_exploration_rate_to_inverse_confidence(self, _mock_tiers):
         s = StrategyConfig(name="test", exploration_rate=0.3)
         cfg = strategy_to_inquiry_config(s)
         assert cfg.confidence_threshold == pytest.approx(0.7)
 
-    def test_maps_fast_model_tier(self):
+    def test_maps_fast_model_tier(self, _mock_tiers):
         s = StrategyConfig(name="test", preferred_model_tier="fast")
         cfg = strategy_to_inquiry_config(s)
         assert cfg.model_balanced == "openai/google/gemini-2.0-flash"
 
-    def test_maps_balanced_model_tier(self):
+    def test_maps_balanced_model_tier(self, _mock_tiers):
         s = StrategyConfig(name="test", preferred_model_tier="balanced")
         cfg = strategy_to_inquiry_config(s)
         assert cfg.model_balanced == "openai/anthropic/claude-sonnet-4"
 
-    def test_unknown_tier_defaults_to_balanced(self):
+    def test_unknown_tier_defaults_to_balanced(self, _mock_tiers):
         s = StrategyConfig(name="test", preferred_model_tier="premium")
         cfg = strategy_to_inquiry_config(s)
         assert cfg.model_balanced == "openai/anthropic/claude-sonnet-4"
 
-    def test_confidence_threshold_clamped_low(self):
+    def test_confidence_threshold_clamped_low(self, _mock_tiers):
         # exploration_rate=1.0 → 1-1.0=0.0 → clamped to 0.1
         s = StrategyConfig(name="test", exploration_rate=1.0)
         cfg = strategy_to_inquiry_config(s)
         assert cfg.confidence_threshold == pytest.approx(0.1)
 
-    def test_confidence_threshold_clamped_high(self):
+    def test_confidence_threshold_clamped_high(self, _mock_tiers):
         # exploration_rate=0.0 → 1-0.0=1.0 → clamped to 1.0 (stays)
         s = StrategyConfig(name="test", exploration_rate=0.0)
         cfg = strategy_to_inquiry_config(s)
         assert cfg.confidence_threshold == pytest.approx(1.0)
 
-    def test_model_fast_always_gemini(self):
+    def test_model_fast_always_gemini(self, _mock_tiers):
         s = StrategyConfig(name="test", preferred_model_tier="balanced")
         cfg = strategy_to_inquiry_config(s)
         assert cfg.model_fast == "openai/google/gemini-2.0-flash"
 
-    def test_returns_inquiry_config_type(self):
+    def test_returns_inquiry_config_type(self, _mock_tiers):
         s = StrategyConfig(name="test")
         cfg = strategy_to_inquiry_config(s)
         assert isinstance(cfg, InquiryConfig)
 
-    def test_breadth_first_default_strategy(self):
+    def test_breadth_first_default_strategy(self, _mock_tiers):
         cfg = strategy_to_inquiry_config(DEFAULT_STRATEGIES["breadth_first"])
         assert cfg.questions_per_iteration == 5
         assert cfg.max_iterations == 3
         assert cfg.confidence_threshold == pytest.approx(0.7)
         assert cfg.model_balanced == "openai/google/gemini-2.0-flash"
 
-    def test_depth_first_default_strategy(self):
+    def test_depth_first_default_strategy(self, _mock_tiers):
         cfg = strategy_to_inquiry_config(DEFAULT_STRATEGIES["depth_first"])
         assert cfg.questions_per_iteration == 1
         assert cfg.max_iterations == 10

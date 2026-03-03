@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-import aiosqlite
+from qe.runtime.connection_pool import get_pool_manager
 
 log = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ class RoutingOptimizer:
     async def _ensure_table(self) -> None:
         if self._initialized or not self._db_path:
             return
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_pool_manager().acquire(self._db_path) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS routing_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,9 +161,7 @@ class RoutingOptimizer:
 
         if self._db_path:
             await self._ensure_table()
-            async with aiosqlite.connect(
-                self._db_path
-            ) as db:
+            async with get_pool_manager().acquire(self._db_path) as db:
                 await db.execute(
                     "INSERT INTO routing_records "
                     "(model, task_type, success, "

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from qe.models.envelope import Envelope
 from qe.models.genome import Blueprint
+from qe.runtime import otel
 from qe.runtime.budget import BudgetTracker
 from qe.runtime.context_curator import ContextCurator
 from qe.runtime.context_manager import ContextManager
@@ -31,7 +32,6 @@ from qe.runtime.router import AutoRouter
 from qe.runtime.sanitizer import InputSanitizer, SanitizeResult
 from qe.runtime.tool_gate import GateDecision, ToolGate
 from qe.runtime.tools import ToolRegistry
-from qe.runtime import otel
 from qe.services.inquiry.dialectic import DialecticEngine
 from qe.services.inquiry.insight import InsightCrystallizer
 from qe.substrate.bayesian_belief import BayesianBeliefStore
@@ -202,7 +202,10 @@ class BaseService:
             )
             return
 
-        with otel.start_span("service.llm_call", {**envelope_span_attrs, "model": model, "schema": schema.__name__}):
+        with otel.start_span(
+            "service.llm_call",
+            {**envelope_span_attrs, "model": model, "schema": schema.__name__},
+        ):
             response = await llm_task
         if guard_result is not None and guard_result.risk_score >= _sanitizer.threshold:
             llm_task.cancel()
