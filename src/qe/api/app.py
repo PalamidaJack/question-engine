@@ -16,11 +16,14 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from qe.api.endpoints.goals import register_goal_routes
 from qe.api.endpoints.memory import register_memory_routes
+from qe.api.endpoints.memory_ops import register_memory_ops_routes
+from qe.api.endpoints.guardrails import register_guardrails_routes
+from qe.api.a2a import register_a2a_routes
 from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTimingMiddleware
 from qe.api.profiling import InquiryProfilingStore
 from qe.api.setup import (
@@ -556,6 +559,22 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_from_config(settings)
 
+    # Initialize optional OpenTelemetry tracing if enabled in config.toml
+    try:
+        from qe.config import load_config
+        from qe.runtime import otel as _otel
+
+        _cfg = load_config(Path("config.toml"))
+        if getattr(_cfg, "otel", None) and _cfg.otel.enabled:
+            _otel.init_tracing(
+                service_name=_cfg.otel.service_name,
+                exporter=_cfg.otel.exporter,
+                otlp_endpoint=_cfg.otel.otlp_endpoint,
+            )
+            log.info("otel.initialized exporter=%s", _cfg.otel.exporter)
+    except Exception:
+        log.debug("otel.init_failed (optional)")
+
     bus = get_bus()
 
     # Initialize durable event log
@@ -576,6 +595,11 @@ async def lifespan(app: FastAPI):
             app=app,
             memory_store=_memory_store,
         )
+        # Register extended memory operations (Phase 1)
+        try:
+            register_memory_ops_routes(app=app, memory_store=_memory_store)
+        except Exception:
+            log.exception("register_memory_ops_routes_failed")
 
     readiness.mark_ready("substrate_ready")
 
@@ -860,6 +884,19 @@ async def lifespan(app: FastAPI):
         )
         readiness.mark_ready("knowledge_loop_ready")
 
+        # Guardrails pipeline (Phase 2)
+        from qe.runtime.guardrails import GuardrailsPipeline
+        from qe.config import load_config
+
+        _guardrails_config = load_config(Path("config.toml")).guardrails
+        _guardrails_pipeline = GuardrailsPipeline.default_pipeline(config=_guardrails_config, bus=bus)
+        # expose to module globals for endpoints
+        globals().update({"_guardrails_pipeline": _guardrails_pipeline, "_guardrails_config": _guardrails_config})
+        try:
+            register_guardrails_routes(app=app, pipeline=_guardrails_pipeline)
+        except Exception:
+            log.exception("register_guardrails_routes_failed")
+
         # Inquiry Bridge — cross-loop glue
         from qe.runtime.inquiry_bridge import InquiryBridge
 
@@ -936,6 +973,10 @@ async def lifespan(app: FastAPI):
                 dispatcher=_dispatcher,
                 goal_store=_goal_store,
             )
+            try:
+                register_a2a_routes(app=app)
+            except Exception:
+                log.exception("register_a2a_routes_failed")
             _extra_routes_registered = True
 
         # Start the executor service that processes dispatched tasks
@@ -3002,3 +3043,38 @@ async def chat_websocket(websocket: WebSocket):
     finally:
         for topic in pipeline_topics:
             bus.unsubscribe(topic, _pipeline_forwarder)
+
+
+@app.get("/api/chat/stream")
+async def chat_stream(message: str = "", session_id: str | None = None):
+    """SSE chat stream endpoint. Spawns `ChatService.handle_message` and
+    streams typed progress events as Server-Sent Events.
+    """
+    from qe.services.chat.events import ChatProgressEvent
+
+    if _chat_service is None:
+        return JSONResponse({"error": "chat service not available"}, status_code=503)
+
+    progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def event_generator():
+        # Start the chat handler in background
+        task = asyncio.create_task(
+            _chat_service.handle_message(session_id or None, message, progress_queue=progress_queue)
+        )
+        try:
+            while True:
+                ev = await progress_queue.get()
+                if ev is None:
+                    break
+                # Ensure we send valid SSE data lines
+                try:
+                    data = json.dumps(ev)
+                except Exception:
+                    data = json.dumps({"type": "error", "message": "serialization_failed"})
+                yield f"data: {data}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 from qe.bus.bus_metrics import get_bus_metrics
 from qe.bus.protocol import validate_envelope
 from qe.models.envelope import Envelope
+from qe.runtime import otel
+from qe.runtime.retry import RetryPolicy
 
 if TYPE_CHECKING:
     from qe.bus.event_log import EventLog
@@ -80,6 +82,8 @@ class MemoryBus:
 
         # ── Retry configuration ──
         self._max_retries = max_retries
+        # pluggable retry policy (used to compute backoff)
+        self._retry_policy = RetryPolicy(max_attempts=max_retries + 1)
 
         # ── Idempotency: dedup cache (envelope_id → timestamp) ──
         self._seen_ids: dict[str, float] = {}
@@ -145,43 +149,48 @@ class MemoryBus:
             envelope.correlation_id,
         )
 
-        # Record bus metrics
+        # Record bus metrics and trace the publish
         get_bus_metrics().record_publish(envelope.topic)
+        span_attrs = {
+            "topic": envelope.topic,
+            "envelope.id": envelope.envelope_id,
+            "source": envelope.source_service_id,
+        }
+        with otel.start_span("bus.publish", span_attrs):
+            # Notify publish listeners (used by Supervisor for loop detection)
+            for listener in self._publish_listeners:
+                listener(envelope)
 
-        # Notify publish listeners (used by Supervisor for loop detection)
-        for listener in self._publish_listeners:
-            listener(envelope)
+            # Fire-and-forget durable logging
+            if self._event_log is not None:
+                try:
+                    asyncio.get_running_loop()
+                    asyncio.create_task(self._log_event(envelope))
+                except RuntimeError:
+                    pass  # No event loop — skip durable logging
+            handlers = self._subscribers.get(envelope.topic, [])
+            if not handlers:
+                return []
 
-        # Fire-and-forget durable logging
-        if self._event_log is not None:
             try:
                 asyncio.get_running_loop()
-                asyncio.create_task(self._log_event(envelope))
+                running_loop = True
             except RuntimeError:
-                pass  # No event loop — skip durable logging
+                running_loop = False
 
-        handlers = self._subscribers.get(envelope.topic, [])
-        if not handlers:
-            return []
+            tasks: list[asyncio.Task] = []
+            for handler in handlers:
+                if running_loop:
+                    task = asyncio.create_task(
+                        self._guarded_call(handler, envelope)
+                    )
+                    task.add_done_callback(self._handle_task_exception)
+                    tasks.append(task)
+                else:
+                    asyncio.run(self._guarded_call(handler, envelope))
 
-        try:
-            asyncio.get_running_loop()
-            running_loop = True
-        except RuntimeError:
-            running_loop = False
-
-        tasks: list[asyncio.Task] = []
-        for handler in handlers:
-            if running_loop:
-                task = asyncio.create_task(
-                    self._guarded_call(handler, envelope)
-                )
-                task.add_done_callback(self._handle_task_exception)
-                tasks.append(task)
-            else:
-                asyncio.run(self._guarded_call(handler, envelope))
-
-        return tasks
+            return tasks
+        # end span context
 
     def publish_sync(self, topic: str, payload: dict[str, Any]) -> None:
         """Convenience method for fire-and-forget publishing with just topic + payload.
@@ -288,63 +297,68 @@ class MemoryBus:
 
         for attempt in range(total_attempts):
             start = time.monotonic()
-            try:
-                result = handler(envelope)
-                if inspect.isawaitable(result):
-                    await result
-                elapsed_ms = (time.monotonic() - start) * 1000
-                log.debug(
-                    "bus.handler_done handler=%s topic=%s envelope_id=%s "
-                    "attempt=%d duration_ms=%.1f",
-                    handler_name,
-                    envelope.topic,
-                    envelope.envelope_id,
-                    attempt + 1,
-                    elapsed_ms,
-                )
-                get_bus_metrics().record_handler_done(
-                    envelope.topic, elapsed_ms
-                )
-                return  # success
-            except Exception as exc:
-                last_error = exc
-                elapsed_ms = (time.monotonic() - start) * 1000
-                if not is_retryable(exc):
-                    get_bus_metrics().record_handler_error(envelope.topic)
-                    log.warning(
-                        "bus.non_retryable handler=%s error=%s",
+            span_attrs = {
+                "handler": handler_name,
+                "topic": envelope.topic,
+                "attempt": attempt + 1,
+            }
+            with otel.start_span("bus.handler_attempt", span_attrs):
+                try:
+                    result = handler(envelope)
+                    if inspect.isawaitable(result):
+                        await result
+                    elapsed_ms = (time.monotonic() - start) * 1000
+                    log.debug(
+                        "bus.handler_done handler=%s topic=%s envelope_id=%s "
+                        "attempt=%d duration_ms=%.1f",
                         handler_name,
-                        str(exc),
-                    )
-                    break  # fall through to DLQ
-                if attempt < self._max_retries:
-                    jitter = random.uniform(0, _DEFAULT_RETRY_BASE_DELAY)
-                    delay = _DEFAULT_RETRY_BASE_DELAY * (2**attempt) + jitter
-                    log.warning(
-                        "bus.handler_retry handler=%s envelope_id=%s "
-                        "topic=%s attempt=%d/%d error=%s delay=%.2fs",
-                        handler_name,
-                        envelope.envelope_id,
                         envelope.topic,
+                        envelope.envelope_id,
                         attempt + 1,
-                        total_attempts,
-                        str(exc),
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    get_bus_metrics().record_handler_error(envelope.topic)
-                    log.error(
-                        "bus.handler_failed_permanently handler=%s "
-                        "envelope_id=%s topic=%s attempts=%d error=%s "
-                        "duration_ms=%.1f",
-                        handler_name,
-                        envelope.envelope_id,
-                        envelope.topic,
-                        total_attempts,
-                        str(exc),
                         elapsed_ms,
                     )
+                    get_bus_metrics().record_handler_done(
+                        envelope.topic, elapsed_ms
+                    )
+                    return  # success
+                except Exception as exc:
+                    last_error = exc
+                    elapsed_ms = (time.monotonic() - start) * 1000
+                    if not is_retryable(exc):
+                        get_bus_metrics().record_handler_error(envelope.topic)
+                        log.warning(
+                            "bus.non_retryable handler=%s error=%s",
+                            handler_name,
+                            str(exc),
+                        )
+                        break  # fall through to DLQ
+                    if attempt < self._max_retries:
+                        delay = self._retry_policy.get_delay(attempt + 1)
+                        log.warning(
+                            "bus.handler_retry handler=%s envelope_id=%s "
+                            "topic=%s attempt=%d/%d error=%s delay=%.2fs",
+                            handler_name,
+                            envelope.envelope_id,
+                            envelope.topic,
+                            attempt + 1,
+                            total_attempts,
+                            str(exc),
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        get_bus_metrics().record_handler_error(envelope.topic)
+                        log.error(
+                            "bus.handler_failed_permanently handler=%s "
+                            "envelope_id=%s topic=%s attempts=%d error=%s "
+                            "duration_ms=%.1f",
+                            handler_name,
+                            envelope.envelope_id,
+                            envelope.topic,
+                            total_attempts,
+                            str(exc),
+                            elapsed_ms,
+                        )
 
         # All retries exhausted → route to DLQ
         if last_error is not None:
@@ -366,32 +380,39 @@ class MemoryBus:
         entry = DeadLetterEntry(envelope, handler_name, error, attempts)
         self._dlq.append(entry)
         get_bus_metrics().record_dlq(envelope.topic)
-        log.error(
-            "bus.dlq_routed envelope_id=%s topic=%s handler=%s "
-            "error=%s attempts=%d dlq_size=%d",
-            envelope.envelope_id,
-            envelope.topic,
-            handler_name,
-            error,
-            attempts,
-            len(self._dlq),
-        )
+        span_attrs = {
+            "envelope.id": envelope.envelope_id,
+            "topic": envelope.topic,
+            "handler": handler_name,
+            "attempts": attempts,
+        }
+        with otel.start_span("bus.dlq_routed", span_attrs):
+            log.error(
+                "bus.dlq_routed envelope_id=%s topic=%s handler=%s "
+                "error=%s attempts=%d dlq_size=%d",
+                envelope.envelope_id,
+                envelope.topic,
+                handler_name,
+                error,
+                attempts,
+                len(self._dlq),
+            )
 
-        # Publish DLQ notification (without recursion — DLQ topic handlers
-        # are fire-and-forget with no retry)
-        try:
-            asyncio.get_running_loop()
-            dlq_handlers = self._subscribers.get(_DLQ_TOPIC, [])
-            for dlq_handler in dlq_handlers:
-                dlq_envelope = Envelope(
-                    topic=_DLQ_TOPIC,
-                    source_service_id="bus",
-                    correlation_id=envelope.envelope_id,
-                    payload=entry.to_dict(),
-                )
-                asyncio.create_task(self._safe_call_no_retry(dlq_handler, dlq_envelope))
-        except RuntimeError:
-            pass
+            # Publish DLQ notification (without recursion — DLQ topic handlers
+            # are fire-and-forget with no retry)
+            try:
+                asyncio.get_running_loop()
+                dlq_handlers = self._subscribers.get(_DLQ_TOPIC, [])
+                for dlq_handler in dlq_handlers:
+                    dlq_envelope = Envelope(
+                        topic=_DLQ_TOPIC,
+                        source_service_id="bus",
+                        correlation_id=envelope.envelope_id,
+                        payload=entry.to_dict(),
+                    )
+                    asyncio.create_task(self._safe_call_no_retry(dlq_handler, dlq_envelope))
+            except RuntimeError:
+                pass
 
     async def _safe_call_no_retry(
         self,

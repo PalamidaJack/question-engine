@@ -92,6 +92,22 @@ class HarvestConfig(BaseModel):
     cycle_timeout_seconds: int = Field(default=300, gt=0)
 
 
+class GuardrailsConfig(BaseModel):
+    enabled: bool = True
+    content_filter_enabled: bool = True
+    pii_detection_enabled: bool = False
+    cost_guard_enabled: bool = True
+    cost_guard_threshold_usd: float = Field(default=5.0, gt=0)
+    hallucination_guard_enabled: bool = False
+
+
+class OpenTelemetryConfig(BaseModel):
+    enabled: bool = False
+    exporter: Literal["console", "otlp"] = "console"
+    otlp_endpoint: str | None = None
+    service_name: str = "question-engine"
+
+
 class QEConfig(BaseModel):
     """Root configuration model for config.toml."""
 
@@ -103,6 +119,22 @@ class QEConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     scout: ScoutConfig = Field(default_factory=ScoutConfig)
     harvest: HarvestConfig = Field(default_factory=HarvestConfig)
+    guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
+    otel: OpenTelemetryConfig = Field(default_factory=OpenTelemetryConfig)
+    a2a: A2AConfig = Field(default_factory=A2AConfig)
+    
+
+class A2AConfig(BaseModel):
+    enabled: bool = False
+    agent_name: str = "Question Engine"
+    agent_description: str = "Cognitive architecture for autonomous knowledge discovery"
+    require_auth: bool = True
+
+
+    class Config:
+        extra = "allow"
+
+# add to QEConfig? keep as top-level attr for load_config convenience
 
     model_config = {"extra": "allow"}
 

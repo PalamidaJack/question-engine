@@ -50,6 +50,26 @@ search_topics = [
     "cognitive architecture AI",
 ]
 
+[guardrails]
+enabled = true
+content_filter_enabled = true
+pii_detection_enabled = false
+cost_guard_enabled = true
+cost_guard_threshold_usd = 5.0
+hallucination_guard_enabled = false
+
+[a2a]
+enabled = false
+agent_name = "Question Engine"
+agent_description = "Cognitive architecture for autonomous knowledge discovery"
+require_auth = true
+
+[otel]
+enabled = false
+exporter = "console"
+otlp_endpoint = ""
+service_name = "question-engine"
+
 [harvest]
 enabled = false
 poll_interval_seconds = 1800

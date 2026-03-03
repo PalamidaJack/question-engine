@@ -31,6 +31,7 @@ from qe.runtime.router import AutoRouter
 from qe.runtime.sanitizer import InputSanitizer, SanitizeResult
 from qe.runtime.tool_gate import GateDecision, ToolGate
 from qe.runtime.tools import ToolRegistry
+from qe.runtime import otel
 from qe.services.inquiry.dialectic import DialecticEngine
 from qe.services.inquiry.insight import InsightCrystallizer
 from qe.substrate.bayesian_belief import BayesianBeliefStore
@@ -153,20 +154,26 @@ class BaseService:
             envelope.envelope_id,
         )
 
+        # Tracing span for envelope handling (no-op if opentelemetry not installed)
+        envelope_span_attrs = {
+            "service.id": self.blueprint.service_id,
+            "topic": envelope.topic,
+            "envelope.id": envelope.envelope_id,
+        }
+
         messages = self.context_manager.build_messages(envelope, self._turn_count)
         model = self.router.select(envelope)
         schema = self.get_response_schema(envelope.topic)
 
         # ── Tripwire guardrails: run safety checks parallel to LLM call ──
-        llm_task = asyncio.create_task(
-            self._call_llm(model, messages, schema)
-        )
-        guard_task = asyncio.create_task(
-            self._run_guardrails(envelope)
-        )
+        llm_task = asyncio.create_task(self._call_llm(model, messages, schema))
+        guard_task = asyncio.create_task(self._run_guardrails(envelope))
 
-        # Wait for guardrails first (they're fast); cancel LLM if tripped
-        guard_result = await guard_task
+        # Await guardrails under a short-lived span; cancel LLM if tripped
+        with otel.start_span("service.guardrails", envelope_span_attrs):
+            guard_result = await guard_task
+
+        # If guardrails did not trip, proceed to await LLM response inside a span
         if guard_result is not None and guard_result.risk_score >= _sanitizer.threshold:
             llm_task.cancel()
             try:
@@ -195,7 +202,37 @@ class BaseService:
             )
             return
 
-        response = await llm_task
+        with otel.start_span("service.llm_call", {**envelope_span_attrs, "model": model, "schema": schema.__name__}):
+            response = await llm_task
+        if guard_result is not None and guard_result.risk_score >= _sanitizer.threshold:
+            llm_task.cancel()
+            try:
+                await llm_task
+            except asyncio.CancelledError:
+                pass
+            log.warning(
+                "guardrail.tripwire service_id=%s envelope_id=%s "
+                "risk=%.2f patterns=%s — LLM call cancelled",
+                self.blueprint.service_id,
+                envelope.envelope_id,
+                guard_result.risk_score,
+                guard_result.matches,
+            )
+            self.bus.publish(
+                Envelope(
+                    topic="system.gate_denied",
+                    source_service_id=self.blueprint.service_id,
+                    correlation_id=envelope.envelope_id,
+                    payload={
+                        "reason": "guardrail_tripwire",
+                        "risk_score": guard_result.risk_score,
+                        "patterns": guard_result.matches,
+                    },
+                )
+            )
+            return
+
+        # response already obtained in llm_call span
 
         self._turn_count += 1
         if self._turn_count % self.blueprint.reinforcement_interval_turns == 0:
@@ -237,12 +274,14 @@ class BaseService:
         await limiter.acquire(model)
 
         start = time.monotonic()
-        client = instructor.from_litellm(litellm.acompletion)
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_model=schema,
-        )
+        # Instrument the external LLM call when tracing is enabled
+        with otel.start_span("llm.call", {"model": model, "schema": schema.__name__}):
+            client = instructor.from_litellm(litellm.acompletion)
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_model=schema,
+            )
         latency_ms = (time.monotonic() - start) * 1000
 
         # ── Store in cache ──
@@ -294,12 +333,13 @@ class BaseService:
         await limiter.acquire(model)
 
         start = time.monotonic()
-        response = await litellm.acompletion(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-        )
+        with otel.start_span("llm.tool_call", {"model": model, "tool_count": len(tools)}):
+            response = await litellm.acompletion(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+            )
         latency_ms = (time.monotonic() - start) * 1000
 
         if self._shared_budget is not None:
