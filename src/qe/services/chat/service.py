@@ -332,6 +332,7 @@ class ChatService:
         insight_crystallizer: Any | None = None,
         knowledge_loop: Any | None = None,
         procedural_memory: Any | None = None,
+        access_mode: str = "balanced",
     ) -> None:
         self.substrate = substrate
         self.bus = bus
@@ -353,6 +354,8 @@ class ChatService:
         self._knowledge_loop = knowledge_loop
         self._procedural_memory = procedural_memory
         self._sessions: dict[str, ChatSession] = {}
+        self._access_mode = "balanced"
+        self.set_access_mode(access_mode)
 
     _MAX_SESSIONS = 1000
 
@@ -385,6 +388,21 @@ class ChatService:
         for sid in stale:
             del self._sessions[sid]
         return len(stale)
+
+    def set_access_mode(self, mode: str) -> None:
+        """Set chat tool access mode."""
+        if mode not in {"strict", "balanced", "full"}:
+            mode = "balanced"
+        self._access_mode = mode
+
+    def _tool_capabilities_for_mode(self) -> set[str]:
+        """Resolve tool capabilities from current access mode."""
+        base = {"chat", "web_search", "web_fetch", "mcp"}
+        if self._access_mode == "strict":
+            return base
+        if self._access_mode == "balanced":
+            return base | {"file_read", "file_write", "browser_control"}
+        return base | {"file_read", "file_write", "code_execute", "browser_control"}
 
     # ── Main entry point ────────────────────────────────────────────────
 
@@ -451,6 +469,21 @@ class ChatService:
 
     def _build_system_prompt(self) -> str:
         """Static identity and behavioral instructions."""
+        local_tool_note = ""
+        if self._access_mode == "strict":
+            local_tool_note = (
+                "- Local filesystem and code execution tools are disabled in this session "
+                "(strict security mode).\n"
+            )
+        elif self._access_mode == "balanced":
+            local_tool_note = (
+                "- You can read/write local files in a constrained workspace sandbox. "
+                "Raw code execution tools are disabled in this mode.\n"
+            )
+        else:
+            local_tool_note = (
+                "- You can read/write local files and execute code when needed for user tasks.\n"
+            )
         return (
             "You are the Question Engine assistant — an AI agent with a "
             "full cognitive architecture: belief ledger, episodic memory, "
@@ -475,6 +508,7 @@ class ChatService:
             "- Check system budget (get_budget_status)\n"
             "- Search the web for current information "
             "(web_search, web_fetch)\n"
+            f"{local_tool_note}"
             "- Perform deep multi-phase research on complex "
             "questions (deep_research) — 5-iteration cognitive loop "
             "with hypothesis testing and evidence synthesis\n"
@@ -667,7 +701,7 @@ class ChatService:
         if self._tool_registry:
             try:
                 registry_tools = self._tool_registry.get_tool_schemas(
-                    capabilities={"web_search", "web_fetch", "mcp"},
+                    capabilities=self._tool_capabilities_for_mode(),
                     mode="relevant",
                 )
                 tools.extend(registry_tools)
@@ -857,41 +891,128 @@ class ChatService:
                     pass
         return "\n".join(p for p in parts if p)
 
-    async def _tool_plan_and_execute(self, goal: str) -> str:
+    async def _tool_plan_and_execute(
+        self,
+        goal: str,
+        progress_queue: asyncio.Queue | None = None,
+    ) -> str:
         """Decompose a goal into subtasks and execute them."""
         if not self._planner or not self._dispatcher:
-            return "Plan-and-execute is not available (planner/dispatcher not initialized)."
+            return (
+                "Plan-and-execute is not available "
+                "(planner/dispatcher not initialized)."
+            )
+
+        _PE_TIMEOUT = 600.0
+        _start = time.monotonic()
+
         try:
             state = await self._planner.decompose(goal)
             goal_id = state.goal_id
+            subtask_count = (
+                len(state.decomposition.subtasks)
+                if state.decomposition else 0
+            )
+
+            log.info(
+                "plan_and_execute.start goal_id=%s subtasks=%d",
+                goal_id, subtask_count,
+            )
+
+            # Emit decomposition event
+            if progress_queue is not None:
+                try:
+                    progress_queue.put_nowait({
+                        "type": "chat_progress",
+                        "phase": "plan_decomposed",
+                        "goal_id": goal_id,
+                        "subtask_count": subtask_count,
+                        "strategy": (
+                            state.decomposition.strategy[:200]
+                            if state.decomposition else ""
+                        ),
+                    })
+                except Exception:
+                    pass
 
             done = asyncio.Event()
             result_holder: dict = {}
+            _completed_count = [0]
 
-            async def on_synthesized(envelope: Envelope) -> None:
-                if envelope.payload.get("goal_id") == goal_id:
+            async def on_synthesized(
+                envelope: Envelope, _gid=goal_id,
+            ) -> None:
+                if envelope.payload.get("goal_id") == _gid:
                     result_holder["data"] = envelope.payload
                     done.set()
 
+            async def on_subtask_done(
+                envelope: Envelope,
+                _gid=goal_id,
+                _total=subtask_count,
+                _pq=progress_queue,
+                _count=_completed_count,
+            ) -> None:
+                if envelope.payload.get("goal_id") != _gid:
+                    return
+                _count[0] += 1
+                sid = envelope.payload.get("subtask_id", "?")
+                log.info(
+                    "plan_and_execute.subtask_done goal_id=%s "
+                    "subtask=%s progress=%d/%d",
+                    _gid, sid, _count[0], _total,
+                )
+                if _pq is not None:
+                    try:
+                        _pq.put_nowait({
+                            "type": "chat_progress",
+                            "phase": "plan_subtask_done",
+                            "goal_id": _gid,
+                            "subtask_id": sid,
+                            "completed": _count[0],
+                            "total": _total,
+                        })
+                    except Exception:
+                        pass
+
             self.bus.subscribe("goals.synthesized", on_synthesized)
+            self.bus.subscribe("tasks.completed", on_subtask_done)
+            self.bus.subscribe("tasks.failed", on_subtask_done)
             try:
                 await self._dispatcher.submit_goal(state)
-                await asyncio.wait_for(done.wait(), timeout=180.0)
+                await asyncio.wait_for(
+                    done.wait(), timeout=_PE_TIMEOUT,
+                )
             finally:
-                self.bus.unsubscribe("goals.synthesized", on_synthesized)
+                self.bus.unsubscribe(
+                    "goals.synthesized", on_synthesized,
+                )
+                self.bus.unsubscribe(
+                    "tasks.completed", on_subtask_done,
+                )
+                self.bus.unsubscribe(
+                    "tasks.failed", on_subtask_done,
+                )
 
+            elapsed = time.monotonic() - _start
             data = result_holder.get("data", {})
             parts = [f"Goal '{goal}' completed."]
             if data.get("synthesis"):
                 parts.append(f"\n{data['synthesis']}")
-            subtask_count = len(state.decomposition.subtasks) if state.decomposition else 0
-            parts.append(f"\n(Goal ID: {goal_id}, Subtasks: {subtask_count})")
+            parts.append(
+                f"\n(Goal ID: {goal_id}, Subtasks: "
+                f"{subtask_count}, Time: {elapsed:.1f}s)"
+            )
             return "\n".join(parts)
 
         except TimeoutError:
+            elapsed = time.monotonic() - _start
+            completed = _completed_count[0] if '_completed_count' in dir() else 0
             return (
-                f"Goal execution timed out after 180s. "
-                f"The goal '{goal}' may still be processing in the background."
+                f"Goal execution timed out after {int(elapsed)}s. "
+                f"Completed {completed}/{subtask_count} subtasks. "
+                f"The goal '{goal}' may still be processing "
+                f"in the background."
             )
         except Exception as e:
             log.exception("Plan-and-execute failed")
@@ -1215,17 +1336,34 @@ class ChatService:
                         "blocked": True,
                     })
                 else:
+                    # Cognitive tools get a longer timeout
+                    _LONG_TIMEOUT_TOOLS = {
+                        "plan_and_execute",
+                        "deep_research",
+                        "swarm_research",
+                    }
+                    tool_timeout = (
+                        600.0 if tool_name in _LONG_TIMEOUT_TOOLS
+                        else 120.0
+                    )
                     try:
                         result_str = await asyncio.wait_for(
-                            self._execute_chat_tool(tool_name, params),
-                            timeout=120.0,
+                            self._execute_chat_tool(
+                                tool_name, params,
+                                progress_queue=progress_queue,
+                            ),
+                            timeout=tool_timeout,
                         )
                     except TimeoutError:
                         log.warning(
-                            "chat_tool_loop.tool_timeout tool=%s iteration=%d",
-                            tool_name, _iteration,
+                            "chat_tool_loop.tool_timeout tool=%s "
+                            "timeout=%.0fs iteration=%d",
+                            tool_name, tool_timeout, _iteration,
                         )
-                        result_str = f"Tool '{tool_name}' timed out after 120s."
+                        result_str = (
+                            f"Tool '{tool_name}' timed out after "
+                            f"{int(tool_timeout)}s."
+                        )
                         error = True
                     except Exception as e:
                         log.exception(
@@ -1319,11 +1457,6 @@ class ChatService:
         })
         return last_text, tool_audit, _cumulative_cost
 
-    # Capabilities the chat agent declares for tool gate validation.
-    _CHAT_CAPABILITIES: set[str] = {
-        "chat", "web_search", "web_fetch", "mcp",
-    }
-
     def _check_tool_gate(
         self, tool_name: str, params: dict
     ) -> tuple[bool, str]:
@@ -1336,7 +1469,7 @@ class ChatService:
             result = self._tool_gate.validate(
                 tool_name=tool_name,
                 params=params,
-                capabilities=self._CHAT_CAPABILITIES,
+                capabilities=self._tool_capabilities_for_mode(),
                 goal_id="chat",
             )
             if result.decision == GateDecision.DENY:
@@ -1347,26 +1480,41 @@ class ChatService:
             return True, ""
 
     async def _execute_chat_tool(
-        self, tool_name: str, params: dict
+        self,
+        tool_name: str,
+        params: dict,
+        progress_queue: asyncio.Queue | None = None,
     ) -> str:
         """Dispatch to local handler or tool registry."""
         handlers: dict[str, Any] = {
             "query_beliefs": lambda p: self._tool_query_beliefs(p["query"]),
             "list_entities": lambda _p: self._tool_list_entities(),
-            "get_entity_details": lambda p: self._tool_get_entity_details(p["entity"]),
-            "submit_observation": lambda p: self._tool_submit_observation(p["text"]),
-            "retract_claim": lambda p: self._tool_retract_claim(p["claim_id"]),
+            "get_entity_details": lambda p: self._tool_get_entity_details(
+                p["entity"],
+            ),
+            "submit_observation": lambda p: self._tool_submit_observation(
+                p["text"],
+            ),
+            "retract_claim": lambda p: self._tool_retract_claim(
+                p["claim_id"],
+            ),
             "get_budget_status": lambda _p: self._tool_get_budget(),
-            "deep_research": lambda p: self._tool_deep_research(p["question"]),
+            "deep_research": lambda p: self._tool_deep_research(
+                p["question"],
+            ),
             "swarm_research": lambda p: self._tool_swarm_research(
                 p["question"], p.get("num_agents", 3),
             ),
-            "plan_and_execute": lambda p: self._tool_plan_and_execute(p["goal"]),
+            "plan_and_execute": lambda p: self._tool_plan_and_execute(
+                p["goal"], progress_queue=progress_queue,
+            ),
             "reason_about": lambda p: self._tool_reason_about(p["claim"]),
             "crystallize_insights": lambda p: self._tool_crystallize_insights(
                 p["finding"], p.get("domain", "general"),
             ),
-            "consolidate_knowledge": lambda _p: self._tool_consolidate_knowledge(),
+            "consolidate_knowledge": (
+                lambda _p: self._tool_consolidate_knowledge()
+            ),
         }
 
         if tool_name in handlers:

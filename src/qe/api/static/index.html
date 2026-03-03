@@ -1073,7 +1073,11 @@
       const chatEndRef = useRef(null);
 
       // Settings state
-      const [settings, setSettings] = useState({ budget: { monthly_limit_usd: 50, alert_at_pct: 0.80 }, runtime: { log_level: "INFO", hil_timeout_seconds: 3600 } });
+      const [settings, setSettings] = useState({
+        budget: { monthly_limit_usd: 50, alert_at_pct: 0.80 },
+        runtime: { log_level: "INFO", hil_timeout_seconds: 3600 },
+        agent_access: { mode: "balanced" },
+      });
       const [settingsDirty, setSettingsDirty] = useState(false);
       const [settingsSaving, setSettingsSaving] = useState(false);
       const [settingsError, setSettingsError] = useState(null);
@@ -1190,7 +1194,15 @@
       // Fetch settings on mount
       useEffect(() => {
         fetch(`${API}/api/settings`).then(r => r.json()).then(data => {
-          if (data.budget || data.runtime) setSettings(data);
+          if (data.budget || data.runtime || data.agent_access) {
+            setSettings(prev => ({
+              ...prev,
+              ...data,
+              budget: { ...prev.budget, ...(data.budget || {}) },
+              runtime: { ...prev.runtime, ...(data.runtime || {}) },
+              agent_access: { ...prev.agent_access, ...(data.agent_access || {}) },
+            }));
+          }
         }).catch(() => {});
         // Fetch provider/channel status for reconfigure
         fetch(`${API}/api/setup/status`).then(r => r.json()).then(data => {
@@ -2383,6 +2395,51 @@
                           {["DEBUG", "INFO", "WARNING", "ERROR"].map(l => <option key={l} value={l}>{l}</option>)}
                         </select>
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Agent Access */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 4 }}>Agent Access</div>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 14 }}>
+                      Controls how much local machine access the main chat agent has.
+                    </div>
+
+                    <label style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={(settings.agent_access?.mode || "balanced") === "full"}
+                        onChange={e => updateSetting("agent_access", "mode", e.target.checked ? "full" : "balanced")}
+                        style={{ width: 16, height: 16, accentColor: palette.accent, cursor: "pointer" }}
+                      />
+                      <span style={{ fontSize: 12, color: palette.text }}>
+                        Enable Full Computer Access (same local permissions as the QE process user)
+                      </span>
+                    </label>
+
+                    <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+                      <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                        Security Profile
+                      </label>
+                      <select
+                        value={settings.agent_access?.mode || "balanced"}
+                        onChange={e => updateSetting("agent_access", "mode", e.target.value)}
+                        style={{
+                          minWidth: 200, padding: "8px 10px", borderRadius: 5,
+                          border: `1px solid ${palette.border}`, background: palette.bg,
+                          color: palette.text, fontFamily: FONT_MONO, fontSize: 12, outline: "none",
+                        }}
+                      >
+                        <option value="strict">Strict</option>
+                        <option value="balanced">Balanced</option>
+                        <option value="full">Full</option>
+                      </select>
+                    </div>
+
+                    <div style={{ padding: "10px 12px", background: palette.bg, border: `1px solid ${palette.border}`, borderRadius: 6, fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, lineHeight: 1.55 }}>
+                      <div><span style={{ color: palette.textBright }}>Strict:</span> Chat agent can use web tools only (no local file read/write, no code execution).</div>
+                      <div><span style={{ color: palette.textBright }}>Balanced:</span> Chat agent can read/write files, but access is confined to <code>data/workspaces/chat</code>. Raw code execution is disabled.</div>
+                      <div><span style={{ color: palette.textBright }}>Full:</span> Chat agent can read/write anywhere on the local filesystem visible to the QE process and can execute code. Use only on trusted machines.</div>
                     </div>
                   </div>
 

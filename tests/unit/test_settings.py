@@ -22,6 +22,7 @@ class TestGetSettings:
         assert result["budget"]["alert_at_pct"] == 0.80
         assert result["runtime"]["log_level"] == "INFO"
         assert result["runtime"]["hil_timeout_seconds"] == 3600
+        assert result["agent_access"]["mode"] == "balanced"
         assert result["retrieval"]["fts_top_k"] == 20
         assert result["retrieval"]["semantic_top_k"] == 20
         assert result["retrieval"]["semantic_min_similarity"] == 0.3
@@ -37,6 +38,9 @@ class TestGetSettings:
             [runtime]
             log_level = "DEBUG"
             hil_timeout_seconds = 7200
+
+            [agent_access]
+            mode = "full"
         """))
         with patch("qe.api.setup.CONFIG_PATH", config_file):
             result = get_settings()
@@ -44,6 +48,7 @@ class TestGetSettings:
         assert result["budget"]["alert_at_pct"] == 0.90
         assert result["runtime"]["log_level"] == "DEBUG"
         assert result["runtime"]["hil_timeout_seconds"] == 7200
+        assert result["agent_access"]["mode"] == "full"
         assert result["retrieval"]["fts_top_k"] == 20  # default
 
     def test_fills_defaults_for_missing_keys(self, tmp_path):
@@ -67,12 +72,14 @@ class TestSaveSettings:
             save_settings({
                 "budget": {"monthly_limit_usd": 75.0, "alert_at_pct": 0.85},
                 "runtime": {"log_level": "WARNING"},
+                "agent_access": {"mode": "strict"},
                 "retrieval": {"semantic_top_k": 12},
             })
             result = get_settings()
         assert result["budget"]["monthly_limit_usd"] == 75.0
         assert result["budget"]["alert_at_pct"] == 0.85
         assert result["runtime"]["log_level"] == "WARNING"
+        assert result["agent_access"]["mode"] == "strict"
         assert result["retrieval"]["semantic_top_k"] == 12
 
     def test_preserves_existing_sections(self, tmp_path):
@@ -185,6 +192,13 @@ class TestSettingsEndpoints:
         # Should succeed (config is written regardless of engine state)
         assert res.status_code == 200
         assert res.json()["status"] == "saved"
+
+    def test_post_settings_rejects_invalid_agent_access_mode(self, client):
+        res = client.post("/api/settings", json={
+            "agent_access": {"mode": "invalid"},
+        })
+        assert res.status_code == 400
+        assert "Invalid agent_access.mode" in res.json()["error"]
 
     def test_reset_circuit_returns_503_without_engine(self, client):
         res = client.post("/api/services/researcher/reset-circuit")

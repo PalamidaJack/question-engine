@@ -425,6 +425,7 @@ def save_setup(
 _SETTINGS_DEFAULTS: dict[str, dict] = {
     "budget": {"monthly_limit_usd": 50.0, "alert_at_pct": 0.80},
     "runtime": {"log_level": "INFO", "hil_timeout_seconds": 3600},
+    "agent_access": {"mode": "balanced"},
     "retrieval": {
         "fts_top_k": 20,
         "semantic_top_k": 20,
@@ -449,7 +450,7 @@ def get_settings() -> dict:
 def save_settings(settings: dict) -> None:
     """Merge runtime settings into config.toml, preserving all other sections."""
     config = _load_config()
-    for section in ("budget", "runtime", "retrieval"):
+    for section in ("budget", "runtime", "retrieval", "agent_access"):
         incoming = settings.get(section)
         if not incoming or not isinstance(incoming, dict):
             continue
