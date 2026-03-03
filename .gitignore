@@ -58,6 +58,9 @@ Thumbs.db
 *.log
 logs/
 
+# MCP server config (machine-specific paths)
+mcp_servers.json
+
 # HIL queue (runtime state, not source)
 data/hil_queue/
 !data/hil_queue/pending/.gitkeep
