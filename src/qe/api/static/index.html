@@ -2537,29 +2537,60 @@
                       </span>
                     </label>
 
-                    <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
-                      <label style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                        Security Profile
-                      </label>
-                      <select
-                        value={settings.agent_access?.mode || "balanced"}
-                        onChange={e => updateSetting("agent_access", "mode", e.target.value)}
-                        style={{
-                          minWidth: 200, padding: "8px 10px", borderRadius: 5,
-                          border: `1px solid ${palette.border}`, background: palette.bg,
-                          color: palette.text, fontFamily: FONT_MONO, fontSize: 12, outline: "none",
-                        }}
-                      >
-                        <option value="strict">Strict</option>
-                        <option value="balanced">Balanced</option>
-                        <option value="full">Full</option>
-                      </select>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+                      Security Profile
                     </div>
-
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10, marginBottom: 12 }}>
+                      {[
+                        {
+                          mode: "strict",
+                          title: "Strict",
+                          color: palette.green,
+                          summary: "Web tools only. No local file read/write and no code execution.",
+                        },
+                        {
+                          mode: "balanced",
+                          title: "Balanced",
+                          color: palette.blue,
+                          summary: "Keeps agent productive with local files, but confines access to data/workspaces/chat.",
+                        },
+                        {
+                          mode: "full",
+                          title: "Full",
+                          color: palette.red,
+                          summary: "Full local filesystem and code execution with the QE process permissions.",
+                        },
+                      ].map(profile => {
+                        const selected = (settings.agent_access?.mode || "balanced") === profile.mode;
+                        return (
+                          <label key={profile.mode} style={{
+                            cursor: "pointer",
+                            padding: "10px 12px",
+                            borderRadius: 8,
+                            border: `1px solid ${selected ? profile.color : palette.border}`,
+                            background: selected ? `${profile.color}20` : palette.bg,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 6,
+                          }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <input
+                                type="radio"
+                                name="agent-access-mode"
+                                checked={selected}
+                                onChange={() => updateSetting("agent_access", "mode", profile.mode)}
+                                style={{ accentColor: profile.color, cursor: "pointer" }}
+                              />
+                              <span style={{ fontSize: 12, fontWeight: 700, color: selected ? profile.color : palette.textBright }}>{profile.title}</span>
+                            </div>
+                            <span style={{ fontSize: 11, lineHeight: 1.45, color: palette.textDim }}>{profile.summary}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
                     <div style={{ padding: "10px 12px", background: palette.bg, border: `1px solid ${palette.border}`, borderRadius: 6, fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, lineHeight: 1.55 }}>
-                      <div><span style={{ color: palette.textBright }}>Strict:</span> Chat agent can use web tools only (no local file read/write, no code execution).</div>
-                      <div><span style={{ color: palette.textBright }}>Balanced:</span> Chat agent can read/write files, but access is confined to <code>data/workspaces/chat</code>. Raw code execution is disabled.</div>
-                      <div><span style={{ color: palette.textBright }}>Full:</span> Chat agent can read/write anywhere on the local filesystem visible to the QE process and can execute code. Use only on trusted machines.</div>
+                      Selected mode: <span style={{ color: palette.textBright }}>{(settings.agent_access?.mode || "balanced").toUpperCase()}</span>.
+                      Changes take effect when settings are saved.
                     </div>
                   </div>
 

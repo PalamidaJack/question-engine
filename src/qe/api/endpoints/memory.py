@@ -10,7 +10,9 @@ def register_memory_routes(
     memory_store: Any,
 ) -> None:
     """Register memory-related API routes."""
-    from fastapi import HTTPException
+    from fastapi import APIRouter, HTTPException
+
+    router = APIRouter(tags=["Memory"])
 
     @router.get("/api/memory")
     async def list_memories():
@@ -86,3 +88,5 @@ def register_memory_routes(
             name, desc
         )
         return project
+
+    app.include_router(router)
