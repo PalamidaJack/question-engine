@@ -38,6 +38,12 @@ app.add_typer(goal_app, name="goal")
 app.add_typer(dlq_app, name="dlq")
 app.add_typer(export_app, name="export")
 app.add_typer(db_app, name="db")
+a2a_app = typer.Typer(help="Agent-to-Agent (A2A) commands")
+app.add_typer(a2a_app, name="a2a")
+otel_app = typer.Typer(help="OpenTelemetry commands")
+app.add_typer(otel_app, name="otel")
+guardrails_app = typer.Typer(help="Guardrails commands")
+app.add_typer(guardrails_app, name="guardrails")
 
 console = Console()
 INBOX_DIR = Path("data/runtime_inbox")
@@ -141,6 +147,111 @@ def _configure_logging(verbose: bool = False) -> None:
     from qe.runtime.logging_config import configure_from_config
 
     configure_from_config(get_settings(), verbose=verbose)
+
+
+@a2a_app.command("discover")
+def a2a_discover(url: str) -> None:
+    """Fetch and display an external agent's AgentCard from <url>/.well-known/agent.json"""
+    import httpx
+
+    try:
+        r = httpx.get(f"{url.rstrip('/')}/.well-known/agent.json", timeout=10)
+        r.raise_for_status()
+        console.print_json(data=r.json())
+    except Exception as e:
+        console.print(f"Failed to discover agent: {e}")
+
+
+@a2a_app.command("send")
+def a2a_send(url: str, task: str) -> None:
+    """Send a task description to an external A2A agent at <url>."""
+    import httpx
+
+    try:
+        r = httpx.post(f"{url.rstrip('/')}/api/a2a/tasks", json={"description": task}, timeout=15)
+        r.raise_for_status()
+        console.print_json(data=r.json())
+    except Exception as e:
+        console.print(f"Failed to send task: {e}")
+
+
+@otel_app.command("status")
+def otel_status() -> None:
+    """Show current OpenTelemetry config from config.toml."""
+    from qe.config import load_config
+
+    cfg = load_config(Path("config.toml"))
+    ot = cfg.otel
+    console.print_json(data={
+        "enabled": ot.enabled,
+        "exporter": ot.exporter,
+        "otlp_endpoint": ot.otlp_endpoint or "",
+        "service_name": ot.service_name,
+    })
+
+
+@guardrails_app.command("status")
+def guardrails_status() -> None:
+    """Show current guardrails config from config.toml."""
+    from qe.config import load_config
+
+    cfg = load_config(Path("config.toml"))
+    g = cfg.guardrails
+    console.print_json(data=g.model_dump(mode="json"))
+
+
+@guardrails_app.command("set")
+def guardrails_set(
+    content_filter_enabled: bool | None = typer.Option(None, "--content-filter/--no-content-filter"),
+    pii_detection_enabled: bool | None = typer.Option(None, "--pii/--no-pii"),
+    cost_guard_enabled: bool | None = typer.Option(None, "--cost-guard/--no-cost-guard"),
+    cost_guard_threshold_usd: float | None = typer.Option(None, "--cost-threshold"),
+) -> None:
+    """Update guardrails settings in `config.toml` (writes file).
+
+    Only provided options are updated; others remain unchanged.
+    """
+    from qe.config import load_config
+
+    cfg = load_config(Path("config.toml"))
+    changed = False
+    if content_filter_enabled is not None:
+        cfg.guardrails.content_filter_enabled = content_filter_enabled
+        changed = True
+    if pii_detection_enabled is not None:
+        cfg.guardrails.pii_detection_enabled = pii_detection_enabled
+        changed = True
+    if cost_guard_enabled is not None:
+        cfg.guardrails.cost_guard_enabled = cost_guard_enabled
+        changed = True
+    if cost_guard_threshold_usd is not None:
+        cfg.guardrails.cost_guard_threshold_usd = cost_guard_threshold_usd
+        changed = True
+
+    if not changed:
+        console.print("No changes provided.")
+        raise typer.Exit()
+
+    # Write back to config.toml preserving other fields via simple toml dump
+    try:
+        import tomllib, tomli_w
+
+        raw = {}
+        if Path("config.toml").exists():
+            with Path("config.toml").open("rb") as f:
+                raw = tomllib.load(f)
+
+        raw.setdefault("guardrails", {})
+        raw["guardrails"]["content_filter_enabled"] = cfg.guardrails.content_filter_enabled
+        raw["guardrails"]["pii_detection_enabled"] = cfg.guardrails.pii_detection_enabled
+        raw["guardrails"]["cost_guard_enabled"] = cfg.guardrails.cost_guard_enabled
+        raw["guardrails"]["cost_guard_threshold_usd"] = cfg.guardrails.cost_guard_threshold_usd
+
+        with Path("config.toml").open("w", encoding="utf-8") as f:
+            f.write(tomli_w.dumps(raw))
+        console.print("Guardrails updated in config.toml")
+    except Exception as e:
+        console.print(f"Failed to update config.toml: {e}")
 
 
 @app.command()
