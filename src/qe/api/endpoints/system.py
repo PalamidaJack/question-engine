@@ -1,38 +1,54 @@
-"""System API endpoints (Health, Status, Topology, Dashboard) extracted from app.py."""
+"""System API endpoints (Health, Status, Topology, Dashboard)."""
 
 from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, FileResponse
+
+from fastapi import APIRouter, Request
+from fastapi.responses import FileResponse, JSONResponse
+
+from qe.audit import get_audit_log
+from qe.bus import get_bus
+from qe.models.envelope import Envelope
+from qe.runtime.feature_flags import get_flag_store
+from qe.runtime.metrics import get_metrics
 from qe.runtime.readiness import get_readiness
+from qe.runtime.service import BaseService
 
 router = APIRouter(tags=["System"])
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+def get_app_globals():
+    import qe.api.app as app_mod
+
+    return app_mod
+
+
+def _state_attr(request: Request, key: str, default=None):
+    return getattr(request.app.state, key, default)
+
 
 @router.get("/")
 async def dashboard(request: Request):
     """Serve the dashboard UI."""
-    index = request.app.state.static_dir / "index.html"
+    static_dir = _state_attr(request, "static_dir", STATIC_DIR)
+    index = static_dir / "index.html"
     if not index.exists():
         return JSONResponse(
-            {"status": "ok", "message": "Question Engine is running. No dashboard UI found."},
+            {
+                "status": "ok",
+                "message": "Question Engine is running. No dashboard UI found.",
+            }
         )
     return FileResponse(str(index))
 
 
-
-# Routers registered via APIRouter
-from qe.api.endpoints.setup import router as setup_router
-
-
-# Routers registered via APIRouter
-from qe.api.endpoints.webhooks import router as webhooks_router
-from qe.api.endpoints.scout import router as scout_router
-
-# ── Audit Trail ────────────────────────────────────────────────────────────
-
-
 @router.get("/api/audit")
-async def list_audit(request: Request, 
+async def list_audit(
+    request: Request,
     action: str | None = None,
     actor: str | None = None,
     limit: int = 100,
@@ -42,16 +58,10 @@ async def list_audit(request: Request,
     return {"entries": entries, "count": len(entries)}
 
 
-# ── Metrics ───────────────────────────────────────────────────────────────
-
-
 @router.get("/api/metrics")
 async def metrics_snapshot(request: Request):
     """Return full metrics snapshot: counters, histograms, gauges, SLOs."""
     return get_metrics().snapshot()
-
-
-# ── Profiling ─────────────────────────────────────────────────────────────
 
 
 @router.get("/api/profiling/inquiry")
@@ -62,15 +72,14 @@ async def profiling_inquiry(request: Request):
 
     from qe.runtime.engram_cache import get_engram_cache as _get_cache
 
+    app_mod = get_app_globals()
     rusage = resource.getrusage(resource.RUSAGE_SELF)
 
-    # Engram cache stats
     try:
         cache_stats = _get_cache().stats()
     except Exception:
         cache_stats = {}
 
-    # Episodic memory hot store size
     episodic_hot_size = 0
     if BaseService._shared_episodic_memory is not None:
         try:
@@ -78,16 +87,14 @@ async def profiling_inquiry(request: Request):
         except Exception:
             pass
 
-    # Belief store status
-    belief_status = "unavailable"
-    if BaseService._shared_bayesian_belief is not None:
-        belief_status = "available"
+    belief_status = (
+        "available" if BaseService._shared_bayesian_belief is not None else "unavailable"
+    )
 
-    # Build response with profiling store data
-    store_data = _inquiry_profiling_store.to_dict()
+    store_data = app_mod._inquiry_profiling_store.to_dict()
 
     return {
-        "phase_timings": _last_inquiry_profile,
+        "phase_timings": app_mod._last_inquiry_profile,
         "last_inquiry": store_data["last_inquiry"],
         "history_count": store_data["history_count"],
         "percentiles": store_data["percentiles"],
@@ -103,66 +110,57 @@ async def profiling_inquiry(request: Request):
     }
 
 
-# ── Prompt Evolution ───────────────────────────────────────────────────────
-
-
 @router.get("/api/prompts/stats")
 async def prompt_stats(request: Request):
     """Return prompt evolution registry status and per-slot stats."""
-    if _prompt_registry is None:
+    app_mod = get_app_globals()
+    if app_mod._prompt_registry is None:
         return {"enabled": False, "slots": 0}
-    return _prompt_registry.status()
+    return app_mod._prompt_registry.status()
 
 
 @router.get("/api/knowledge/status")
 async def knowledge_loop_status(request: Request):
     """Return knowledge loop status."""
-    if _knowledge_loop is None:
+    app_mod = get_app_globals()
+    if app_mod._knowledge_loop is None:
         return {"running": False}
-    return _knowledge_loop.status()
+    return app_mod._knowledge_loop.status()
 
 
 @router.get("/api/bridge/status")
 async def inquiry_bridge_status(request: Request):
     """Return inquiry bridge status."""
-    if _inquiry_bridge is None:
+    app_mod = get_app_globals()
+    if app_mod._inquiry_bridge is None:
         return {"running": False}
-    return _inquiry_bridge.status()
-
-
-
-# Mass Intelligence and Harvest routers registered
-from qe.api.endpoints.mass_intelligence import router as mass_intel_router
-from qe.api.endpoints.harvest import router as harvest_router
-
-# Telemetry router registered
-from qe.api.endpoints.telemetry import router as telemetry_router
-from qe.api.endpoints.goals_v2 import router as goals_v2_router
-from qe.api.endpoints.knowledge import router as knowledge_router
-# ── Topology ──────────────────────────────────────────────────────────────
+    return app_mod._inquiry_bridge.status()
 
 
 @router.get("/api/topology")
 async def topology(request: Request):
     """Return service dependency graph from blueprint declarations."""
-    if not request.app.state.supervisor:
+    supervisor = _state_attr(request, "supervisor")
+    if not supervisor:
         return JSONResponse({"error": "Engine not started"}, status_code=503)
 
     services = []
     all_topics: set[str] = set()
 
-    for svc in request.app.state.supervisor.registry.all_services():
+    for svc in supervisor.registry.all_services():
         bp = svc.blueprint
         subs = bp.capabilities.bus_topics_subscribe
         pubs = bp.capabilities.bus_topics_publish
         all_topics.update(subs)
         all_topics.update(pubs)
-        services.append({
-            "service_id": bp.service_id,
-            "display_name": bp.display_name,
-            "subscribes": subs,
-            "publishes": pubs,
-        })
+        services.append(
+            {
+                "service_id": bp.service_id,
+                "display_name": bp.display_name,
+                "subscribes": subs,
+                "publishes": pubs,
+            }
+        )
 
     return {
         "services": services,
@@ -172,29 +170,19 @@ async def topology(request: Request):
     }
 
 
-# ── Event Replay ──────────────────────────────────────────────────────────
-
-
 @router.post("/api/events/replay")
 async def replay_events(request: Request, body: dict[str, Any]):
-    """Bulk replay historical events from the event log back into the bus.
-
-    Accepts: {"topic": "...", "since": "ISO8601", "limit": 100}
-    """
-    if not _event_log:
-        return JSONResponse(
-            {"error": "Event log not ready"}, status_code=503
-        )
+    """Bulk replay historical events from the event log back into the bus."""
+    event_log = _state_attr(request, "event_log")
+    if not event_log:
+        return JSONResponse({"error": "Event log not ready"}, status_code=503)
 
     topic = body.get("topic")
     since_str = body.get("since")
     limit = body.get("limit", 100)
 
-    since = None
-    if since_str:
-        since = datetime.fromisoformat(since_str)
-
-    events = await _event_log.replay(since=since, topic=topic, limit=limit)
+    since = datetime.fromisoformat(since_str) if since_str else None
+    events = await event_log.replay(since=since, topic=topic, limit=limit)
 
     bus = get_bus()
     replayed = 0
@@ -220,9 +208,6 @@ async def replay_events(request: Request, body: dict[str, Any]):
     return {"status": "replayed", "count": replayed}
 
 
-# ── REST Endpoints ──────────────────────────────────────────────────────────
-
-
 @router.get("/api/health")
 async def health(request: Request):
     return {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
@@ -241,13 +226,14 @@ async def health_ready(request: Request):
 @router.get("/api/health/live")
 async def health_live(request: Request):
     """Live health report from the Doctor service."""
-    if not _doctor:
+    app_mod = get_app_globals()
+    doctor = app_mod._doctor
+    if not doctor:
         return JSONResponse({"error": "Doctor service not running"}, status_code=503)
 
-    report = _doctor.last_report
+    report = doctor.last_report
     if report is None:
-        # First check hasn't run yet — run on demand
-        report = await _doctor.run_all_checks()
+        report = await doctor.run_all_checks()
 
     return report.model_dump(mode="json")
 
@@ -255,46 +241,52 @@ async def health_live(request: Request):
 @router.get("/api/status")
 async def status(request: Request):
     """Overall engine status: services, budget, circuit breakers."""
-    if not request.app.state.supervisor:
+    supervisor = _state_attr(request, "supervisor")
+    if not supervisor:
         return JSONResponse({"error": "Engine not started"}, status_code=503)
 
     services = []
-    for svc in request.app.state.supervisor.registry.all_services():
+    for svc in supervisor.registry.all_services():
         sid = svc.blueprint.service_id
-        services.append({
-            "service_id": sid,
-            "display_name": svc.blueprint.display_name,
-            "status": "alive" if svc._running else "stopped",
-            "turn_count": svc._turn_count,
-            "circuit_broken": sid in request.app.state.supervisor._circuits,
-        })
+        services.append(
+            {
+                "service_id": sid,
+                "display_name": svc.blueprint.display_name,
+                "status": "alive" if svc._running else "stopped",
+                "turn_count": svc._turn_count,
+                "circuit_broken": sid in supervisor._circuits,
+            }
+        )
+
+    cognitive_pool = _state_attr(request, "cognitive_pool")
+    strategy_evolver = _state_attr(request, "strategy_evolver")
+    elastic_scaler = _state_attr(request, "elastic_scaler")
+    competitive_arena = _state_attr(request, "competitive_arena")
+    inquiry_bridge = _state_attr(request, "inquiry_bridge")
+    knowledge_loop = _state_attr(request, "knowledge_loop")
+    scout_service = _state_attr(request, "scout_service")
+    harvest_service = _state_attr(request, "harvest_service")
 
     return {
         "services": services,
         "budget": {
-            "total_spend": request.app.state.supervisor.budget_tracker.total_spend(),
-            "remaining_pct": request.app.state.supervisor.budget_tracker.remaining_pct(),
-            "limit_usd": request.app.state.supervisor.budget_tracker.monthly_limit_usd,
-            "by_model": request.app.state.supervisor.budget_tracker.spend_by_model(),
+            "total_spend": supervisor.budget_tracker.total_spend(),
+            "remaining_pct": supervisor.budget_tracker.remaining_pct(),
+            "limit_usd": supervisor.budget_tracker.monthly_limit_usd,
+            "by_model": supervisor.budget_tracker.spend_by_model(),
         },
-        "pool": request.app.state.cognitive_pool.pool_status() if request.app.state.cognitive_pool else None,
+        "pool": cognitive_pool.pool_status() if cognitive_pool else None,
         "strategy": {
-            "current_strategy": (
-                request.app.state.strategy_evolver._current_strategy if request.app.state.strategy_evolver else None
-            ),
-            "scaling_profile": (
-                request.app.state.elastic_scaler.current_profile_name() if request.app.state.elastic_scaler else None
-            ),
-            "snapshots": (
-                [s.model_dump() for s in request.app.state.strategy_evolver.get_snapshots()]
-                if request.app.state.strategy_evolver else []
-            ),
+            "current_strategy": strategy_evolver._current_strategy if strategy_evolver else None,
+            "scaling_profile": elastic_scaler.current_profile_name() if elastic_scaler else None,
+            "snapshots": [s.model_dump() for s in strategy_evolver.get_snapshots()]
+            if strategy_evolver
+            else [],
         },
         "flags": get_flag_store().stats(),
-        "arena": request.app.state.competitive_arena.status() if request.app.state.competitive_arena else None,
-        "bridge": request.app.state.inquiry_bridge.status() if request.app.state.inquiry_bridge else None,
-        "knowledge_loop": request.app.state.knowledge_loop.status() if request.app.state.knowledge_loop else None,
-        "scout": request.app.state.scout_service.status() if request.app.state.scout_service else None,
-        "harvest": request.app.state.harvest_service.status() if request.app.state.harvest_service else None,
+        "arena": competitive_arena.status() if competitive_arena else None,
+        "bridge": inquiry_bridge.status() if inquiry_bridge else None,
+        "knowledge_loop": knowledge_loop.status() if knowledge_loop else None,
+        "scout": scout_service.status() if scout_service else None,
+        "harvest": harvest_service.status() if harvest_service else None,
     }
-

@@ -1,19 +1,27 @@
 """Webhook and DLQ API endpoints extracted from app.py."""
 
 from __future__ import annotations
+
+import logging
 from typing import Any
-from fastapi import APIRouter, HTTPException, Request
+
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from qe.api.setup import get_settings, save_settings
+from qe.audit import get_audit_log
 from qe.bus import get_bus
 from qe.models.envelope import Envelope
+from qe.runtime.logging_config import update_log_level
 
 router = APIRouter(prefix="/api", tags=["Webhooks"])
+log = logging.getLogger(__name__)
 
 
 # Access globals from app via lazy imports to avoid circularity
 def get_app_globals():
     import qe.api.app as app_mod
+
     return app_mod
 
 
@@ -80,10 +88,14 @@ async def get_settings_endpoint(request: Request):
 @router.post("/settings")
 async def save_settings_endpoint(body: dict[str, Any]):
     """Save runtime settings and apply budget changes at runtime."""
+    app_mod = get_app_globals()
+    supervisor = app_mod._supervisor
+    chat_service = app_mod._chat_service
+
     agent_access = body.get("agent_access")
     if agent_access and isinstance(agent_access, dict):
         mode = agent_access.get("mode")
-        if mode is not None and mode not in _AGENT_ACCESS_MODES:
+        if mode is not None and mode not in app_mod._AGENT_ACCESS_MODES:
             return JSONResponse(
                 {"error": f"Invalid agent_access.mode: {mode}"},
                 status_code=400,
@@ -93,8 +105,8 @@ async def save_settings_endpoint(body: dict[str, Any]):
 
     # Apply budget limits at runtime if supervisor is running
     budget_vals = body.get("budget")
-    if budget_vals and isinstance(budget_vals, dict) and _supervisor:
-        _supervisor.budget_tracker.update_limits(
+    if budget_vals and isinstance(budget_vals, dict) and supervisor:
+        supervisor.budget_tracker.update_limits(
             monthly_limit_usd=budget_vals.get("monthly_limit_usd"),
             alert_at_pct=budget_vals.get("alert_at_pct"),
         )
@@ -107,15 +119,15 @@ async def save_settings_endpoint(body: dict[str, Any]):
 
     # Apply agent access mode at runtime
     if agent_access and isinstance(agent_access, dict):
-        mode = _resolve_agent_access_mode({"agent_access": agent_access})
+        mode = app_mod._resolve_agent_access_mode({"agent_access": agent_access})
         from qe.tools.file_ops import set_workspace_root
 
-        workspace_root = _workspace_root_for_mode(mode)
+        workspace_root = app_mod._workspace_root_for_mode(mode)
         workspace_root.mkdir(parents=True, exist_ok=True)
         set_workspace_root(workspace_root)
 
-        if _chat_service is not None:
-            _chat_service.set_access_mode(mode)
+        if chat_service is not None:
+            chat_service.set_access_mode(mode)
 
         log.info(
             "agent_access.updated mode=%s workspace_root=%s",
@@ -130,12 +142,13 @@ async def save_settings_endpoint(body: dict[str, Any]):
 @router.post("/optimize/{genome_id}")
 async def optimize_genome(genome_id: str):
     """Run DSPy prompt optimization on a genome using calibration data."""
-    if not _supervisor:
+    app_mod = get_app_globals()
+    if not app_mod._supervisor:
         return JSONResponse({"error": "Engine not started"}, status_code=503)
 
     # Find the genome path
     genome_path = None
-    for p in _genome_paths():
+    for p in app_mod._genome_paths():
         import tomllib
         with p.open("rb") as f:
             g = tomllib.load(f)
@@ -153,10 +166,10 @@ async def optimize_genome(genome_id: str):
 
     # Get or create calibration tracker
     cal = CalibrationTracker(
-        db_path=_substrate.belief_ledger._db_path if _substrate else None
+        db_path=app_mod._substrate.belief_ledger._db_path if app_mod._substrate else None
     )
 
-    tuner = PromptTuner(cal, _substrate)
+    tuner = PromptTuner(cal, app_mod._substrate)
     result = await tuner.optimize_genome(genome_id, genome_path)
     return result.to_dict()
 
@@ -164,21 +177,23 @@ async def optimize_genome(genome_id: str):
 @router.post("/services/{service_id}/reset-circuit")
 async def reset_circuit_breaker(service_id: str):
     """Reset a circuit-broken service so it can resume processing."""
-    if not _supervisor:
+    app_mod = get_app_globals()
+    supervisor = app_mod._supervisor
+    if not supervisor:
         return JSONResponse({"error": "Engine not started"}, status_code=503)
 
     # Check service exists
     found = any(
         s.blueprint.service_id == service_id
-        for s in _supervisor.registry.all_services()
+        for s in supervisor.registry.all_services()
     )
     if not found:
         return JSONResponse(
             {"error": f"Service '{service_id}' not found"}, status_code=404
         )
 
-    _supervisor._circuits.pop(service_id, None)
-    _supervisor._pub_history.pop(service_id, None)
+    supervisor._circuits.pop(service_id, None)
+    supervisor._pub_history.pop(service_id, None)
     get_audit_log().record(
         "circuit.reset", resource=f"service/{service_id}"
     )
@@ -217,5 +232,4 @@ async def purge_dlq(request: Request):
     bus = get_bus()
     count = await bus.dlq_purge()
     return {"status": "purged", "count": count}
-
 

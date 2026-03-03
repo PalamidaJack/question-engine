@@ -9,6 +9,7 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+  <script src="/static/settings_helpers.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0a0c10; overflow: hidden; }
@@ -29,6 +30,7 @@
 
     const API = window.location.origin;
     const WS_URL = `ws://${window.location.host}/ws`;
+    const SettingsHelpers = window.QESettingsHelpers;
 
     const FONT_MONO = "'IBM Plex Mono', 'Fira Code', 'SF Mono', monospace";
     const FONT_SANS = "'IBM Plex Sans', 'DM Sans', system-ui, sans-serif";
@@ -1073,15 +1075,17 @@
       const chatEndRef = useRef(null);
 
       // Settings state
-      const [settings, setSettings] = useState({
-        budget: { monthly_limit_usd: 50, alert_at_pct: 0.80 },
-        runtime: { log_level: "INFO", hil_timeout_seconds: 3600 },
-        agent_access: { mode: "balanced" },
-      });
+      const [settings, setSettings] = useState(() => SettingsHelpers.getDefaultSettings());
       const [settingsDirty, setSettingsDirty] = useState(false);
       const [settingsSaving, setSettingsSaving] = useState(false);
       const [settingsError, setSettingsError] = useState(null);
       const [settingsSuccess, setSettingsSuccess] = useState(false);
+      const [flags, setFlags] = useState([]);
+      const [flagsLoading, setFlagsLoading] = useState(false);
+      const [flagsError, setFlagsError] = useState(null);
+      const [commandOpen, setCommandOpen] = useState(false);
+      const [commandQuery, setCommandQuery] = useState("");
+      const [showShortcuts, setShowShortcuts] = useState(false);
 
       // Reconfigure state
       const [showReconfigure, setShowReconfigure] = useState(false);
@@ -1096,14 +1100,10 @@
       const [displayPrefs, setDisplayPrefs] = useState(() => {
         try {
           const saved = localStorage.getItem("qe_display_prefs");
-          return saved ? JSON.parse(saved) : {
-            eventFilters: ["observations", "claims", "goals", "tasks", "hil", "system", "chat", "channels", "inference", "entities", "queries", "ingestion", "analysis", "synthesis", "memory", "monitor", "notification", "voice", "document", "predictions"],
-            minConfidence: 0,
-            showSuperseded: false,
-            timeRange: "all",
-          };
-        } catch { return { eventFilters: [], minConfidence: 0, showSuperseded: false, timeRange: "all" }; }
+          return saved ? JSON.parse(saved) : SettingsHelpers.getDefaultDisplayPrefs();
+        } catch { return SettingsHelpers.getDefaultDisplayPrefs(); }
       });
+      const fileImportRef = useRef(null);
 
       // Connect WebSocket
       useEffect(() => {
@@ -1189,19 +1189,27 @@
         } catch {}
       };
 
-      useEffect(() => { fetchClaims(); fetchHil(); fetchEntities(); fetchScout(); }, []);
+      const fetchFlags = async () => {
+        setFlagsLoading(true);
+        setFlagsError(null);
+        try {
+          const res = await fetch(`${API}/api/flags`);
+          if (!res.ok) throw new Error("Failed to load flags");
+          const data = await res.json();
+          setFlags(data.flags || []);
+        } catch (err) {
+          setFlagsError("Failed to load feature flags");
+        }
+        setFlagsLoading(false);
+      };
+
+      useEffect(() => { fetchClaims(); fetchHil(); fetchEntities(); fetchScout(); fetchFlags(); }, []);
 
       // Fetch settings on mount
       useEffect(() => {
         fetch(`${API}/api/settings`).then(r => r.json()).then(data => {
           if (data.budget || data.runtime || data.agent_access) {
-            setSettings(prev => ({
-              ...prev,
-              ...data,
-              budget: { ...prev.budget, ...(data.budget || {}) },
-              runtime: { ...prev.runtime, ...(data.runtime || {}) },
-              agent_access: { ...prev.agent_access, ...(data.agent_access || {}) },
-            }));
+            setSettings(prev => SettingsHelpers.mergeSettings(prev, data));
           }
         }).catch(() => {});
         // Fetch provider/channel status for reconfigure
@@ -1216,6 +1224,17 @@
       useEffect(() => {
         try { localStorage.setItem("qe_display_prefs", JSON.stringify(displayPrefs)); } catch {}
       }, [displayPrefs]);
+
+      useEffect(() => {
+        const onBeforeUnload = (e) => {
+          if (settingsDirty || reconfigDirty) {
+            e.preventDefault();
+            e.returnValue = "";
+          }
+        };
+        window.addEventListener("beforeunload", onBeforeUnload);
+        return () => window.removeEventListener("beforeunload", onBeforeUnload);
+      }, [settingsDirty, reconfigDirty]);
 
       const updateSetting = (section, key, value) => {
         setSettings(prev => ({ ...prev, [section]: { ...prev[section], [key]: value } }));
@@ -1234,6 +1253,57 @@
           else { setSettingsSuccess(true); setSettingsDirty(false); setTimeout(() => setSettingsSuccess(false), 3000); }
         } catch { setSettingsError("Network error"); }
         setSettingsSaving(false);
+      };
+
+      const handleFlagToggle = async (name, enabled) => {
+        try {
+          const path = enabled ? "disable" : "enable";
+          const res = await fetch(`${API}/api/flags/${name}/${path}`, { method: "POST" });
+          if (!res.ok) throw new Error("Toggle failed");
+          fetchFlags();
+        } catch {
+          setSettingsError(`Failed to toggle flag: ${name}`);
+        }
+      };
+
+      const exportSettingsBundle = () => {
+        const payload = SettingsHelpers.buildExportPayload(settings, displayPrefs);
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "qe-settings-export.json";
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const importSettingsBundle = async (file) => {
+        try {
+          const text = await file.text();
+          const data = SettingsHelpers.parseImportText(text);
+          if (data.settings) {
+            setSettings(prev => SettingsHelpers.mergeSettings(prev, data.settings));
+            setSettingsDirty(true);
+          }
+          if (data.displayPrefs) {
+            setDisplayPrefs(prev => ({ ...prev, ...data.displayPrefs }));
+          }
+        } catch {
+          setSettingsError("Invalid import file");
+        }
+      };
+
+      const resetSettingsSection = (section) => {
+        setSettings(prev => SettingsHelpers.resetSection(prev, section));
+        setSettingsDirty(true);
+      };
+
+      const handleFactoryReset = () => {
+        const typed = prompt("Type RESET to factory reset UI preferences and settings form values:");
+        if (typed !== "RESET") return;
+        setSettings(SettingsHelpers.getDefaultSettings());
+        setDisplayPrefs(SettingsHelpers.getDefaultDisplayPrefs());
+        setSettingsDirty(true);
       };
 
       const handleReconfigSave = async () => {
@@ -1456,6 +1526,48 @@
         { id: "settings", label: "Settings", icon: Icons.settings },
       ];
 
+      const quickActions = [
+        ...navItems.map(i => ({ id: `nav_${i.id}`, label: `Go to ${i.label}`, kind: "navigation", run: () => setActiveTab(i.id) })),
+        { id: "act_refresh_claims", label: "Refresh claims", kind: "action", run: () => fetchClaims() },
+        { id: "act_refresh_flags", label: "Refresh feature flags", kind: "action", run: () => fetchFlags() },
+        { id: "act_save_settings", label: "Save settings", kind: "action", run: () => handleSettingsSave() },
+        { id: "act_export_settings", label: "Export settings JSON", kind: "action", run: () => exportSettingsBundle() },
+      ];
+
+      const filteredActions = quickActions.filter(a =>
+        a.label.toLowerCase().includes(commandQuery.toLowerCase().trim())
+      ).slice(0, 12);
+
+      useEffect(() => {
+        const handler = (e) => {
+          const key = (e.key || "").toLowerCase();
+          const meta = e.metaKey || e.ctrlKey;
+          if (meta && key === "k") {
+            e.preventDefault();
+            setCommandOpen(v => !v);
+            return;
+          }
+          if (meta && key === "s") {
+            if (activeTab === "settings") {
+              e.preventDefault();
+              handleSettingsSave();
+            }
+            return;
+          }
+          if (meta && key === "/") {
+            e.preventDefault();
+            setShowShortcuts(v => !v);
+            return;
+          }
+          if (!meta) return;
+          if (key === "1") setActiveTab("dashboard");
+          if (key === "2") setActiveTab("chat");
+          if (key === "3") setActiveTab("settings");
+        };
+        window.addEventListener("keydown", handler);
+        return () => window.removeEventListener("keydown", handler);
+      }, [activeTab, settingsDirty, settings]);
+
       return (
         <div style={{
           display: "flex", height: "100vh", width: "100%", background: palette.bg,
@@ -1492,6 +1604,14 @@
                   Budget: ${budget.total_spend?.toFixed(4)} / ${budget.limit_usd?.toFixed(2)}
                 </div>
               )}
+              <button onClick={() => setCommandOpen(true)} style={{
+                marginTop: 10, width: "100%", padding: "6px 8px", borderRadius: 6,
+                border: `1px solid ${palette.border}`, background: palette.bg,
+                color: palette.textDim, fontSize: 10, fontFamily: FONT_MONO, cursor: "pointer",
+                textAlign: "left",
+              }}>
+                Command Palette  |  ⌘K / Ctrl+K
+              </button>
             </div>
 
             <div style={{ padding: "8px 8px", flex: 1 }}>
@@ -2443,6 +2563,90 @@
                     </div>
                   </div>
 
+                  {/* Feature Flags */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright }}>Feature Flags</div>
+                      <button onClick={fetchFlags} style={{
+                        border: `1px solid ${palette.border}`, background: palette.bg, color: palette.textDim,
+                        padding: "4px 8px", borderRadius: 4, fontFamily: FONT_MONO, fontSize: 10, cursor: "pointer",
+                      }}>Refresh</button>
+                    </div>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 12 }}>
+                      Runtime flags from `/api/flags`. Changes apply immediately.
+                    </div>
+                    {flagsLoading && <div style={{ fontSize: 12, color: palette.textDim, fontFamily: FONT_MONO }}>Loading flags...</div>}
+                    {flagsError && <div style={{ fontSize: 12, color: palette.red, fontFamily: FONT_MONO }}>{flagsError}</div>}
+                    {!flagsLoading && !flagsError && flags.length === 0 && (
+                      <div style={{ fontSize: 12, color: palette.textDim, fontFamily: FONT_MONO }}>No flags available.</div>
+                    )}
+                    {!flagsLoading && !flagsError && flags.length > 0 && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {flags.map(flag => (
+                          <label key={flag.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}`, cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={!!flag.enabled}
+                              onChange={() => handleFlagToggle(flag.name, !!flag.enabled)}
+                              style={{ width: 14, height: 14, accentColor: palette.accent }}
+                            />
+                            <span style={{ flex: 1, fontSize: 12, color: palette.text }}>{flag.name}</span>
+                            <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>{Math.round(flag.rollout_pct || 0)}%</span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Import / Export / Reset */}
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 4 }}>Import / Export / Reset</div>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 12 }}>
+                      Export current settings, import from JSON, or reset sections.
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                      <button onClick={exportSettingsBundle} style={{
+                        padding: "6px 10px", borderRadius: 6, border: `1px solid ${palette.border}`,
+                        background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 11, cursor: "pointer",
+                      }}>Export JSON</button>
+                      <button onClick={() => fileImportRef.current && fileImportRef.current.click()} style={{
+                        padding: "6px 10px", borderRadius: 6, border: `1px solid ${palette.border}`,
+                        background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 11, cursor: "pointer",
+                      }}>Import JSON</button>
+                      <input
+                        ref={fileImportRef}
+                        type="file"
+                        accept="application/json"
+                        style={{ display: "none" }}
+                        onChange={e => {
+                          const file = e.target.files && e.target.files[0];
+                          if (file) importSettingsBundle(file);
+                          e.target.value = "";
+                        }}
+                      />
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                      <button onClick={() => resetSettingsSection("budget")} style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${palette.border}`, background: palette.bg, color: palette.textDim, fontFamily: FONT_MONO, fontSize: 10, cursor: "pointer" }}>Reset Budget</button>
+                      <button onClick={() => resetSettingsSection("runtime")} style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${palette.border}`, background: palette.bg, color: palette.textDim, fontFamily: FONT_MONO, fontSize: 10, cursor: "pointer" }}>Reset Runtime</button>
+                      <button onClick={() => resetSettingsSection("agent_access")} style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${palette.border}`, background: palette.bg, color: palette.textDim, fontFamily: FONT_MONO, fontSize: 10, cursor: "pointer" }}>Reset Agent Access</button>
+                    </div>
+                    <button onClick={handleFactoryReset} style={{
+                      padding: "6px 10px", borderRadius: 6, border: `1px solid ${palette.red}40`,
+                      background: palette.redDim, color: palette.red, fontFamily: FONT_MONO, fontSize: 10, cursor: "pointer",
+                    }}>Factory Reset (type RESET)</button>
+                  </div>
+
+                  <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: "20px 24px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: palette.textBright, marginBottom: 4 }}>Keyboard Shortcuts</div>
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 10 }}>
+                      Open shortcut reference from anywhere with ⌘/Ctrl + /
+                    </div>
+                    <button onClick={() => setShowShortcuts(true)} style={{
+                      padding: "6px 10px", borderRadius: 6, border: `1px solid ${palette.border}`,
+                      background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 11, cursor: "pointer",
+                    }}>Open Shortcuts Reference</button>
+                  </div>
+
                   {/* Save Button */}
                   <button onClick={handleSettingsSave} disabled={!settingsDirty || settingsSaving} style={{
                     width: "100%", padding: "12px 20px", borderRadius: 8, border: "none",
@@ -2542,6 +2746,82 @@
                     )}
                   </div>
 
+                </div>
+              </div>
+            )}
+
+            {commandOpen && (
+              <div onClick={() => setCommandOpen(false)} style={{
+                position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 2000,
+                display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: "10vh",
+              }}>
+                <div onClick={e => e.stopPropagation()} style={{
+                  width: "min(720px, 92vw)", background: palette.surface, border: `1px solid ${palette.borderBright}`,
+                  borderRadius: 10, boxShadow: "0 18px 80px rgba(0,0,0,0.5)", overflow: "hidden",
+                }}>
+                  <div style={{ padding: "12px 14px", borderBottom: `1px solid ${palette.border}` }}>
+                    <input
+                      autoFocus
+                      value={commandQuery}
+                      onChange={e => setCommandQuery(e.target.value)}
+                      placeholder="Type a command or screen name..."
+                      style={{
+                        width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${palette.border}`,
+                        background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 12, outline: "none",
+                      }}
+                    />
+                  </div>
+                  <div style={{ maxHeight: "50vh", overflow: "auto", padding: 8 }}>
+                    {filteredActions.length === 0 && (
+                      <div style={{ fontSize: 11, color: palette.textDim, fontFamily: FONT_MONO, padding: "8px 10px" }}>No commands found.</div>
+                    )}
+                    {filteredActions.map(action => (
+                      <button
+                        key={action.id}
+                        onClick={() => { action.run(); setCommandOpen(false); setCommandQuery(""); }}
+                        style={{
+                          width: "100%", textAlign: "left", padding: "9px 10px", borderRadius: 6, border: "none",
+                          background: "transparent", color: palette.text, cursor: "pointer", fontFamily: FONT_MONO, fontSize: 12,
+                          display: "flex", justifyContent: "space-between",
+                        }}
+                      >
+                        <span>{action.label}</span>
+                        <span style={{ color: palette.textDim }}>{action.kind}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {showShortcuts && (
+              <div onClick={() => setShowShortcuts(false)} style={{
+                position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 2100,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                <div onClick={e => e.stopPropagation()} style={{
+                  width: "min(560px, 92vw)", background: palette.surface, border: `1px solid ${palette.borderBright}`,
+                  borderRadius: 10, padding: "14px 16px",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: palette.textBright }}>Keyboard Shortcuts</div>
+                    <button onClick={() => setShowShortcuts(false)} style={{ border: "none", background: "transparent", color: palette.textDim, fontFamily: FONT_MONO, cursor: "pointer" }}>ESC</button>
+                  </div>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {[
+                      ["⌘/Ctrl + K", "Open command palette"],
+                      ["⌘/Ctrl + S", "Save settings (Settings tab)"],
+                      ["⌘/Ctrl + /", "Open shortcut reference"],
+                      ["⌘/Ctrl + 1", "Go to Dashboard"],
+                      ["⌘/Ctrl + 2", "Go to Chat"],
+                      ["⌘/Ctrl + 3", "Go to Settings"],
+                    ].map(([k, v]) => (
+                      <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "6px 8px", background: palette.bg, border: `1px solid ${palette.border}`, borderRadius: 6 }}>
+                        <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.accent }}>{k}</span>
+                        <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>{v}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}

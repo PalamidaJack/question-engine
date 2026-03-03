@@ -24,9 +24,12 @@ from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTiming
 from qe.api.profiling import InquiryProfilingStore
 from qe.api.setup import (
     get_settings,
+    get_current_tiers,
     is_setup_complete,
     save_settings,
 )
+from qe.api.endpoints.memory import register_memory_routes
+from qe.api.endpoints.memory_ops import register_memory_ops_routes
 from qe.api.ws import ConnectionManager
 from qe.audit import get_audit_log
 from qe.bus import get_bus
@@ -109,6 +112,7 @@ _harvest_service = None
 _last_inquiry_profile: dict[str, Any] = {}
 _mcp_bridge = None
 _inquiry_profiling_store = InquiryProfilingStore()
+_extra_routes_registered = False
 
 _mass_intelligence_store = None
 _mass_intelligence_market_agent = None
@@ -658,6 +662,7 @@ async def lifespan(app: FastAPI):
     global _scout_service, _scout_store, _harvest_service
     global _mass_intelligence_store, _mass_intelligence_market_agent, _mass_intelligence_executor
     global _mcp_bridge
+    global _extra_routes_registered
 
     settings = get_settings()
     configure_from_config(settings)
@@ -703,6 +708,7 @@ async def lifespan(app: FastAPI):
             register_memory_ops_routes(app=app, memory_store=_memory_store)
         except Exception:
             log.exception("register_memory_ops_routes_failed")
+        _extra_routes_registered = True
 
     readiness.mark_ready("substrate_ready")
 
@@ -1241,7 +1247,7 @@ async def lifespan(app: FastAPI):
         app.state.mass_intelligence_store = _mass_intelligence_store
         app.state.mass_intelligence_market_agent = _mass_intelligence_market_agent
         app.state.mass_intelligence_executor = _mass_intelligence_executor
-        app.state.inquiry_profiling = _inquiry_profiling
+        app.state.inquiry_profiling = _inquiry_profiling_store
         app.state.event_log = _event_log
         app.state.substrate = _substrate
         app.state.planner = _planner
@@ -1265,6 +1271,36 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Initialize safe defaults for tests and any requests made before lifespan startup.
+app.state.notification_router = None
+app.state.active_adapters = []
+app.state.scout_service = None
+app.state.scout_store = None
+app.state.harvest_service = None
+app.state.cognitive_pool = None
+app.state.strategy_evolver = None
+app.state.elastic_scaler = None
+app.state.competitive_arena = None
+app.state.inquiry_bridge = None
+app.state.knowledge_loop = None
+app.state.guardrails_pipeline = None
+app.state.guardrails_config = None
+app.state.bus = get_bus()
+app.state.ws_manager = ws_manager
+app.state.peer_registry = None
+app.state.static_dir = Path(__file__).parent / "static"
+app.state.mass_intelligence_store = None
+app.state.mass_intelligence_market_agent = None
+app.state.mass_intelligence_executor = None
+app.state.inquiry_profiling = _inquiry_profiling_store
+app.state.event_log = None
+app.state.substrate = None
+app.state.planner = None
+app.state.dispatcher = None
+app.state.goal_store = None
+app.state.supervisor = None
+app.state.chat_service = None
 
 _cors_origins = (
     [o.strip() for o in os.environ["QE_CORS_ORIGINS"].split(",")]
