@@ -12,7 +12,7 @@ def register_memory_routes(
     """Register memory-related API routes."""
     from fastapi import HTTPException
 
-    @app.get("/api/memory")
+    @router.get("/api/memory")
     async def list_memories():
         if not memory_store:
             raise HTTPException(
@@ -33,7 +33,7 @@ def register_memory_routes(
             ]
         }
 
-    @app.post("/api/memory/preferences")
+    @router.post("/api/memory/preferences")
     async def set_preference(body: dict):
         if not memory_store:
             raise HTTPException(
@@ -52,7 +52,7 @@ def register_memory_routes(
             "value": entry.value,
         }
 
-    @app.delete("/api/memory/{memory_id}")
+    @router.delete("/api/memory/{memory_id}")
     async def delete_memory(memory_id: str):
         if not memory_store:
             raise HTTPException(
@@ -63,7 +63,7 @@ def register_memory_routes(
             raise HTTPException(404, "Memory not found")
         return {"deleted": True}
 
-    @app.get("/api/memory/projects")
+    @router.get("/api/memory/projects")
     async def list_projects():
         if not memory_store:
             raise HTTPException(
@@ -72,7 +72,7 @@ def register_memory_routes(
         projects = await memory_store.list_projects()
         return {"projects": projects}
 
-    @app.post("/api/memory/projects")
+    @router.post("/api/memory/projects")
     async def create_project(body: dict):
         if not memory_store:
             raise HTTPException(

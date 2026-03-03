@@ -18,25 +18,11 @@ class ResearcherService(BaseService):
             return ClaimExtractionResponse
         raise ValueError(f"Unsupported topic for LLM extraction: {topic}")
 
-    async def _handle_envelope(self, envelope: Envelope) -> None:
-        if envelope.topic != "observations.structured":
-            return
-
-        cold_storage = getattr(self.substrate, "cold_storage", None)
-        if cold_storage is not None:
-            cold_storage.append(envelope)
-
-        messages = self.context_manager.build_messages(envelope, self._turn_count)
-        model = self.router.select(envelope)
-        response = await self._call_llm(
-            model, messages, self.get_response_schema(envelope.topic)
-        )
-
-        self._turn_count += 1
-        if self._turn_count % self.blueprint.reinforcement_interval_turns == 0:
-            self.context_manager.reinforce()
-
-        await self.handle_response(envelope, response)
+    async def pre_handle(self, envelope: Envelope) -> None:
+        if envelope.topic == "observations.structured":
+            cold_storage = getattr(self.substrate, "cold_storage", None)
+            if cold_storage is not None:
+                cold_storage.append(envelope)
 
     async def handle_response(
         self, envelope: Envelope, response: ClaimExtractionResponse

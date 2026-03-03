@@ -342,6 +342,9 @@ class Supervisor:
         self._daemon_tasks.append(
             asyncio.create_task(self._agent_metrics_flush_loop())
         )
+        self._daemon_tasks.append(
+            asyncio.create_task(self._metacognitor_prune_loop())
+        )
 
     async def _on_heartbeat(self, envelope: Envelope) -> None:
         """Record heartbeat timestamp for a service."""
@@ -421,3 +424,13 @@ class Supervisor:
                 await self.agent_performance_tracker.flush()
             except Exception:
                 log.exception("Failed to flush agent metrics")
+
+    async def _metacognitor_prune_loop(self) -> None:
+        """Periodically prune old metacognitor approach trees."""
+        while self._running:
+            await asyncio.sleep(600)
+            if BaseService._shared_metacognitor is not None:
+                try:
+                    BaseService._shared_metacognitor.prune_trees()
+                except Exception:
+                    log.exception("Failed to prune metacognitor trees")

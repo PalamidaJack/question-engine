@@ -17,7 +17,7 @@ def register_goal_routes(
 
     _ = planner
 
-    @app.get("/api/goals/{goal_id}/dag")
+    @router.get("/api/goals/{goal_id}/dag")
     async def get_goal_dag(goal_id: str):
         if not goal_store:
             raise HTTPException(
@@ -49,7 +49,7 @@ def register_goal_routes(
 
         return {"nodes": nodes, "edges": edges}
 
-    @app.get("/api/goals/{goal_id}/progress")
+    @router.get("/api/goals/{goal_id}/progress")
     async def get_goal_progress(goal_id: str):
         # Try in-memory dispatcher state first, fall back to persisted store
         state = dispatcher.get_goal_state(goal_id) if dispatcher else None
@@ -108,7 +108,7 @@ def register_goal_routes(
             "subtasks": subtasks_info,
         }
 
-    @app.get("/api/goals/{goal_id}/result")
+    @router.get("/api/goals/{goal_id}/result")
     async def get_goal_result(goal_id: str):
         if not goal_store:
             raise HTTPException(503, "Goal store not initialized")

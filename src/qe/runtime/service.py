@@ -116,6 +116,9 @@ class BaseService:
         self._running = False
         self._heartbeat_task: asyncio.Task | None = None
 
+    async def pre_handle(self, envelope: Envelope) -> None:
+        pass
+
     async def _maybe_await(self, result: Any) -> Any:
         if inspect.isawaitable(result):
             return await result
@@ -141,7 +144,6 @@ class BaseService:
     async def _handle_envelope(self, envelope: Envelope) -> None:
         assert envelope.topic in self.blueprint.capabilities.bus_topics_subscribe
 
-        # Set correlation context for structured logging
         ctx_envelope_id.set(envelope.envelope_id)
         ctx_correlation_id.set(envelope.correlation_id or "")
         ctx_service_id.set(self.blueprint.service_id)
@@ -154,7 +156,8 @@ class BaseService:
             envelope.envelope_id,
         )
 
-        # Tracing span for envelope handling (no-op if opentelemetry not installed)
+        await self.pre_handle(envelope)
+
         envelope_span_attrs = {
             "service.id": self.blueprint.service_id,
             "topic": envelope.topic,
@@ -165,15 +168,12 @@ class BaseService:
         model = self.router.select(envelope)
         schema = self.get_response_schema(envelope.topic)
 
-        # ── Tripwire guardrails: run safety checks parallel to LLM call ──
         llm_task = asyncio.create_task(self._call_llm(model, messages, schema))
         guard_task = asyncio.create_task(self._run_guardrails(envelope))
 
-        # Await guardrails under a short-lived span; cancel LLM if tripped
         with otel.start_span("service.guardrails", envelope_span_attrs):
             guard_result = await guard_task
 
-        # If guardrails did not trip, proceed to await LLM response inside a span
         if guard_result is not None and guard_result.risk_score >= _sanitizer.threshold:
             llm_task.cancel()
             try:
@@ -206,36 +206,12 @@ class BaseService:
             "service.llm_call",
             {**envelope_span_attrs, "model": model, "schema": schema.__name__},
         ):
-            response = await llm_task
-        if guard_result is not None and guard_result.risk_score >= _sanitizer.threshold:
-            llm_task.cancel()
             try:
-                await llm_task
-            except asyncio.CancelledError:
-                pass
-            log.warning(
-                "guardrail.tripwire service_id=%s envelope_id=%s "
-                "risk=%.2f patterns=%s — LLM call cancelled",
-                self.blueprint.service_id,
-                envelope.envelope_id,
-                guard_result.risk_score,
-                guard_result.matches,
-            )
-            self.bus.publish(
-                Envelope(
-                    topic="system.gate_denied",
-                    source_service_id=self.blueprint.service_id,
-                    correlation_id=envelope.envelope_id,
-                    payload={
-                        "reason": "guardrail_tripwire",
-                        "risk_score": guard_result.risk_score,
-                        "patterns": guard_result.matches,
-                    },
-                )
-            )
-            return
-
-        # response already obtained in llm_call span
+                response = await llm_task
+                self.router.record_success(model)
+            except Exception:
+                self.router.record_error(model)
+                raise
 
         self._turn_count += 1
         if self._turn_count % self.blueprint.reinforcement_interval_turns == 0:
@@ -295,7 +271,7 @@ class BaseService:
             cost = litellm.completion_cost(
                 model=model,
                 messages=messages,
-                completion="",
+                completion=str(response),
             )
             self._shared_budget.record_cost(
                 model,

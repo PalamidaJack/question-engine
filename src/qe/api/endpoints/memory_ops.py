@@ -21,7 +21,6 @@ def register_memory_ops_routes(app: FastAPI, memory_store: Any | None = None) ->
     registration can occur early in the startup lifespan.
     """
 
-    app.include_router(router, prefix="/api/memory")
 
 
 @router.get("/search")

@@ -23,6 +23,9 @@ class BeliefLedger:
         self._db_path = db_path
         self._migrations_dir = migrations_dir
         self._decay_half_life_hours = decay_half_life_hours
+        import asyncio
+        self._db_lock = asyncio.Lock()
+        self._db_conn = None
 
     def _apply_decay(self, claim: Claim, now: datetime) -> Claim:
         """Return a copy of *claim* with confidence adjusted for age.
@@ -40,14 +43,18 @@ class BeliefLedger:
         factor = math.pow(0.5, age_hours / self._decay_half_life_hours)
         return claim.model_copy(update={"confidence": claim.confidence * factor})
 
+    async def _get_db(self):
+        if self._db_conn is None:
+            self._db_conn = await aiosqlite.connect(self._db_path)
+            self._db_conn.row_factory = aiosqlite.Row
+            await self._db_conn.execute("PRAGMA journal_mode=WAL;")
+            await self._db_conn.execute("PRAGMA foreign_keys=ON;")
+            await self._db_conn.commit()
+        return self._db_conn
+
     async def initialize(self) -> None:
         """Initialize the database connection and apply migrations."""
-        async with aiosqlite.connect(self._db_path) as db:
-            # Enable WAL mode for concurrent reads during writes
-            await db.execute("PRAGMA journal_mode=WAL;")
-            await db.execute("PRAGMA foreign_keys=ON;")
-            await db.commit()
-
+        await self._get_db()
         self._apply_migrations()
 
     def _apply_migrations(self) -> None:
@@ -64,7 +71,8 @@ class BeliefLedger:
         - If new confidence > old confidence: supersede the old
         - If new confidence <= old confidence: store as alternative (no supersession)
         """
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             # Acquire write lock before read-modify-write to prevent race conditions
             await db.execute("BEGIN IMMEDIATE")
 
@@ -140,7 +148,8 @@ class BeliefLedger:
         if not include_superseded:
             query += " AND superseded_by IS NULL"
 
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
 
@@ -155,7 +164,8 @@ class BeliefLedger:
 
     async def commit_prediction(self, prediction: Prediction) -> Prediction:
         """Write a prediction to the ledger."""
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             await db.execute(
                 """
                 INSERT INTO predictions (
@@ -193,7 +203,8 @@ class BeliefLedger:
         evidence_envelope_ids: list[str],
     ) -> Prediction:
         """Resolve a prediction with evidence."""
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             await db.execute(
                 """
                 UPDATE predictions
@@ -238,7 +249,8 @@ class BeliefLedger:
             """
             params = ()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
 
@@ -246,7 +258,8 @@ class BeliefLedger:
 
     async def commit_null_result(self, null_result: NullResult) -> NullResult:
         """Write a null result to the ledger."""
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             await db.execute(
                 """
                 INSERT INTO null_results (
@@ -271,7 +284,8 @@ class BeliefLedger:
 
     async def get_claim_by_id(self, claim_id: str) -> Claim | None:
         """Fetch a single claim by its ID."""
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             cursor = await db.execute(
                 "SELECT * FROM claims WHERE claim_id = ?",
                 (claim_id,),
@@ -286,7 +300,8 @@ class BeliefLedger:
         query = "SELECT COUNT(*) FROM claims"
         if not include_superseded:
             query += " WHERE superseded_by IS NULL"
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             cursor = await db.execute(query)
             row = await cursor.fetchone()
         return row[0]
@@ -302,7 +317,8 @@ class BeliefLedger:
         if not include_superseded:
             query += " AND superseded_by IS NULL"
         query += " ORDER BY created_at DESC"
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
 
@@ -311,7 +327,8 @@ class BeliefLedger:
 
     async def retract_claim(self, claim_id: str) -> bool:
         """Soft-retract a claim by marking it as superseded by 'retracted'."""
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             cursor = await db.execute(
                 "SELECT claim_id FROM claims WHERE claim_id = ?",
                 (claim_id,),
@@ -335,7 +352,8 @@ class BeliefLedger:
         # Join with OR for broader matching
         fts_query = " OR ".join(f'"{w}"' for w in words)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        db = await self._get_db()
+        async with self._db_lock:
             cursor = await db.execute(
                 """
                 SELECT c.*
@@ -352,36 +370,36 @@ class BeliefLedger:
         now = datetime.now(UTC)
         return [self._apply_decay(self._row_to_claim(row), now) for row in rows]
 
-    def _row_to_claim(self, row: tuple) -> Claim:
+    def _row_to_claim(self, row: aiosqlite.Row) -> Claim:
         """Convert a database row to a Claim object."""
         return Claim(
-            claim_id=row[0],
-            schema_version=row[1],
-            subject_entity_id=row[2],
-            predicate=row[3],
-            object_value=row[4],
-            confidence=row[5],
-            source_service_id=row[6],
-            source_envelope_ids=json.loads(row[7]),
-            created_at=datetime.fromisoformat(row[8]),
-            valid_until=datetime.fromisoformat(row[9]) if row[9] else None,
-            superseded_by=row[10],
-            tags=json.loads(row[11]),
-            metadata=json.loads(row[12])
+            claim_id=row["claim_id"],
+            schema_version=row["schema_version"],
+            subject_entity_id=row["subject_entity_id"],
+            predicate=row["predicate"],
+            object_value=row["object_value"],
+            confidence=row["confidence"],
+            source_service_id=row["source_service_id"],
+            source_envelope_ids=json.loads(row["source_envelope_ids"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            valid_until=datetime.fromisoformat(row["valid_until"]) if row["valid_until"] else None,
+            superseded_by=row["superseded_by"],
+            tags=json.loads(row["tags"]),
+            metadata=json.loads(row["metadata"])
         )
 
-    def _row_to_prediction(self, row: tuple) -> Prediction:
+    def _row_to_prediction(self, row: aiosqlite.Row) -> Prediction:
         """Convert a database row to a Prediction object."""
         return Prediction(
-            prediction_id=row[0],
-            schema_version=row[1],
-            statement=row[2],
-            confidence=row[3],
-            resolution_criteria=row[4],
-            resolution_deadline=datetime.fromisoformat(row[5]) if row[5] else None,
-            source_service_id=row[6],
-            created_at=datetime.fromisoformat(row[7]),
-            resolved_at=datetime.fromisoformat(row[8]) if row[8] else None,
-            resolution=row[9],
-            resolution_evidence_ids=json.loads(row[10])
+            prediction_id=row["prediction_id"],
+            schema_version=row["schema_version"],
+            statement=row["statement"],
+            confidence=row["confidence"],
+            resolution_criteria=row["resolution_criteria"],
+            resolution_deadline=datetime.fromisoformat(row["resolution_deadline"]) if row["resolution_deadline"] else None,
+            source_service_id=row["source_service_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
+            resolution=row["resolution"],
+            resolution_evidence_ids=json.loads(row["resolution_evidence_ids"])
         )

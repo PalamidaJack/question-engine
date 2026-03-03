@@ -178,17 +178,20 @@ class MemoryBus:
                 running_loop = False
 
             tasks: list[asyncio.Task] = []
-            for handler in handlers:
-                if running_loop:
+            if running_loop:
+                for handler in handlers:
                     task = asyncio.create_task(
                         self._guarded_call(handler, envelope)
                     )
                     task.add_done_callback(self._handle_task_exception)
                     tasks.append(task)
-                else:
-                    asyncio.run(self._guarded_call(handler, envelope))
-
-            return tasks
+                return tasks
+            else:
+                async def run_all():
+                    coros = [self._guarded_call(handler, envelope) for handler in handlers]
+                    await asyncio.gather(*coros, return_exceptions=True)
+                asyncio.run(run_all())
+                return []
         # end span context
 
     def publish_sync(self, topic: str, payload: dict[str, Any]) -> None:
@@ -504,4 +507,4 @@ class MemoryBus:
 
     def _handle_task_exception(self, task: asyncio.Task) -> None:
         if not task.cancelled() and task.exception():
-            pass
+            log.error("Task failed: %s", task.exception(), exc_info=task.exception())

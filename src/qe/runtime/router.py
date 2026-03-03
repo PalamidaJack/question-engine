@@ -13,9 +13,9 @@ if TYPE_CHECKING:
     from qe.runtime.discovery.service import ModelDiscoveryService
 
 TIER_MODELS = {
-    "fast": ["gpt-4o-mini", "claude-haiku-3-5"],
-    "balanced": ["gpt-4o", "claude-sonnet-3-5"],
-    "powerful": ["o1-preview", "claude-opus-3"],
+    "fast": ["openai/google/gemini-2.0-flash-001", "openai/anthropic/claude-3.5-haiku", "gpt-4o-mini"],
+    "balanced": ["openai/anthropic/claude-sonnet-4", "gpt-4o"],
+    "powerful": ["o1-preview", "openai/anthropic/claude-sonnet-4"],
     "local": ["ollama/qwen3:8b", "ollama/llama3.1:8b"],
 }
 
