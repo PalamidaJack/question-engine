@@ -78,6 +78,20 @@ class ScoutConfig(BaseModel):
     ])
 
 
+class HarvestConfig(BaseModel):
+    enabled: bool = False
+    poll_interval_seconds: int = Field(default=1800, gt=0)
+    max_claims_per_cycle: int = Field(default=10, gt=0)
+    consensus_model_count: int = Field(default=5, ge=2, le=20)
+    adversarial_confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    low_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    premium_sprint_enabled: bool = True
+    model_profile_enabled: bool = True
+    budget_limit_per_cycle_usd: float = Field(default=0.0, ge=0.0)
+    max_concurrent_harvest: int = Field(default=5, gt=0)
+    cycle_timeout_seconds: int = Field(default=300, gt=0)
+
+
 class QEConfig(BaseModel):
     """Root configuration model for config.toml."""
 
@@ -88,6 +102,7 @@ class QEConfig(BaseModel):
     bus: BusConfig = Field(default_factory=BusConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     scout: ScoutConfig = Field(default_factory=ScoutConfig)
+    harvest: HarvestConfig = Field(default_factory=HarvestConfig)
 
     model_config = {"extra": "allow"}
 

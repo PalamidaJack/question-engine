@@ -16,7 +16,7 @@ type = "memory"
 # redis_url = "redis://localhost:6379"
 
 [models]
-fast = "openai/google/gemini-2.0-flash"
+fast = "openai/google/gemini-2.5-flash"
 balanced = "openai/anthropic/claude-sonnet-4"
 powerful = "openai/anthropic/claude-sonnet-4"
 
@@ -49,6 +49,19 @@ search_topics = [
     "LLM agent architecture",
     "cognitive architecture AI",
 ]
+
+[harvest]
+enabled = false
+poll_interval_seconds = 1800
+max_claims_per_cycle = 10
+consensus_model_count = 5
+adversarial_confidence_threshold = 0.85
+low_confidence_threshold = 0.5
+premium_sprint_enabled = true
+model_profile_enabled = true
+budget_limit_per_cycle_usd = 0.0
+max_concurrent_harvest = 5
+cycle_timeout_seconds = 300
 
 [api_keys]
 # Do NOT put keys here. Set as environment variables: OPENAI_API_KEY, ANTHROPIC_API_KEY

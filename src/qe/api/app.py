@@ -112,10 +112,32 @@ _workspace_manager = None
 _discovery_service = None
 _scout_service = None
 _scout_store = None
+_harvest_service = None
 _last_inquiry_profile: dict[str, Any] = {}
 _inquiry_profiling_store = InquiryProfilingStore()
 
+_mass_intelligence_store = None
+_mass_intelligence_market_agent = None
+_mass_intelligence_executor = None
+
 INBOX_DIR = Path("data/runtime_inbox")
+
+_AGENT_ACCESS_MODES = {"strict", "balanced", "full"}
+
+
+def _resolve_agent_access_mode(settings: dict[str, Any]) -> str:
+    """Resolve agent access mode from persisted settings."""
+    mode = settings.get("agent_access", {}).get("mode", "balanced")
+    if mode not in _AGENT_ACCESS_MODES:
+        return "balanced"
+    return mode
+
+
+def _workspace_root_for_mode(mode: str) -> Path:
+    """Map agent access mode to workspace root path."""
+    if mode == "full":
+        return Path(os.environ.get("QE_FULL_ACCESS_ROOT", "/"))
+    return Path("data/workspaces/chat")
 
 
 def _configure_kilocode() -> None:
@@ -528,9 +550,11 @@ async def lifespan(app: FastAPI):
     global _elastic_scaler, _episodic_memory
     global _tool_registry, _tool_gate, _workspace_manager
     global _discovery_service
-    global _scout_service, _scout_store
+    global _scout_service, _scout_store, _harvest_service
+    global _mass_intelligence_store, _mass_intelligence_market_agent, _mass_intelligence_executor
 
-    configure_from_config(get_settings())
+    settings = get_settings()
+    configure_from_config(settings)
 
     bus = get_bus()
 
@@ -554,6 +578,44 @@ async def lifespan(app: FastAPI):
         )
 
     readiness.mark_ready("substrate_ready")
+
+    # Initialize Mass Intelligence services (always available, even before setup)
+    from qe.substrate.model_market import ModelMarketStore
+    from qe.services.mass_intelligence import ModelMarketAgent, MassIntelligenceExecutor
+
+    _db_path = _substrate.belief_ledger._db_path
+    _mass_intelligence_store = ModelMarketStore(db_path=_db_path)
+    await _mass_intelligence_store.initialize()
+
+    api_keys = {
+        "openrouter": os.environ.get("OPENROUTER_API_KEY", ""),
+        "groq": os.environ.get("GROQ_API_KEY", ""),
+        "cerebras": os.environ.get("CEREBRAS_API_KEY", ""),
+        "cohere": os.environ.get("COHERE_API_KEY", ""),
+        "mistral": os.environ.get("MISTRAL_API_KEY", ""),
+        "google": os.environ.get("GOOGLE_API_KEY", ""),
+        "hyperbolic": os.environ.get("HYPERBOLIC_API_KEY", ""),
+        "sambanova": os.environ.get("SAMBANOVA_API_KEY", ""),
+        "scaleway": os.environ.get("SCALEWAY_API_KEY", ""),
+        "cloudflare": os.environ.get("CLOUDFLARE_API_KEY", ""),
+    }
+
+    _mass_intelligence_market_agent = ModelMarketAgent(
+        store=_mass_intelligence_store,
+        poll_interval_seconds=900,
+        api_keys=api_keys,
+    )
+    await _mass_intelligence_market_agent.start()
+
+    _mass_intelligence_executor = MassIntelligenceExecutor(
+        store=_mass_intelligence_store,
+        market_agent=_mass_intelligence_market_agent,
+        default_timeout_seconds=30.0,
+        max_concurrent=10,
+        api_keys=api_keys,
+    )
+
+    log.info("mass_intelligence.services_initialized")
 
     relay_task: asyncio.Task | None = None
 
@@ -584,7 +646,9 @@ async def lifespan(app: FastAPI):
         from qe.runtime.tool_bootstrap import create_default_gate, create_default_registry
         from qe.runtime.tool_gate import SecurityPolicy
         from qe.runtime.workspace import WorkspaceManager
+        from qe.tools.file_ops import set_workspace_root
 
+        agent_access_mode = _resolve_agent_access_mode(settings)
         _tool_registry = create_default_registry()
         _tool_gate = create_default_gate(policies=[
             SecurityPolicy(
@@ -594,6 +658,14 @@ async def lifespan(app: FastAPI):
             ),
         ])
         _workspace_manager = WorkspaceManager(base_dir="data/workspaces")
+        workspace_root = _workspace_root_for_mode(agent_access_mode)
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        set_workspace_root(workspace_root)
+        log.info(
+            "agent_access.configured mode=%s workspace_root=%s",
+            agent_access_mode,
+            workspace_root,
+        )
         BaseService.set_tool_registry(_tool_registry)
         BaseService.set_tool_gate(_tool_gate)
 
@@ -821,6 +893,28 @@ async def lifespan(app: FastAPI):
         )
         await _scout_service.start()
 
+        # Harvest Service — autonomous knowledge improvement via free models
+        from qe.config import HarvestConfig
+        from qe.services.harvest import HarvestService
+
+        _harvest_config = load_config(Path("config.toml")).harvest
+        _harvest_service = HarvestService(
+            bus=bus,
+            substrate=_substrate,
+            discovery=_discovery_service,
+            mass_executor=_mass_intelligence_executor,
+            episodic_memory=_episodic_memory,
+            epistemic_reasoner=_epistemic_reasoner,
+            procedural_memory=_procedural_memory,
+            config=_harvest_config,
+        )
+        flag_store.define(
+            "harvest_service",
+            enabled=False,
+            description="Enable Harvest Service for autonomous knowledge improvement",
+        )
+        await _harvest_service.start()
+
         _goal_store = GoalStore(_substrate.belief_ledger._db_path)
         _planner = PlannerService(
             bus=bus,
@@ -926,6 +1020,7 @@ async def lifespan(app: FastAPI):
             insight_crystallizer=_insight_crystallizer,
             knowledge_loop=_knowledge_loop,
             procedural_memory=_procedural_memory,
+            access_mode=agent_access_mode,
         )
 
         # Register the default executor as an agent in the pool
@@ -1006,6 +1101,23 @@ async def lifespan(app: FastAPI):
         except Exception:
             log.debug("shutdown.mcp_bridge_stop_failed")
 
+        # Shutdown — Mass Intelligence
+        try:
+            if _mass_intelligence_market_agent is not None:
+                await _mass_intelligence_market_agent.stop()
+        except Exception:
+            log.debug("shutdown.mass_intelligence_market_agent_stop_failed")
+
+        try:
+            if _mass_intelligence_store is not None:
+                await _mass_intelligence_store.close()
+        except Exception:
+            log.debug("shutdown.mass_intelligence_store_close_failed")
+
+        _mass_intelligence_market_agent = None
+        _mass_intelligence_executor = None
+        _mass_intelligence_store = None
+
         # Shutdown — Model Discovery
         try:
             if _discovery_service is not None:
@@ -1021,6 +1133,14 @@ async def lifespan(app: FastAPI):
             log.debug("shutdown.scout_stop_failed")
         _scout_service = None
         _scout_store = None
+
+        # Shutdown — Harvest Service
+        try:
+            if _harvest_service is not None:
+                await _harvest_service.stop()
+        except Exception:
+            log.debug("shutdown.harvest_stop_failed")
+        _harvest_service = None
 
         # Shutdown — Inquiry Bridge
         try:
@@ -1354,6 +1474,15 @@ async def get_settings_endpoint():
 @app.post("/api/settings")
 async def save_settings_endpoint(body: dict[str, Any]):
     """Save runtime settings and apply budget changes at runtime."""
+    agent_access = body.get("agent_access")
+    if agent_access and isinstance(agent_access, dict):
+        mode = agent_access.get("mode")
+        if mode is not None and mode not in _AGENT_ACCESS_MODES:
+            return JSONResponse(
+                {"error": f"Invalid agent_access.mode: {mode}"},
+                status_code=400,
+            )
+
     save_settings(body)
 
     # Apply budget limits at runtime if supervisor is running
@@ -1369,6 +1498,24 @@ async def save_settings_endpoint(body: dict[str, Any]):
     if runtime_vals and isinstance(runtime_vals, dict):
         if "log_level" in runtime_vals:
             update_log_level(runtime_vals["log_level"])
+
+    # Apply agent access mode at runtime
+    if agent_access and isinstance(agent_access, dict):
+        mode = _resolve_agent_access_mode({"agent_access": agent_access})
+        from qe.tools.file_ops import set_workspace_root
+
+        workspace_root = _workspace_root_for_mode(mode)
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        set_workspace_root(workspace_root)
+
+        if _chat_service is not None:
+            _chat_service.set_access_mode(mode)
+
+        log.info(
+            "agent_access.updated mode=%s workspace_root=%s",
+            mode,
+            workspace_root,
+        )
 
     get_audit_log().record("settings.update", resource="config", detail=body)
     return {"status": "saved"}
@@ -1568,6 +1715,114 @@ async def inquiry_bridge_status():
     return _inquiry_bridge.status()
 
 
+# ── Mass Intelligence ───────────────────────────────────────────────────────
+
+
+@app.get("/api/mass-intelligence/status")
+async def mass_intelligence_status():
+    """Return mass intelligence services status."""
+    if _mass_intelligence_market_agent is None:
+        return {"running": False}
+    
+    stats = await _mass_intelligence_market_agent.get_stats()
+    agent_status = _mass_intelligence_market_agent.status()
+    
+    return {
+        "running": agent_status["running"],
+        "poll_interval_seconds": agent_status["poll_interval_seconds"],
+        "stats": stats,
+    }
+
+
+@app.get("/api/mass-intelligence/models")
+async def mass_intelligence_models():
+    """Return list of available free models."""
+    if _mass_intelligence_store is None:
+        return {"models": [], "error": "Service not initialized"}
+    
+    models = await _mass_intelligence_store.get_available_models()
+    return {"models": models, "count": len(models)}
+
+
+@app.post("/api/mass-intelligence/query")
+async def mass_intelligence_query(prompt: str, system_message: str | None = None):
+    """Execute a prompt across all available free models."""
+    if _mass_intelligence_executor is None:
+        return {"error": "Service not initialized", "responses": []}
+    
+    result = await _mass_intelligence_executor.execute(
+        prompt=prompt,
+        system_message=system_message,
+    )
+    
+    return {
+        "prompt": result.prompt,
+        "total_models": result.total_models,
+        "successful": result.successful,
+        "failed": result.failed,
+        "total_time_ms": result.total_time_ms,
+        "responses": [
+            {
+                "provider": r.provider,
+                "model_id": r.model_id,
+                "model_name": r.model_name,
+                "response": r.response,
+                "latency_ms": r.latency_ms,
+                "success": r.success,
+                "error": r.error,
+            }
+            for r in result.responses
+        ],
+    }
+
+
+@app.post("/api/mass-intelligence/quick")
+async def mass_intelligence_quick(prompt: str, max_models: int = 5):
+    """Quick query with limited models for faster response."""
+    if _mass_intelligence_executor is None:
+        return {"error": "Service not initialized", "responses": []}
+    
+    result = await _mass_intelligence_executor.quick_query(
+        prompt=prompt,
+        max_models=max_models,
+    )
+    
+    return {
+        "prompt": result.prompt,
+        "total_models": result.total_models,
+        "successful": result.successful,
+        "failed": result.failed,
+        "total_time_ms": result.total_time_ms,
+        "responses": [
+            {
+                "provider": r.provider,
+                "model_id": r.model_id,
+                "model_name": r.model_name,
+                "response": r.response,
+                "latency_ms": r.latency_ms,
+                "success": r.success,
+                "error": r.error,
+            }
+            for r in result.responses
+        ],
+    }
+
+
+@app.post("/api/mass-intelligence/refresh")
+async def mass_intelligence_refresh():
+    """Force refresh of model inventory from providers."""
+    if _mass_intelligence_market_agent is None:
+        return {"error": "Service not initialized"}
+    
+    await _mass_intelligence_market_agent._scrape_all_providers()
+    models = await _mass_intelligence_store.get_available_models()
+    
+    return {
+        "success": True,
+        "models_count": len(models),
+    }
+
+
 # ── Innovation Scout ──────────────────────────────────────────────────────
 
 
@@ -1600,6 +1855,17 @@ async def scout_proposal_detail(proposal_id: str):
     if proposal is None:
         return JSONResponse({"error": "Proposal not found"}, status_code=404)
     return proposal.model_dump(mode="json")
+
+
+# ── Harvest Service ──────────────────────────────────────────────────────
+
+
+@app.get("/api/harvest/status")
+async def harvest_status():
+    """Return harvest service status."""
+    if _harvest_service is None:
+        return {"running": False}
+    return _harvest_service.status()
 
 
 @app.post("/api/scout/proposals/{proposal_id}/approve")
@@ -2002,6 +2268,7 @@ async def status():
         "bridge": _inquiry_bridge.status() if _inquiry_bridge else None,
         "knowledge_loop": _knowledge_loop.status() if _knowledge_loop else None,
         "scout": _scout_service.status() if _scout_service else None,
+        "harvest": _harvest_service.status() if _harvest_service else None,
     }
 
 

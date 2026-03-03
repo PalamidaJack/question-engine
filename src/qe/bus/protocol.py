@@ -168,6 +168,14 @@ TOPICS = {
     "scout.proposal_tested",
     "scout.proposal_applied",
     "scout.learning_recorded",
+    # Harvest Service
+    "harvest.cycle_started",
+    "harvest.cycle_completed",
+    "harvest.claim_validated",
+    "harvest.claim_challenged",
+    "harvest.gap_explored",
+    "harvest.premium_sprint_executed",
+    "harvest.model_profiled",
 }
 
 
