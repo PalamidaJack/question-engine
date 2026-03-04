@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 
-router = APIRouter()
+router = APIRouter(prefix="/api/memory", tags=["Memory"])
 
 
 def register_memory_ops_routes(app: FastAPI, memory_store: Any | None = None) -> None:
@@ -20,7 +20,7 @@ def register_memory_ops_routes(app: FastAPI, memory_store: Any | None = None) ->
     Handlers resolve runtime components lazily from `qe.api.app` so the
     registration can occur early in the startup lifespan.
     """
-
+    app.include_router(router)
 
 
 @router.get("/search")

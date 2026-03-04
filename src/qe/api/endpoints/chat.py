@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from qe.api.auth import get_auth_provider
 from qe.bus import get_bus
 from qe.models.envelope import Envelope
 
@@ -49,8 +50,30 @@ async def chat_rest(request: Request, body: dict[str, Any]):
 # ── WebSocket ───────────────────────────────────────────────────────────────
 
 
+async def _ws_authenticate(websocket: WebSocket) -> bool:
+    """Check API key from query params for WebSocket connections.
+
+    Returns True if auth passes (or auth is disabled). Closes the
+    WebSocket with code 4008 and returns False if auth fails.
+    """
+    provider = get_auth_provider()
+    if not provider.enabled:
+        return True
+    api_key = websocket.query_params.get("api_key", "")
+    if not api_key:
+        await websocket.close(code=4008, reason="X-API-Key required")
+        return False
+    ctx = provider.validate_key(api_key)
+    if ctx is None:
+        await websocket.close(code=4008, reason="Invalid API key")
+        return False
+    return True
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(request: Request, websocket: WebSocket):
+    if not await _ws_authenticate(websocket):
+        return
     app_mod = get_app_globals()
     await app_mod.ws_manager.connect(websocket)
     try:
@@ -64,6 +87,8 @@ async def websocket_endpoint(request: Request, websocket: WebSocket):
 @router.websocket("/ws/chat")
 async def chat_websocket(request: Request, websocket: WebSocket):
     """Per-session chat WebSocket with pipeline progress events."""
+    if not await _ws_authenticate(websocket):
+        return
     await websocket.accept()
     session_id = str(uuid.uuid4())
 

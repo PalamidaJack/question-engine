@@ -662,6 +662,7 @@ async def lifespan(app: FastAPI):
     global _mass_intelligence_store, _mass_intelligence_market_agent, _mass_intelligence_executor
     global _mcp_bridge
     global _extra_routes_registered
+    global _memory_store, _prompt_registry, _inquiry_engine
 
     settings = get_settings()
     configure_from_config(settings)
@@ -1062,6 +1063,52 @@ async def lifespan(app: FastAPI):
         )
         await _harvest_service.start()
 
+        # Phase 2-4 feature flags
+        flag_store.define(
+            "stable_prompt_prefix", enabled=False,
+            description="Split system prompt into stable prefix + dynamic suffix for KV-cache optimization",
+        )
+        flag_store.define(
+            "tool_masking", enabled=False,
+            description="Return all tools regardless of mode — ToolGate blocks at execution time",
+        )
+        flag_store.define(
+            "recitation_pattern", enabled=False,
+            description="Re-state original request every 4 iterations to prevent drift",
+        )
+        flag_store.define(
+            "artifact_handles", enabled=False,
+            description="Store large tool results as artifacts, inject handles into context",
+        )
+        flag_store.define(
+            "pattern_breaking", enabled=False,
+            description="Vary agent state format to prevent behavioral mimicry",
+        )
+        flag_store.define(
+            "proactive_recall", enabled=False,
+            description="Inject procedural memory suggestions into dynamic context",
+        )
+        flag_store.define(
+            "task_aware_routing", enabled=False,
+            description="Route LLM calls based on task classification",
+        )
+        flag_store.define(
+            "parallel_tool_calls", enabled=False,
+            description="Execute multiple tool calls concurrently",
+        )
+        flag_store.define(
+            "chat_llm_recovery", enabled=False,
+            description="Retry LLM calls with backoff and model escalation",
+        )
+        flag_store.define(
+            "subagent_cache", enabled=False,
+            description="Cache tool results to reduce redundant API calls",
+        )
+        flag_store.define(
+            "llm_health_check", enabled=False,
+            description="Include LLM connectivity in Doctor health checks",
+        )
+
         _goal_store = GoalStore(_substrate.belief_ledger._db_path)
         _planner = PlannerService(
             bus=bus,
@@ -1139,6 +1186,10 @@ async def lifespan(app: FastAPI):
             _mcp_tool_count = await _mcp_bridge.start()
             log.info("mcp_bridge.started servers=%d tools=%d", len(_mcp_configs), _mcp_tool_count)
 
+        from qe.runtime.sanitizer import InputSanitizer
+
+        _input_sanitizer = InputSanitizer()
+
         _chat_service = ChatService(
             substrate=_substrate,
             bus=bus,
@@ -1160,6 +1211,10 @@ async def lifespan(app: FastAPI):
             knowledge_loop=_knowledge_loop,
             procedural_memory=_procedural_memory,
             access_mode=agent_access_mode,
+            guardrails=_guardrails_pipeline,
+            sanitizer=_input_sanitizer,
+            router=_auto_router if '_auto_router' in dir() else None,
+            recovery=_recovery if '_recovery' in dir() else None,
         )
 
         # Register the default executor as an agent in the pool
@@ -1353,3 +1408,5 @@ from qe.api.endpoints.a2a_router import router as a2a_router
 app.include_router(a2a_router)
 from qe.api.endpoints.guardrails import router as guardrails_router
 app.include_router(guardrails_router)
+from qe.api.endpoints.memory_ops import router as memory_ops_router
+app.include_router(memory_ops_router)

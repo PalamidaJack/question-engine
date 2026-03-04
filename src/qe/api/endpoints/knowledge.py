@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -40,9 +41,10 @@ async def submit(request: Request, body: dict[str, Any]):
 
     # Also write to inbox for cross-process relay
     inbox_dir = _inbox_dir()
-    inbox_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
+    await asyncio.to_thread(inbox_dir.mkdir, parents=True, exist_ok=True)
     inbox_file = inbox_dir / f"{envelope.envelope_id}.json"
-    inbox_file.write_text(envelope.model_dump_json(), encoding="utf-8")
+    content = envelope.model_dump_json()
+    await asyncio.to_thread(inbox_file.write_text, content, "utf-8")
 
     return {"envelope_id": envelope.envelope_id, "status": "submitted"}
 

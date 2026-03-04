@@ -238,6 +238,32 @@ async def health_live(request: Request):
     return report.model_dump(mode="json")
 
 
+# ── Phase 4.1: Emergency Stop ──────────────────────────────────────────────
+
+
+@router.post("/api/emergency-stop")
+async def emergency_stop(request: Request, body: dict[str, Any] | None = None):
+    """Activate the emergency stop — halts all new LLM operations."""
+    from qe.runtime.emergency import get_emergency_stop
+
+    reason = (body or {}).get("reason", "manual")
+    es = get_emergency_stop()
+    es.activate(reason)
+    get_audit_log().record("emergency.stop", detail={"reason": reason})
+    return es.status()
+
+
+@router.post("/api/emergency-resume")
+async def emergency_resume(request: Request):
+    """Deactivate the emergency stop — resume normal operations."""
+    from qe.runtime.emergency import get_emergency_stop
+
+    es = get_emergency_stop()
+    es.deactivate()
+    get_audit_log().record("emergency.resume")
+    return es.status()
+
+
 @router.get("/api/status")
 async def status(request: Request):
     """Overall engine status: services, budget, circuit breakers."""

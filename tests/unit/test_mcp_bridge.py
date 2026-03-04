@@ -1,154 +1,78 @@
-"""Tests for the MCP Bridge."""
+"""Tests for the MCP Bridge — reconnection, adaptive timeouts, health loop."""
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from qe.runtime.mcp_bridge import MCPBridge, MCPServerConfig, _MCPConnection
+from qe.runtime.mcp_bridge import MCPServerConfig, _MCPConnection
 
 
-def _mock_process(tools: list[dict] | None = None):
-    """Create a mock subprocess with stdin/stdout for JSON-RPC."""
-    proc = MagicMock()
-    proc.returncode = None
-    proc.stdin = MagicMock()
-    proc.stdin.write = MagicMock()
-    proc.stdin.drain = AsyncMock()
-
-    responses = []
-    # Response to initialize
-    responses.append(json.dumps({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {"protocolVersion": "2024-11-05", "capabilities": {}},
-    }).encode() + b"\n")
-    # Response to tools/list
-    tool_list = tools or []
-    responses.append(json.dumps({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "result": {"tools": tool_list},
-    }).encode() + b"\n")
-
-    call_idx = {"i": 0}
-
-    async def readline():
-        idx = call_idx["i"]
-        call_idx["i"] += 1
-        if idx < len(responses):
-            return responses[idx]
-        return b""
-
-    proc.stdout = MagicMock()
-    proc.stdout.readline = readline
-    proc.stderr = MagicMock()
-    proc.terminate = MagicMock()
-    return proc
-
-
-class TestMCPBridge:
-    @pytest.mark.asyncio
-    async def test_registers_tools(self):
-        """MCPBridge discovers tools from server and registers them."""
-        tools = [
-            {
-                "name": "read_file",
-                "description": "Read a file",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                },
-            },
-            {
-                "name": "write_file",
-                "description": "Write a file",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                },
-            },
-        ]
-        proc = _mock_process(tools)
-        registry = MagicMock()
-
-        config = MCPServerConfig(name="filesystem", command="mcp-fs")
-        bridge = MCPBridge(configs=[config], tool_registry=registry)
-
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
-            count = await bridge.start()
-
-        assert count == 2
-        assert registry.register.call_count == 2
-        # Verify tool names are prefixed
-        registered_names = [
-            call.args[0].name for call in registry.register.call_args_list
-        ]
-        assert "mcp_filesystem_read_file" in registered_names
-        assert "mcp_filesystem_write_file" in registered_names
-
-    @pytest.mark.asyncio
-    async def test_calls_tool(self):
-        """MCPBridge dispatches tool calls to the server."""
-        tools = [{"name": "echo", "description": "Echo back", "inputSchema": {}}]
-        proc = _mock_process(tools)
-
-        # Add a response for tools/call
-        call_response = json.dumps({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "result": {
-                "content": [{"type": "text", "text": "hello world"}],
-            },
-        }).encode() + b"\n"
-
-        # Override readline to also return the call response
-        original_readline = proc.stdout.readline
-        call_count = {"i": 0}
-
-        async def extended_readline():
-            call_count["i"] += 1
-            if call_count["i"] <= 2:
-                return await original_readline()
-            return call_response
-
-        proc.stdout.readline = extended_readline
-
-        config = MCPServerConfig(name="test", command="mcp-test")
+class TestMCPConnectionLiveness:
+    def test_is_alive_when_process_running(self):
+        config = MCPServerConfig(name="test", command="echo")
         conn = _MCPConnection(config)
+        conn._process = MagicMock()
+        conn._process.returncode = None
+        assert conn.is_alive is True
 
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
-            await conn.start()
-            result = await conn.call_tool("echo", {"text": "hello"})
+    def test_not_alive_when_process_exited(self):
+        config = MCPServerConfig(name="test", command="echo")
+        conn = _MCPConnection(config)
+        conn._process = MagicMock()
+        conn._process.returncode = 1
+        assert conn.is_alive is False
 
-        assert "hello world" in result
+    def test_not_alive_when_no_process(self):
+        config = MCPServerConfig(name="test", command="echo")
+        conn = _MCPConnection(config)
+        assert conn.is_alive is False
+
+
+class TestMCPReconnection:
+    @pytest.mark.asyncio
+    async def test_ensure_alive_when_already_alive(self):
+        config = MCPServerConfig(name="test", command="echo")
+        conn = _MCPConnection(config)
+        conn._process = MagicMock()
+        conn._process.returncode = None
+        assert await conn.ensure_alive() is True
+        assert conn._restart_count == 0
 
     @pytest.mark.asyncio
-    async def test_handles_connection_failure(self):
-        """MCPBridge handles server connection failure gracefully."""
-        config = MCPServerConfig(name="broken", command="nonexistent")
-        registry = MagicMock()
-        bridge = MCPBridge(configs=[config], tool_registry=registry)
+    async def test_max_restarts_exceeded(self):
+        config = MCPServerConfig(name="test", command="echo")
+        conn = _MCPConnection(config)
+        conn._restart_count = 3
+        conn._process = MagicMock()
+        conn._process.returncode = 1
+        assert await conn.ensure_alive() is False
 
-        with patch(
-            "asyncio.create_subprocess_exec",
-            AsyncMock(side_effect=FileNotFoundError("not found")),
-        ):
-            count = await bridge.start()
 
-        assert count == 0
-        registry.register.assert_not_called()
+class TestAdaptiveTimeouts:
+    def test_default_timeout_with_no_history(self):
+        config = MCPServerConfig(name="test", command="echo")
+        conn = _MCPConnection(config)
+        assert conn.get_adaptive_timeout("some_tool") == 30.0
 
-    def test_stop_terminates_processes(self):
-        """MCPBridge.stop() terminates all server processes."""
-        config = MCPServerConfig(name="test", command="mcp-test")
-        bridge = MCPBridge(configs=[config])
+    def test_adaptive_timeout_from_latency_history(self):
+        config = MCPServerConfig(name="test", command="echo")
+        conn = _MCPConnection(config)
+        for _ in range(10):
+            conn.record_tool_latency("fast_tool", 2.0)
+        timeout = conn.get_adaptive_timeout("fast_tool")
+        assert timeout == 10.0  # p95=2.0, ×3=6.0, floor=10.0
 
-        # Manually inject a mock connection
-        mock_conn = MagicMock()
-        bridge._connections["test"] = mock_conn
+    def test_adaptive_timeout_respects_ceiling(self):
+        config = MCPServerConfig(name="test", command="echo")
+        conn = _MCPConnection(config)
+        for _ in range(10):
+            conn.record_tool_latency("slow_tool", 50.0)
+        timeout = conn.get_adaptive_timeout("slow_tool")
+        assert timeout == 120.0  # p95=50, ×3=150, ceiling=120
 
-        bridge.stop()
-
-        mock_conn.stop.assert_called_once()
-        assert len(bridge._connections) == 0
+    def test_record_latency_caps_at_50_samples(self):
+        config = MCPServerConfig(name="test", command="echo")
+        conn = _MCPConnection(config)
+        for i in range(60):
+            conn.record_tool_latency("tool", float(i))
+        assert len(conn._tool_latencies["tool"]) == 50

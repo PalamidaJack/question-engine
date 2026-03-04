@@ -23,9 +23,11 @@ class Counter:
     name: str
     value: int = 0
     labels: dict[str, str] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def inc(self, n: int = 1) -> None:
-        self.value += n
+        with self._lock:
+            self.value += n
 
 
 @dataclass
@@ -44,14 +46,17 @@ class Histogram:
         if not self._counts:
             self._counts = [0] * (len(self.buckets) + 1)  # +1 for +Inf
 
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
     def observe(self, value: float) -> None:
-        self._sum += value
-        self._count += 1
-        for i, bound in enumerate(self.buckets):
-            if value <= bound:
-                self._counts[i] += 1
-                return
-        self._counts[-1] += 1  # +Inf bucket
+        with self._lock:
+            self._sum += value
+            self._count += 1
+            for i, bound in enumerate(self.buckets):
+                if value <= bound:
+                    self._counts[i] += 1
+                    return
+            self._counts[-1] += 1  # +Inf bucket
 
     @property
     def p50(self) -> float:
@@ -97,15 +102,19 @@ class Gauge:
 
     name: str
     value: float = 0.0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set(self, v: float) -> None:
-        self.value = v
+        with self._lock:
+            self.value = v
 
     def inc(self, n: float = 1.0) -> None:
-        self.value += n
+        with self._lock:
+            self.value += n
 
     def dec(self, n: float = 1.0) -> None:
-        self.value -= n
+        with self._lock:
+            self.value -= n
 
 
 # ── SLO Definitions ────────────────────────────────────────────────────────
@@ -139,6 +148,7 @@ _DEFAULT_SLOS = [
     SLO("bus_dlq_rate", "bus_dlq_total", target=0.01, comparator="lte"),
     SLO("handler_latency_p95", "handler_latency_ms.p95", target=2000.0, comparator="lte"),
     SLO("budget_remaining", "budget_remaining_pct", target=0.10, comparator="gte"),
+    SLO("chat_response_p95", "chat_response_latency_ms.p95", target=10000.0, comparator="lte"),
 ]
 
 
@@ -177,12 +187,16 @@ class MetricsCollector:
         self.counter("retrieval_hybrid_calls_total")
         self.counter("retrieval_hybrid_semantic_nonempty_total")
         self.counter("retrieval_hybrid_fts_nonempty_total")
+        self.counter("chat_tool_calls_total")
+        self.counter("chat_tool_errors_total")
 
         # Histograms
         self.histogram("llm_latency_ms")
         self.histogram("handler_latency_ms")
         self.histogram("api_latency_ms")
         self.histogram("vector_query_latency_ms")
+        self.histogram("chat_tool_latency_ms")
+        self.histogram("chat_response_latency_ms")
 
         # Gauges
         self.gauge("active_services")

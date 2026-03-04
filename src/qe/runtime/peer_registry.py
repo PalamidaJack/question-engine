@@ -6,9 +6,11 @@ capability-based peer selection.
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -99,12 +101,41 @@ class PeerRegistry:
         if peer := self._peers.get(peer_id):
             peer.healthy = False
 
+    @staticmethod
+    def _validate_peer_url(url: str) -> str:
+        """Validate a peer URL to prevent SSRF attacks.
+
+        Raises ValueError if the URL is unsafe (private IP, bad scheme, etc.).
+        """
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Invalid URL scheme: {parsed.scheme!r} (only http/https allowed)")
+        hostname = parsed.hostname or ""
+        if not hostname:
+            raise ValueError("URL missing hostname")
+        # Block obviously dangerous hostnames
+        _blocked = {"localhost", "127.0.0.1", "0.0.0.0", "[::1]", "metadata.google.internal"}
+        if hostname.lower() in _blocked:
+            raise ValueError(f"Blocked hostname: {hostname}")
+        # Block private/reserved IP ranges
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_reserved or addr.is_loopback or addr.is_link_local:
+                raise ValueError(f"Blocked private/reserved IP: {addr}")
+        except ValueError as exc:
+            if "Blocked" in str(exc):
+                raise
+            # Not an IP literal — hostname is fine
+        return url
+
     async def discover_and_register(self, url: str) -> PeerAgent | None:
         """Discover a remote agent and register it.
 
         Fetches /.well-known/agent.json from the URL, extracts metadata,
         and registers the peer.
         """
+        self._validate_peer_url(url)
+
         from qe.runtime.a2a_client import A2AClient
 
         client = A2AClient(url, timeout=10.0)

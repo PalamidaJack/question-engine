@@ -22,6 +22,8 @@ class ToolSpec(BaseModel):
     timeout_seconds: int = 30
     ephemeral_output: bool = True
     category: str = ""
+    cacheable: bool = False
+    cache_ttl_seconds: int = 300
 
     class Config:
         arbitrary_types_allowed = True

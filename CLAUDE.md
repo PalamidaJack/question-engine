@@ -913,3 +913,34 @@ Two cards side by side:
 - After first successful run: nothing extra. The result appearing in chat is satisfying enough. No modal.
 
 **Returning user behavior:** If `localStorage.hasCompletedOnboarding === true`, skip directly to the app in whichever mode they last used. No welcome screen.
+
+---
+
+## Audit Fix Plan (2026-03-04) — COMPLETED
+
+All fixes applied in commit on `feature/error-recovery` branch. Net result: +30 passing tests, 0 regressions.
+
+### Fixes Applied
+
+1. **Add 3 missing `global` declarations in `lifespan()`** — `app.py` ✓
+   - Added `global _memory_store, _prompt_registry, _inquiry_engine`
+
+2. **Wire `memory_ops` router** — `app.py` + `memory_ops.py` ✓
+   - Added prefix `/api/memory`, registered router, fixed empty `register_memory_ops_routes()`
+   - Fixed 30 previously-failing tests in `test_memory_ops.py`
+
+3. **Add SSRF protection to A2A peer registration** — `peer_registry.py` ✓
+   - Validates URL scheme (http/https only), blocks private IPs, localhost, link-local
+
+4. **Fix path traversal in harvest HIL endpoints** — `harvest.py` ✓
+   - Sanitizes `hil_envelope_id` with `Path(id).name` before file path construction
+
+5. **Require ADMIN scope for flag modification** — `middleware.py` ✓
+   - Added `/api/flags` to `_ADMIN_PREFIXES`
+
+6. **Fix WebSocket authentication bypass** — `middleware.py` + `chat.py` ✓
+   - Removed `/ws` from `_PUBLIC_PREFIXES`
+   - Added `_ws_authenticate()` helper that validates API key from query params
+
+7. **Fix blocking I/O in async handlers** — `harvest.py`, `knowledge.py` ✓
+   - Wrapped `Path.mkdir()` and `Path.write_text()` in `asyncio.to_thread()`

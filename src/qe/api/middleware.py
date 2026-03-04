@@ -28,15 +28,15 @@ _PUBLIC_PATHS: set[str] = {
     "/api/health/live",
     "/api/setup/status",
     "/api/setup/providers",
-    "/api/setup/save",
+    "/api/setup/save",  # Protected by is_setup_complete guard in handler
     "/docs",
     "/openapi.json",
     "/redoc",
 }
 
-_PUBLIC_PREFIXES: tuple[str, ...] = ("/static/", "/ws")
+_PUBLIC_PREFIXES: tuple[str, ...] = ("/static/",)
 
-_ADMIN_PREFIXES: tuple[str, ...] = ("/api/audit", "/api/services/")
+_ADMIN_PREFIXES: tuple[str, ...] = ("/api/audit", "/api/services/", "/api/flags")
 
 _METHOD_SCOPE: dict[str, Scope] = {
     "GET": Scope.READ,

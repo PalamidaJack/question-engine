@@ -126,6 +126,7 @@ class DoctorService:
             self._check_services(),
             self._check_circuit_breakers(),
             self._check_heartbeats(),
+            self._check_llm_connectivity(),
         ]
 
         results = await asyncio.gather(*check_coros, return_exceptions=True)
@@ -468,6 +469,47 @@ class DoctorService:
             ))
 
         return checks
+
+    async def _check_llm_connectivity(self) -> HealthCheck:
+        """Phase 4.5: Verify LLM providers are reachable with a 1-token ping."""
+        from qe.runtime.feature_flags import get_flag_store
+
+        if not get_flag_store().is_enabled("llm_health_check"):
+            return HealthCheck(
+                name="llm_connectivity",
+                status=CheckStatus.SKIP,
+                message="LLM health check disabled (enable llm_health_check flag)",
+                checked_at=datetime.now(UTC).isoformat(),
+            )
+
+        start = time.monotonic()
+        try:
+            import litellm
+
+            await asyncio.wait_for(
+                litellm.acompletion(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=1,
+                ),
+                timeout=10.0,
+            )
+            return HealthCheck(
+                name="llm_connectivity",
+                status=CheckStatus.PASS,
+                message="LLM provider reachable",
+                duration_ms=(time.monotonic() - start) * 1000,
+                checked_at=datetime.now(UTC).isoformat(),
+            )
+        except Exception as e:
+            return HealthCheck(
+                name="llm_connectivity",
+                status=CheckStatus.FAIL,
+                message=f"LLM connectivity failed: {e}",
+                duration_ms=(time.monotonic() - start) * 1000,
+                checked_at=datetime.now(UTC).isoformat(),
+                fix_hint="Check API keys and network connectivity",
+            )
 
     # ── Publishing ───────────────────────────────────────────────────
 

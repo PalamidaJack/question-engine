@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,16 +48,17 @@ async def scout_approve(request: Request, proposal_id: str):
 
     # Write HIL decision file
     hil_dir = Path("data/hil_queue/completed")
-    hil_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
+    await asyncio.to_thread(hil_dir.mkdir, parents=True, exist_ok=True)
     if proposal.hil_envelope_id:
-        decision_file = hil_dir / f"{proposal.hil_envelope_id}.json"
-        decision_file.write_text(
-            json.dumps({
-                "decision": "approved",
-                "decided_at": datetime.now(UTC).isoformat(),
-            }, indent=2),
-            encoding="utf-8",
-        )
+        safe_name = Path(proposal.hil_envelope_id).name
+        if not safe_name or safe_name == ".":
+            return JSONResponse({"error": "Invalid envelope id"}, status_code=400)
+        decision_file = hil_dir / f"{safe_name}.json"
+        content = json.dumps({
+            "decision": "approved",
+            "decided_at": datetime.now(UTC).isoformat(),
+        }, indent=2)
+        await asyncio.to_thread(decision_file.write_text, content, "utf-8")
 
     return {"status": "approved", "proposal_id": proposal_id}
 
@@ -83,17 +85,18 @@ async def scout_reject(request: Request, proposal_id: str, body: dict[str, Any] 
 
     # Write HIL decision file
     hil_dir = Path("data/hil_queue/completed")
-    hil_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
+    await asyncio.to_thread(hil_dir.mkdir, parents=True, exist_ok=True)
     if proposal.hil_envelope_id:
-        decision_file = hil_dir / f"{proposal.hil_envelope_id}.json"
-        decision_file.write_text(
-            json.dumps({
-                "decision": "rejected",
-                "reason": reason,
-                "decided_at": datetime.now(UTC).isoformat(),
-            }, indent=2),
-            encoding="utf-8",
-        )
+        safe_name = Path(proposal.hil_envelope_id).name
+        if not safe_name or safe_name == ".":
+            return JSONResponse({"error": "Invalid envelope id"}, status_code=400)
+        decision_file = hil_dir / f"{safe_name}.json"
+        content = json.dumps({
+            "decision": "rejected",
+            "reason": reason,
+            "decided_at": datetime.now(UTC).isoformat(),
+        }, indent=2)
+        await asyncio.to_thread(decision_file.write_text, content, "utf-8")
 
     return {"status": "rejected", "proposal_id": proposal_id, "reason": reason}
 

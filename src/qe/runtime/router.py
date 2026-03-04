@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import time
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel
 
 from qe.models.envelope import Envelope
 from qe.models.genome import ModelPreference
@@ -13,10 +16,44 @@ if TYPE_CHECKING:
     from qe.runtime.discovery.service import ModelDiscoveryService
 
 TIER_MODELS = {
-    "fast": ["openai/google/gemini-2.0-flash-001", "openai/anthropic/claude-3.5-haiku", "gpt-4o-mini"],
+    "fast": [
+        "openai/google/gemini-2.0-flash-001",
+        "openai/anthropic/claude-3.5-haiku",
+        "gpt-4o-mini",
+    ],
     "balanced": ["openai/anthropic/claude-sonnet-4", "gpt-4o"],
     "powerful": ["o1-preview", "openai/anthropic/claude-sonnet-4"],
     "local": ["ollama/qwen3:8b", "ollama/llama3.1:8b"],
+}
+
+
+# ── Phase 3.1: Task-aware routing ─────────────────────────────────────────
+
+
+class TaskHint(StrEnum):
+    EXTRACTION = "extraction"
+    SUMMARIZATION = "summarization"
+    ANALYSIS = "analysis"
+    REASONING = "reasoning"
+    CRITICAL = "critical"
+    CREATIVE = "creative"
+    CODE = "code"
+
+
+class RoutingDecision(BaseModel):
+    model: str
+    tier: str
+    reason: str = ""
+
+
+_TASK_TIER_MAP: dict[str, str] = {
+    "extraction": "fast",
+    "summarization": "fast",
+    "analysis": "balanced",
+    "reasoning": "balanced",
+    "critical": "powerful",
+    "creative": "balanced",
+    "code": "balanced",
 }
 
 
@@ -113,6 +150,57 @@ class AutoRouter:
         if self.discovery is not None:
             elapsed = self._elapsed_ms()
             self.discovery.record_call(model, elapsed, success=True)
+
+    def select_for_task(
+        self,
+        envelope: Envelope,
+        task_hint: str | None = None,
+        iteration: int = 0,
+        max_iterations: int = 8,
+        has_tool_results: bool = False,
+    ) -> str:
+        """Phase 3.1: Task-aware model selection.
+
+        Considers the task type, iteration position, and budget to select
+        the most cost-effective model.
+        """
+        self._select_start = time.monotonic()
+
+        # Escape hatch
+        if "force_model" in envelope.payload:
+            return envelope.payload["force_model"]
+
+        # Determine minimum tier from task hint
+        min_tier = _TASK_TIER_MAP.get(task_hint or "", self.preference.tier)
+
+        # Budget gate override
+        if self._budget_remaining_pct() < 0.10:
+            min_tier = "fast"
+
+        # Mid-chain downgrade: balanced tasks can use fast for tool-result iterations
+        if (min_tier == "balanced"
+                and has_tool_results
+                and 0 < iteration < max_iterations - 1):
+            min_tier = "fast"
+
+        # First and last iterations get at least balanced
+        if iteration == 0 or iteration >= max_iterations - 1:
+            if min_tier == "fast" and self._budget_remaining_pct() >= 0.10:
+                min_tier = "balanced"
+
+        # Use regular selection with the determined tier
+        original_tier = self.preference.tier
+        self.preference = ModelPreference(
+            tier=min_tier,
+            max_cost_per_call_usd=self.preference.max_cost_per_call_usd,
+        )
+        try:
+            return self.select(envelope)
+        finally:
+            self.preference = ModelPreference(
+                tier=original_tier,
+                max_cost_per_call_usd=self.preference.max_cost_per_call_usd,
+            )
 
     def _elapsed_ms(self) -> float:
         """Milliseconds since last select() call."""

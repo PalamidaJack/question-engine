@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import random
 import time
 import uuid
 from datetime import UTC, datetime
@@ -303,6 +305,34 @@ _CHAT_TOOL_SCHEMAS: list[dict] = [
 ]
 
 
+# ── Artifact store for large tool results (Phase 2) ───────────────────────
+
+_ARTIFACT_THRESHOLD = 800  # chars
+
+
+class _ArtifactStore:
+    """Per-session store for large tool results to keep context lean."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    def store(self, content: str, tool_name: str) -> str:
+        """Store content if over threshold, return summary + handle."""
+        if len(content) <= _ARTIFACT_THRESHOLD:
+            return content
+        handle = f"artifact_{hashlib.sha256(content.encode()).hexdigest()[:12]}"
+        self._store[handle] = content
+        summary = content[:300] + "..."
+        return (
+            f"[Result stored as {handle} ({len(content)} chars)]\n"
+            f"Summary: {summary}\n"
+            f"Use load_artifact(handle=\"{handle}\") to retrieve the full content."
+        )
+
+    def load(self, handle: str) -> str | None:
+        return self._store.get(handle)
+
+
 class ChatSession:
     """Per-session conversation state."""
 
@@ -357,6 +387,10 @@ class ChatService:
         knowledge_loop: Any | None = None,
         procedural_memory: Any | None = None,
         access_mode: str = "balanced",
+        guardrails: Any | None = None,
+        sanitizer: Any | None = None,
+        router: Any | None = None,
+        recovery: Any | None = None,
     ) -> None:
         self.substrate = substrate
         self.bus = bus
@@ -377,9 +411,18 @@ class ChatService:
         self._insight_crystallizer = insight_crystallizer
         self._knowledge_loop = knowledge_loop
         self._procedural_memory = procedural_memory
+        self._guardrails = guardrails
+        self._sanitizer = sanitizer
+        self._router = router
+        self._recovery = recovery
         self._sessions: dict[str, ChatSession] = {}
         self._access_mode = "balanced"
         self.set_access_mode(access_mode)
+        # Phase 2: Stable prompt prefix cache
+        self._stable_system_prefix: str | None = None
+        # Phase 2: Artifact store per service (shared across sessions)
+        self._artifact_store: _ArtifactStore = _ArtifactStore()
+        self._last_trace: Any = None
 
     _MAX_SESSIONS = 1000
 
@@ -436,9 +479,30 @@ class ChatService:
         interjection_queue: asyncio.Queue[str] | None = None,
     ) -> ChatResponsePayload:
         """Main entry point: receive user message, return structured response."""
+        _handle_start = time.monotonic()
         session = self.get_or_create_session(session_id)
-        session.add_user_message(user_message)
         message_id = str(uuid.uuid4())
+
+        # Phase 1: Input sanitization at boundary
+        if self._sanitizer:
+            try:
+                san_result = self._sanitizer.sanitize(user_message)
+                if san_result.risk_score >= 0.9:
+                    return ChatResponsePayload(
+                        message_id=message_id,
+                        reply_text=(
+                            "Your message was blocked by input sanitization. "
+                            "Please rephrase your request."
+                        ),
+                        intent=ChatIntent.CONVERSATION,
+                        error="input_rejected",
+                    )
+                if san_result.risk_score >= 0.7:
+                    user_message = self._sanitizer.wrap_untrusted(user_message)
+            except Exception:
+                log.debug("Sanitizer failed, proceeding", exc_info=True)
+
+        session.add_user_message(user_message)
 
         if self.budget_tracker and self.budget_tracker.remaining_pct() <= 0:
             return ChatResponsePayload(
@@ -447,6 +511,25 @@ class ChatService:
                 intent=ChatIntent.CONVERSATION,
                 error="budget_exhausted",
             )
+
+        # Phase 1: Guardrails input check
+        if self._guardrails:
+            try:
+                guardrail_results = await self._guardrails.run_input(
+                    user_message, {"request_id": message_id, "origin": "chat"},
+                )
+                for gr in guardrail_results:
+                    if not gr.passed and gr.severity == "block":
+                        return ChatResponsePayload(
+                            message_id=message_id,
+                            reply_text=(
+                                f"Message blocked by safety guardrail: {gr.message}"
+                            ),
+                            intent=ChatIntent.CONVERSATION,
+                            error="guardrail_blocked",
+                        )
+            except Exception:
+                log.debug("Guardrails input check failed", exc_info=True)
 
         try:
             messages = await self._build_messages(session)
@@ -459,6 +542,23 @@ class ChatService:
                 ),
                 timeout=300.0,
             )
+
+            # Phase 1: Guardrails output check
+            if self._guardrails:
+                try:
+                    output_results = await self._guardrails.run_output(
+                        reply_text, {"request_id": message_id, "origin": "chat"},
+                    )
+                    for gr in output_results:
+                        if not gr.passed and gr.severity == "block":
+                            reply_text = (
+                                "My response was filtered by a safety guardrail. "
+                                "Please try a different question."
+                            )
+                            break
+                except Exception:
+                    log.debug("Guardrails output check failed", exc_info=True)
+
             response = self._build_response(
                 message_id, reply_text, tool_audit
             )
@@ -487,6 +587,15 @@ class ChatService:
             )
 
         session.add_assistant_message(response.reply_text)
+
+        # Phase 4: Record chat response latency
+        try:
+            from qe.runtime.metrics import get_metrics
+            _elapsed_ms = (time.monotonic() - _handle_start) * 1000
+            get_metrics().histogram("chat_response_latency_ms").observe(_elapsed_ms)
+        except Exception:
+            pass
+
         return response
 
     # ── System prompt & context assembly ────────────────────────────────
@@ -695,6 +804,42 @@ class ChatService:
         """Assemble full message list for the LLM call."""
         await self._compact_history(session)
 
+        from qe.runtime.feature_flags import get_flag_store
+        flags = get_flag_store()
+
+        if flags.is_enabled("stable_prompt_prefix"):
+            # Phase 2.1: Stable prefix + trailing dynamic context
+            if self._stable_system_prefix is None:
+                self._stable_system_prefix = self._build_system_prompt()
+            messages: list[dict] = [
+                {"role": "system", "content": self._stable_system_prefix},
+            ]
+            messages.extend(session.history[-_MAX_CONTEXT_MESSAGES:])
+
+            # Dynamic context as trailing system message
+            dynamic_parts: list[str] = []
+            if session.context_summary:
+                dynamic_parts.append(
+                    f"## Conversation context (summarized)\n{session.context_summary}"
+                )
+            knowledge_ctx = await self._build_knowledge_context()
+            if knowledge_ctx:
+                dynamic_parts.append(f"## Current state\n{knowledge_ctx}")
+            memory_ctx = await self._build_memory_context(session)
+            if memory_ctx:
+                dynamic_parts.append(f"## {memory_ctx}")
+            # Phase 2.6: Proactive memory recall
+            if flags.is_enabled("proactive_recall"):
+                proactive = await self._proactive_recall(session)
+                if proactive:
+                    dynamic_parts.append(f"## Suggested approaches\n{proactive}")
+            if dynamic_parts:
+                messages.append(
+                    {"role": "system", "content": "\n\n".join(dynamic_parts)}
+                )
+            return messages
+
+        # Legacy: single system message with everything
         system_parts = [self._build_system_prompt()]
 
         if session.context_summary:
@@ -710,24 +855,87 @@ class ChatService:
         if memory_ctx:
             system_parts.append(f"\n## {memory_ctx}")
 
-        messages: list[dict] = [
+        messages = [
             {"role": "system", "content": "\n".join(system_parts)},
         ]
         messages.extend(session.history[-_MAX_CONTEXT_MESSAGES:])
         return messages
 
+    async def _proactive_recall(self, session: ChatSession) -> str:
+        """Phase 2.6: Query procedural memory for relevant tool sequences."""
+        if not self._procedural_memory:
+            return ""
+        try:
+            last_user = ""
+            for msg in reversed(session.history):
+                if msg["role"] == "user":
+                    last_user = msg["content"]
+                    break
+            if not last_user:
+                return ""
+            suggestions = await self._procedural_memory.suggest_sequence(
+                domain="chat", context=last_user, top_k=2,
+            )
+            if not suggestions:
+                return ""
+            lines = []
+            for s in suggestions:
+                tools = getattr(s, "tool_names", []) or []
+                if tools:
+                    lines.append(f"- Previously effective: {' → '.join(tools)}")
+            return "\n".join(lines)
+        except Exception:
+            log.debug("Proactive recall failed", exc_info=True)
+            return ""
+
     # ── Tool definitions ────────────────────────────────────────────────
 
     def _get_chat_tools(self) -> list[dict]:
         """Return combined tool schemas: chat-specific + selected registry tools."""
+        from qe.runtime.feature_flags import get_flag_store
+        flags = get_flag_store()
+
         tools = list(_CHAT_TOOL_SCHEMAS)
+
+        # Phase 2.4: Add load_artifact tool if flag enabled
+        if flags.is_enabled("artifact_handles"):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "load_artifact",
+                    "description": (
+                        "Load the full content of a previously stored artifact. "
+                        "Use when a tool result was truncated and stored as an artifact handle."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "handle": {
+                                "type": "string",
+                                "description": "The artifact handle (e.g. artifact_abc123).",
+                            },
+                        },
+                        "required": ["handle"],
+                    },
+                },
+            })
 
         if self._tool_registry:
             try:
-                registry_tools = self._tool_registry.get_tool_schemas(
-                    capabilities=self._tool_capabilities_for_mode(),
-                    mode="relevant",
-                )
+                if flags.is_enabled("tool_masking"):
+                    # Phase 2.2: Return ALL tools regardless of mode — ToolGate
+                    # blocks at execution time. Keeps tool schemas stable for KV-cache.
+                    registry_tools = self._tool_registry.get_tool_schemas(
+                        capabilities={"chat", "web_search", "web_fetch", "mcp",
+                                       "file_read", "file_write", "code_execute",
+                                       "browser_control"},
+                        mode="relevant",
+                    )
+                else:
+                    registry_tools = self._tool_registry.get_tool_schemas(
+                        capabilities=self._tool_capabilities_for_mode(),
+                        mode="relevant",
+                    )
                 tools.extend(registry_tools)
             except Exception:
                 log.debug("Failed to get registry tool schemas", exc_info=True)
@@ -1183,10 +1391,61 @@ class ChatService:
 
     # ── Model selection ─────────────────────────────────────────────────
 
+    def _classify_task(self, messages: list[dict]) -> str | None:
+        """Phase 3.1: Keyword-based zero-latency task classification."""
+        # Find last user message
+        user_text = ""
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                user_text = msg.get("content", "").lower()
+                break
+        if not user_text:
+            return None
+
+        _KEYWORDS: dict[str, list[str]] = {
+            "extraction": ["extract", "list", "get", "show", "find", "fetch"],
+            "summarization": ["summarize", "summary", "tldr", "brief", "overview"],
+            "analysis": ["analyze", "compare", "evaluate", "assess"],
+            "reasoning": ["reason", "explain", "why", "how", "think", "logic"],
+            "critical": ["verify", "validate", "prove", "confirm", "check"],
+            "creative": ["write", "create", "generate", "compose", "draft"],
+            "code": ["code", "implement", "function", "debug", "program"],
+        }
+        best_hint = None
+        best_score = 0
+        for hint, keywords in _KEYWORDS.items():
+            score = sum(1 for kw in keywords if kw in user_text)
+            if score > best_score:
+                best_score = score
+                best_hint = hint
+        return best_hint if best_score > 0 else None
+
     def _select_model_for_iteration(
         self, iteration: int, has_tool_results: bool, max_iterations: int,
+        task_hint: str | None = None,
     ) -> str:
         """Choose balanced or fast model based on iteration context."""
+        from qe.runtime.feature_flags import get_flag_store
+        flags = get_flag_store()
+
+        # Phase 3.1: Task-aware routing via AutoRouter
+        if flags.is_enabled("task_aware_routing") and self._router:
+            try:
+                from qe.models.envelope import Envelope as _Env
+                env = _Env(
+                    topic="chat.llm_select",
+                    source_service_id="chat",
+                    payload={
+                        "task_hint": task_hint or "reasoning",
+                        "iteration": iteration,
+                        "max_iterations": max_iterations,
+                        "has_tool_results": has_tool_results,
+                    },
+                )
+                return self._router.select(env)
+            except Exception:
+                log.debug("Task-aware routing failed, falling back", exc_info=True)
+
         if not self._fast_model:
             return self.model
         # First iteration (initial reasoning) → balanced
@@ -1199,6 +1458,62 @@ class ChatService:
         if has_tool_results:
             return self._fast_model
         return self.model
+
+    async def _call_llm_with_recovery(
+        self, kwargs: dict[str, Any], iteration: int, max_retries: int = 2,
+    ) -> Any:
+        """Phase 3.4: LLM call with retry and model escalation."""
+        from qe.runtime.feature_flags import get_flag_store
+        flags = get_flag_store()
+
+        if not flags.is_enabled("chat_llm_recovery"):
+            return await asyncio.wait_for(
+                litellm.acompletion(**kwargs), timeout=60.0,
+            )
+
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                result = await asyncio.wait_for(
+                    litellm.acompletion(**kwargs), timeout=60.0,
+                )
+                if self._router:
+                    try:
+                        self._router.record_success(kwargs["model"])
+                    except Exception:
+                        pass
+                return result
+            except TimeoutError as e:
+                last_error = e
+                if self._router:
+                    try:
+                        self._router.record_error(kwargs["model"])
+                    except Exception:
+                        pass
+                if attempt < max_retries:
+                    await asyncio.sleep(min(2 ** attempt, 4))
+                    continue
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                if self._router:
+                    try:
+                        self._router.record_error(kwargs["model"])
+                    except Exception:
+                        pass
+                # Context length error → escalate model
+                if "context" in err_str or "token" in err_str:
+                    if self._fast_model and kwargs["model"] == self._fast_model:
+                        kwargs["model"] = self.model
+                        continue
+                # Rate limit → retry with backoff
+                if "rate" in err_str or "429" in err_str:
+                    if attempt < max_retries:
+                        await asyncio.sleep(min(2 ** attempt, 4))
+                        continue
+                if attempt >= max_retries:
+                    break
+        raise last_error  # type: ignore[misc]
 
     # ── Agent loop ──────────────────────────────────────────────────────
 
@@ -1213,7 +1528,14 @@ class ChatService:
         """Simple ReAct loop: call LLM, execute tools, repeat.
 
         Returns (reply_text, tool_audit_log, cumulative_cost_usd).
+        Populates self._last_trace with a ChatTrace when complete.
         """
+        from qe.services.chat.trace import (
+            ChatTrace,
+            LLMCallTrace,
+            ToolCallTrace,
+        )
+
         tool_audit: list[dict] = []
         working_messages = list(messages)
 
@@ -1221,6 +1543,19 @@ class ChatService:
         _cumulative_tokens: dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
         _cumulative_cost: float = 0.0
         _total_tool_calls = 0
+        _trace = ChatTrace()
+        _current_iteration = 0
+
+        def _finalize_trace(outcome: str) -> None:
+            _trace.total_iterations = _current_iteration + 1
+            _trace.total_tool_calls = _total_tool_calls
+            _trace.total_tokens = _cumulative_tokens["total"]
+            _trace.total_cost_usd = _cumulative_cost
+            _trace.total_duration_ms = (
+                (time.monotonic() - _loop_start) * 1000
+            )
+            _trace.outcome = outcome
+            self._last_trace = _trace
 
         def _emit(event: dict) -> None:
             if progress_queue is None:
@@ -1266,10 +1601,22 @@ class ChatService:
             except Exception:
                 pass
 
+        from qe.runtime.feature_flags import get_flag_store
+        _flags = get_flag_store()
+        _task_hint = self._classify_task(working_messages)
+        # Capture original user request for recitation (Phase 2.3)
+        _original_request = ""
+        for _msg in reversed(working_messages):
+            if isinstance(_msg, dict) and _msg.get("role") == "user":
+                _original_request = _msg.get("content", "")[:500]
+                break
+
         for _iteration in range(max_iterations):
+            _current_iteration = _iteration
             has_tool_results = _total_tool_calls > 0
             selected_model = self._select_model_for_iteration(
                 _iteration, has_tool_results, max_iterations,
+                task_hint=_task_hint,
             )
             kwargs: dict[str, Any] = {
                 "model": selected_model,
@@ -1286,8 +1633,8 @@ class ChatService:
             })
 
             try:
-                response = await asyncio.wait_for(
-                    litellm.acompletion(**kwargs), timeout=60.0
+                response = await self._call_llm_with_recovery(
+                    kwargs, _iteration,
                 )
             except TimeoutError:
                 log.warning("chat_tool_loop.llm_timeout iteration=%d", _iteration)
@@ -1302,6 +1649,7 @@ class ChatService:
                     "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
                 })
                 msg = "Sorry, the model took too long to respond. Please try again."
+                _finalize_trace("timeout")
                 return msg, tool_audit, _cumulative_cost
             except Exception as e:
                 log.exception("chat_tool_loop.llm_error iteration=%d", _iteration)
@@ -1315,6 +1663,7 @@ class ChatService:
                     "final_tokens": dict(_cumulative_tokens),
                     "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
                 })
+                _finalize_trace("error")
                 return f"LLM call failed: {e}", tool_audit, _cumulative_cost
 
             # Extract token usage and cost from response
@@ -1349,6 +1698,20 @@ class ChatService:
                 "tool_count": tool_count,
             })
 
+            # Phase 4.3: Record LLM call trace
+            _llm_duration = int(
+                (time.monotonic() - _loop_start) * 1000
+            ) - sum(t.duration_ms for t in _trace.tool_calls)
+            _trace.llm_calls.append(LLMCallTrace(
+                iteration=_iteration,
+                model=selected_model,
+                prompt_tokens=call_tokens["prompt"],
+                completion_tokens=call_tokens["completion"],
+                cost_usd=call_cost,
+                duration_ms=max(_llm_duration, 0),
+                has_tool_calls=has_tool_calls,
+            ))
+
             # No tool calls → return the text reply
             if not has_tool_calls:
                 reply_text = getattr(message, "content", "") or ""
@@ -1363,123 +1726,111 @@ class ChatService:
                     "final_tokens": dict(_cumulative_tokens),
                     "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
                 })
+                _finalize_trace("success")
                 return reply_text, tool_audit, _cumulative_cost
 
             # Append the assistant message with tool calls
             working_messages.append(message.model_dump())
 
-            # Execute each tool call
-            for idx, tool_call in enumerate(message.tool_calls):
-                fn = tool_call.function
-                tool_name = fn.name
-                try:
-                    params = json.loads(fn.arguments) if fn.arguments else {}
-                except json.JSONDecodeError:
-                    params = {}
-
-                params_preview = json.dumps(params)[:120] if params else ""
-                _emit({
-                    "phase": "tool_start",
-                    "iteration": _iteration,
-                    "max_iterations": max_iterations,
-                    "tool_name": tool_name,
-                    "tool_index": idx,
-                    "tool_count": tool_count,
-                    "params_preview": params_preview,
-                })
-
-                tool_start = time.monotonic()
-                blocked = False
-                error = False
-
-                # Tool gate check
-                gate_ok, gate_reason = self._check_tool_gate(tool_name, params)
-                if not gate_ok:
-                    result_str = f"Tool '{tool_name}' blocked: {gate_reason}"
-                    blocked = True
-                    tool_audit.append({
-                        "tool": tool_name,
-                        "params": params,
-                        "result": result_str,
-                        "blocked": True,
-                    })
-                else:
-                    # Cognitive tools get a longer timeout
-                    _LONG_TIMEOUT_TOOLS = {
-                        "plan_and_execute",
-                        "deep_research",
-                        "swarm_research",
-                    }
-                    tool_timeout = (
-                        600.0 if tool_name in _LONG_TIMEOUT_TOOLS
-                        else 120.0
+            # Execute tool calls (parallel or sequential)
+            _use_parallel = (
+                _flags.is_enabled("parallel_tool_calls")
+                and tool_count > 1
+            )
+            if _use_parallel:
+                tool_results = await self._execute_tools_parallel(
+                    message.tool_calls, _iteration, max_iterations,
+                    _flags, progress_queue, _emit,
+                )
+            else:
+                tool_results = []
+                for idx, tool_call in enumerate(message.tool_calls):
+                    r = await self._execute_single_tool(
+                        tool_call, idx, tool_count,
+                        _iteration, max_iterations,
+                        _flags, progress_queue, _emit,
                     )
-                    try:
-                        result_str = await asyncio.wait_for(
-                            self._execute_chat_tool(
-                                tool_name, params,
-                                progress_queue=progress_queue,
-                            ),
-                            timeout=tool_timeout,
-                        )
-                    except TimeoutError:
-                        log.warning(
-                            "chat_tool_loop.tool_timeout tool=%s "
-                            "timeout=%.0fs iteration=%d",
-                            tool_name, tool_timeout, _iteration,
-                        )
-                        result_str = (
-                            f"Tool '{tool_name}' timed out after "
-                            f"{int(tool_timeout)}s."
-                        )
-                        error = True
-                    except Exception as e:
-                        log.exception(
-                            "chat_tool_loop.tool_error tool=%s", tool_name,
-                        )
-                        result_str = f"Tool '{tool_name}' failed: {e}"
-                        error = True
-                    tool_audit.append({
-                        "tool": tool_name,
-                        "params": params,
-                        "result": result_str[:500],
-                        "blocked": False,
-                    })
+                    tool_results.append(r)
 
+            for r in tool_results:
                 _total_tool_calls += 1
-                _emit({
-                    "phase": "tool_complete",
-                    "iteration": _iteration,
-                    "max_iterations": max_iterations,
-                    "tool_name": tool_name,
-                    "tool_index": idx,
-                    "tool_count": tool_count,
-                    "duration_ms": int((time.monotonic() - tool_start) * 1000),
-                    "result_preview": result_str[:120] if result_str else "",
-                    "blocked": blocked,
-                    "error": error,
-                })
-
+                tool_audit.append(r["audit_entry"])
                 working_messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_str,
+                    "tool_call_id": r["tool_call_id"],
+                    "content": r["result_str"],
                 })
+                # Phase 4.3: Record tool call trace
+                _trace.tool_calls.append(ToolCallTrace(
+                    iteration=_iteration,
+                    tool_name=r["tool_name"],
+                    duration_ms=r["duration_ms"],
+                    blocked=r["blocked"],
+                    error=r["error"],
+                    cache_hit=r.get("cache_hit", False),
+                    result_size=len(r["result_str"]),
+                ))
 
             self._record_cost(response)
 
             # Inject agent state so the LLM knows what it's already done
             tools_used = [e["tool"] for e in tool_audit]
-            blocked = sum(1 for e in tool_audit if e.get("blocked"))
-            working_messages.append({
-                "role": "system",
-                "content": (
+            blocked_count = sum(1 for e in tool_audit if e.get("blocked"))
+
+            # Phase 2.5: Pattern breaking — vary agent state format
+            if _flags.is_enabled("pattern_breaking"):
+                _AGENT_STATE_FORMATS = [
+                    (
+                        f"[AGENT STATE — Iteration {_iteration + 1}/{max_iterations}]\n"
+                        f"Tools used: {', '.join(tools_used) or 'none'}\n"
+                        f"Total calls: {_total_tool_calls} ({blocked_count} blocked)\n"
+                        f"Cost: ${_cumulative_cost:.4f} | Tokens: {_cumulative_tokens['total']}"
+                    ),
+                    (
+                        f"--- Progress: step {_iteration + 1} of {max_iterations} ---\n"
+                        f"Executed: {_total_tool_calls} tools | "
+                        f"Budget used: ${_cumulative_cost:.4f}"
+                    ),
+                    (
+                        f"[Step {_iteration + 1}] "
+                        f"{_total_tool_calls} tool calls completed. "
+                        f"Tokens: {_cumulative_tokens['total']}. "
+                        f"Remaining iterations: {max_iterations - _iteration - 1}."
+                    ),
+                    (
+                        f"Status update (iteration {_iteration + 1}/{max_iterations}): "
+                        f"tools={_total_tool_calls}, "
+                        f"cost=${_cumulative_cost:.4f}, "
+                        f"blocked={blocked_count}"
+                    ),
+                ]
+                state_content = random.choice(_AGENT_STATE_FORMATS)
+            else:
+                state_content = (
                     f"[AGENT STATE — Iteration {_iteration + 1}/{max_iterations}]\n"
                     f"Tools used: {', '.join(tools_used) or 'none'}\n"
-                    f"Total calls: {_total_tool_calls} ({blocked} blocked)\n"
+                    f"Total calls: {_total_tool_calls} ({blocked_count} blocked)\n"
                     f"Cost: ${_cumulative_cost:.4f} | Tokens: {_cumulative_tokens['total']}"
-                ),
+                )
+
+            working_messages.append({
+                "role": "system",
+                "content": state_content,
             })
+
+            # Phase 2.3: Recitation pattern — re-state original request periodically
+            if (_flags.is_enabled("recitation_pattern")
+                    and _original_request
+                    and (_iteration + 1) % 4 == 0):
+                working_messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[TASK RECITATION]\n"
+                        f"Original user request: {_original_request}\n"
+                        f"You have completed {_total_tool_calls} tool calls. "
+                        f"Focus on directly answering the above request."
+                    ),
+                })
 
             # Check for user interjections between iterations
             if interjection_queue is not None:
@@ -1523,7 +1874,243 @@ class ChatService:
             "final_tokens": dict(_cumulative_tokens),
             "total_elapsed_ms": int((time.monotonic() - _loop_start) * 1000),
         })
+        _finalize_trace("max_iterations")
         return last_text, tool_audit, _cumulative_cost
+
+    async def _execute_single_tool(
+        self,
+        tool_call: Any,
+        idx: int,
+        tool_count: int,
+        _iteration: int,
+        max_iterations: int,
+        _flags: Any,
+        progress_queue: asyncio.Queue | None,
+        _emit: Any,
+    ) -> dict:
+        """Execute a single tool call and return structured result.
+
+        Used by both sequential and parallel execution paths.
+        Returns dict with keys: tool_call_id, tool_name, result_str,
+        blocked, error, cache_hit, duration_ms, audit_entry.
+        """
+        fn = tool_call.function
+        tool_name = fn.name
+        try:
+            params = json.loads(fn.arguments) if fn.arguments else {}
+        except json.JSONDecodeError:
+            params = {}
+
+        params_preview = json.dumps(params)[:120] if params else ""
+        _emit({
+            "phase": "tool_start",
+            "iteration": _iteration,
+            "max_iterations": max_iterations,
+            "tool_name": tool_name,
+            "tool_index": idx,
+            "tool_count": tool_count,
+            "params_preview": params_preview,
+        })
+
+        tool_start = time.monotonic()
+        blocked = False
+        error = False
+        cache_hit = False
+        result_str = ""
+
+        # Phase 2.4: Handle load_artifact tool
+        if tool_name == "load_artifact" and _flags.is_enabled(
+            "artifact_handles"
+        ):
+            handle = params.get("handle", "")
+            content = self._artifact_store.load(handle)
+            result_str = content if content else (
+                f"Artifact '{handle}' not found."
+            )
+            audit_entry = {
+                "tool": tool_name, "params": params,
+                "result": result_str[:500], "blocked": False,
+            }
+        else:
+            _gate_ok, _gate_reason = self._check_tool_gate(
+                tool_name, params,
+            )
+            if not _gate_ok:
+                result_str = (
+                    f"Tool '{tool_name}' blocked: {_gate_reason}"
+                )
+                blocked = True
+                audit_entry = {
+                    "tool": tool_name, "params": params,
+                    "result": result_str, "blocked": True,
+                }
+            else:
+                _LONG_TIMEOUT_TOOLS = {
+                    "plan_and_execute",
+                    "deep_research",
+                    "swarm_research",
+                }
+                tool_timeout = (
+                    600.0 if tool_name in _LONG_TIMEOUT_TOOLS
+                    else 120.0
+                )
+
+                # Phase 3.5: Check sub-agent cache
+                if _flags.is_enabled("subagent_cache"):
+                    try:
+                        from qe.runtime.tool_result_cache import (
+                            get_tool_result_cache,
+                        )
+                        cached = get_tool_result_cache().get(
+                            tool_name, params,
+                        )
+                        if cached is not None:
+                            result_str = cached
+                            cache_hit = True
+                    except Exception:
+                        pass
+
+                if not cache_hit:
+                    try:
+                        result_str = await asyncio.wait_for(
+                            self._execute_chat_tool(
+                                tool_name, params,
+                                progress_queue=progress_queue,
+                            ),
+                            timeout=tool_timeout,
+                        )
+                        if _flags.is_enabled("subagent_cache"):
+                            try:
+                                from qe.runtime.tool_result_cache import (
+                                    get_tool_result_cache,
+                                )
+                                get_tool_result_cache().put(
+                                    tool_name, params, result_str,
+                                )
+                            except Exception:
+                                pass
+                    except TimeoutError:
+                        log.warning(
+                            "chat_tool_loop.tool_timeout tool=%s "
+                            "timeout=%.0fs iteration=%d",
+                            tool_name, tool_timeout, _iteration,
+                        )
+                        result_str = (
+                            f"Tool '{tool_name}' timed out after "
+                            f"{int(tool_timeout)}s."
+                        )
+                        error = True
+                    except Exception as e:
+                        log.exception(
+                            "chat_tool_loop.tool_error tool=%s",
+                            tool_name,
+                        )
+                        result_str = f"Tool '{tool_name}' failed: {e}"
+                        error = True
+
+                # Phase 2.4: Artifact handle for large results
+                if (
+                    _flags.is_enabled("artifact_handles")
+                    and not blocked
+                    and not error
+                ):
+                    result_str = self._artifact_store.store(
+                        result_str, tool_name,
+                    )
+
+                audit_entry = {
+                    "tool": tool_name, "params": params,
+                    "result": result_str[:500], "blocked": False,
+                }
+
+        tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+        _emit({
+            "phase": "tool_complete",
+            "iteration": _iteration,
+            "max_iterations": max_iterations,
+            "tool_name": tool_name,
+            "tool_index": idx,
+            "tool_count": tool_count,
+            "duration_ms": tool_duration_ms,
+            "result_preview": result_str[:120] if result_str else "",
+            "blocked": blocked,
+            "error": error,
+        })
+
+        # Phase 4.4: Per-tool metrics
+        try:
+            from qe.runtime.metrics import get_metrics as _gm
+            _m = _gm()
+            _m.counter("chat_tool_calls_total").inc()
+            _m.histogram("chat_tool_latency_ms").observe(
+                float(tool_duration_ms),
+            )
+            if error:
+                _m.counter("chat_tool_errors_total").inc()
+        except Exception:
+            pass
+
+        return {
+            "tool_call_id": tool_call.id,
+            "tool_name": tool_name,
+            "result_str": result_str,
+            "blocked": blocked,
+            "error": error,
+            "cache_hit": cache_hit,
+            "duration_ms": tool_duration_ms,
+            "audit_entry": audit_entry,
+        }
+
+    async def _execute_tools_parallel(
+        self,
+        tool_calls: list,
+        _iteration: int,
+        max_iterations: int,
+        _flags: Any,
+        progress_queue: asyncio.Queue | None,
+        _emit: Any,
+    ) -> list[dict]:
+        """Execute multiple tool calls concurrently.
+
+        Returns list of result dicts (same shape as _execute_single_tool).
+        One failure does not cancel others.
+        """
+        tool_count = len(tool_calls)
+        coros = [
+            self._execute_single_tool(
+                tc, idx, tool_count, _iteration, max_iterations,
+                _flags, progress_queue, _emit,
+            )
+            for idx, tc in enumerate(tool_calls)
+        ]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+
+        # Convert exceptions to error results
+        processed = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                log.exception(
+                    "parallel_tool_exec.exception tool=%s",
+                    tool_calls[i].function.name,
+                )
+                processed.append({
+                    "tool_call_id": tool_calls[i].id,
+                    "tool_name": tool_calls[i].function.name,
+                    "result_str": f"Tool failed: {r}",
+                    "blocked": False,
+                    "error": True,
+                    "cache_hit": False,
+                    "duration_ms": 0,
+                    "audit_entry": {
+                        "tool": tool_calls[i].function.name,
+                        "params": {},
+                        "result": f"Tool failed: {r}"[:500],
+                        "blocked": False,
+                    },
+                })
+            else:
+                processed.append(r)
+        return processed
 
     def _check_tool_gate(
         self, tool_name: str, params: dict
