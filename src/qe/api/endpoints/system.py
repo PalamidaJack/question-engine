@@ -208,6 +208,47 @@ async def replay_events(request: Request, body: dict[str, Any]):
     return {"status": "replayed", "count": replayed}
 
 
+@router.get("/api/hil/pending")
+async def hil_pending(request: Request):
+    """List pending HIL approval requests."""
+    pending_dir = Path("data/hil_queue/pending")
+    if not pending_dir.exists():
+        return {"pending": []}
+    import json as _json
+
+    items = []
+    for f in sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            items.append(_json.loads(f.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    # Mark all as pending status
+    for item in items:
+        item.setdefault("status", "pending")
+    return {"pending": items}
+
+
+@router.post("/api/hil/{envelope_id}/{decision}")
+async def hil_decide(request: Request, envelope_id: str, decision: str):
+    """Approve or reject an HIL request by writing a decision file."""
+    if decision not in ("approve", "reject"):
+        return JSONResponse({"error": "Decision must be 'approve' or 'reject'"}, status_code=400)
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    completed_dir = Path("data/hil_queue/completed")
+    completed_dir.mkdir(parents=True, exist_ok=True)
+    import json as _json
+
+    decision_data = {
+        "decision": "approved" if decision == "approve" else "rejected",
+        "reason": body.get("reason", decision),
+        "decided_at": datetime.now(UTC).isoformat(),
+    }
+    decision_file = completed_dir / f"{envelope_id}.json"
+    decision_file.write_text(_json.dumps(decision_data, indent=2), encoding="utf-8")
+    get_audit_log().record(f"hil.{decision}", resource=f"hil/{envelope_id}")
+    return {"status": decision, "envelope_id": envelope_id}
+
+
 @router.get("/api/health")
 async def health(request: Request):
     return {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
