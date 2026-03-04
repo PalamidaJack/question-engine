@@ -1,11 +1,29 @@
 """Goals API v2 endpoints extracted from app.py."""
 
 from __future__ import annotations
+
+import logging
+import time
+import uuid
 from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from qe.bus import get_bus
+from qe.models.envelope import Envelope
+from qe.runtime.feature_flags import get_flag_store
+from qe.runtime.readiness import get_readiness
+
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/goals", tags=["Goals"])
+
+
+def get_app_globals():
+    import qe.api.app as app_mod
+
+    return app_mod
 
 @router.post("")
 async def submit_goal(request: Request, body: dict[str, Any]):
@@ -21,14 +39,17 @@ async def submit_goal(request: Request, body: dict[str, Any]):
         )
 
     # v2 Multi-agent path
+    app_mod = get_app_globals()
     flag_store = get_flag_store()
     if flag_store.is_enabled("multi_agent_mode"):
         try:
+            _cognitive_pool = app_mod._cognitive_pool
             if _cognitive_pool is not None:
                 goal_id = f"goal_{uuid.uuid4().hex[:12]}"
 
                 # Select strategy for this inquiry
                 config = None
+                _strategy_evolver = app_mod._strategy_evolver
                 if _strategy_evolver is not None:
                     from qe.runtime.strategy_models import strategy_to_inquiry_config
                     strategy = _strategy_evolver.select_strategy()
@@ -37,7 +58,7 @@ async def submit_goal(request: Request, body: dict[str, Any]):
                 # Competitive arena path: tournament verification
                 if (
                     flag_store.is_enabled("competitive_arena")
-                    and _competitive_arena is not None
+                    and app_mod._competitive_arena is not None
                 ):
                     from qe.models.arena import ArenaResult
 
@@ -89,12 +110,13 @@ async def submit_goal(request: Request, body: dict[str, Any]):
             log.debug("submit_goal.multi_agent_fallthrough")
 
     # v2 Inquiry path (single agent)
+    _inquiry_engine = app_mod._inquiry_engine
     if flag_store.is_enabled("inquiry_mode") and _inquiry_engine is not None:
-        global _last_inquiry_profile
         goal_id = f"goal_{uuid.uuid4().hex[:12]}"
 
         # Select strategy via Thompson sampling
         config = None
+        _strategy_evolver = app_mod._strategy_evolver
         if _strategy_evolver is not None:
             from qe.runtime.strategy_models import strategy_to_inquiry_config
             strategy = _strategy_evolver.select_strategy()
@@ -105,8 +127,8 @@ async def submit_goal(request: Request, body: dict[str, Any]):
             goal_description=description,
             config=config,
         )
-        _last_inquiry_profile = result.phase_timings
-        _inquiry_profiling_store.record(result.phase_timings, result.duration_seconds)
+        app_mod._last_inquiry_profile = result.phase_timings
+        app_mod._inquiry_profiling_store.record(result.phase_timings, result.duration_seconds)
 
         # Update readiness with inquiry status
         readiness = get_readiness()

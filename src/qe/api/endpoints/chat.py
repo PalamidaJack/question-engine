@@ -83,7 +83,7 @@ async def chat_websocket(request: Request, websocket: WebSocket):
     # Track envelopes for pipeline progress forwarding
     tracked_envelopes: set[str] = set()
 
-    async def _pipeline_forwarder(request: Request, envelope: Envelope) -> None:
+    async def _pipeline_forwarder(envelope: Envelope) -> None:
         """Forward pipeline events for envelopes this session is tracking."""
         correlation = envelope.correlation_id or envelope.causation_id
         if correlation in tracked_envelopes:
@@ -124,7 +124,7 @@ async def chat_websocket(request: Request, websocket: WebSocket):
                 interjection_queue: asyncio.Queue[str] = asyncio.Queue()
                 _mid_execution = [True]
 
-                async def _forward_progress(request: Request, _q=progress_queue):
+                async def _forward_progress(_q=progress_queue):
                     while True:
                         event = await _q.get()
                         if event is None:
@@ -134,7 +134,7 @@ async def chat_websocket(request: Request, websocket: WebSocket):
                         except Exception:
                             break
 
-                async def _receive_interjections(request: Request, 
+                async def _receive_interjections(
                     _iq=interjection_queue, _flag=_mid_execution,
                 ):
                     """Read messages during execution, route as interjections."""
@@ -199,7 +199,7 @@ async def chat_stream(request: Request, message: str = "", session_id: str | Non
 
     progress_queue: asyncio.Queue[dict] = asyncio.Queue()
 
-    async def event_generator(request: Request):
+    async def event_generator():
         # Start the chat handler in background
         task = asyncio.create_task(
             request.app.state.chat_service.handle_message(session_id or None, message, progress_queue=progress_queue)
