@@ -19,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from qe.api.endpoints.guardrails import router as guardrails_router
 from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTimingMiddleware
 from qe.api.profiling import InquiryProfilingStore
 from qe.api.setup import (
@@ -1008,10 +1007,6 @@ async def lifespan(app: FastAPI):
             "_guardrails_pipeline": _guardrails_pipeline,
             "_guardrails_config": _guardrails_config,
         })
-        try:
-            app.include_router(guardrails_router)
-        except Exception:
-            log.exception("register_guardrails_routes_failed")
 
         # Inquiry Bridge — cross-loop glue
         from qe.runtime.inquiry_bridge import InquiryBridge
@@ -1354,8 +1349,6 @@ from qe.api.endpoints.system import router as system_router
 app.include_router(system_router)
 from qe.api.endpoints.chat import router as chat_router
 app.include_router(chat_router)
-from qe.api.endpoints.ws_endpoints import router as ws_router
-app.include_router(ws_router)
 from qe.api.endpoints.a2a_router import router as a2a_router
 app.include_router(a2a_router)
 from qe.api.endpoints.guardrails import router as guardrails_router

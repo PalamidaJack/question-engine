@@ -1,11 +1,22 @@
 """Harvest API endpoints extracted from app.py."""
 
 from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/api/harvest", tags=["Harvest"])
+
+
+def get_app_globals():
+    import qe.api.app as app_mod
+
+    return app_mod
 
 
 
@@ -21,6 +32,8 @@ async def harvest_status(request: Request):
 @router.post("/scout/proposals/{proposal_id}/approve")
 async def scout_approve(request: Request, proposal_id: str):
     """Approve a scout proposal — writes HIL decision file."""
+    app_mod = get_app_globals()
+    _scout_store = app_mod._scout_store
     if _scout_store is None:
         return JSONResponse({"error": "Scout not initialized"}, status_code=503)
     proposal = await _scout_store.get_proposal(proposal_id)
@@ -51,6 +64,8 @@ async def scout_approve(request: Request, proposal_id: str):
 @router.post("/scout/proposals/{proposal_id}/reject")
 async def scout_reject(request: Request, proposal_id: str, body: dict[str, Any] | None = None):
     """Reject a scout proposal with optional reason."""
+    app_mod = get_app_globals()
+    _scout_store = app_mod._scout_store
     if _scout_store is None:
         return JSONResponse({"error": "Scout not initialized"}, status_code=503)
     proposal = await _scout_store.get_proposal(proposal_id)
@@ -86,6 +101,7 @@ async def scout_reject(request: Request, proposal_id: str, body: dict[str, Any] 
 @router.get("/scout/learning")
 async def scout_learning(request: Request):
     """Return feedback stats (approval rate by category/source)."""
+    _scout_store = get_app_globals()._scout_store
     if _scout_store is None:
         return {"total": 0, "approved": 0, "rejected": 0, "approval_rate": 0.0}
     return await _scout_store.get_feedback_stats()
@@ -94,6 +110,7 @@ async def scout_learning(request: Request):
 @router.get("/prompts/mutator/status")
 async def prompt_mutator_status(request: Request):
     """Return prompt mutator status."""
+    _prompt_mutator = get_app_globals()._prompt_mutator
     if _prompt_mutator is None:
         return {"running": False}
     return _prompt_mutator.status()
@@ -102,6 +119,7 @@ async def prompt_mutator_status(request: Request):
 @router.get("/prompts/slots/{slot_key}")
 async def prompt_slot_detail(request: Request, slot_key: str):
     """Return detailed stats for a specific prompt slot."""
+    _prompt_registry = get_app_globals()._prompt_registry
     if _prompt_registry is None:
         return {"error": "prompt registry not initialized"}
     stats = _prompt_registry.get_slot_stats(slot_key)

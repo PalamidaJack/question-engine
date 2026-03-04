@@ -1,11 +1,28 @@
 """Chat API endpoints extracted from app.py."""
 
 from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import uuid
 from typing import Any
-from fastapi import APIRouter, HTTPException, Request
+
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from qe.bus import get_bus
+from qe.models.envelope import Envelope
+
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
+
+
+def get_app_globals():
+    import qe.api.app as app_mod
+
+    return app_mod
 
 @router.post("")
 async def chat_rest(request: Request, body: dict[str, Any]):
@@ -34,13 +51,14 @@ async def chat_rest(request: Request, body: dict[str, Any]):
 
 @router.websocket("/ws")
 async def websocket_endpoint(request: Request, websocket: WebSocket):
-    await ws_manager.connect(websocket)
+    app_mod = get_app_globals()
+    await app_mod.ws_manager.connect(websocket)
     try:
         while True:
             data = await websocket.receive_text()
             log.debug("WS received: %s", data)
     except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
+        app_mod.ws_manager.disconnect(websocket)
 
 
 @router.websocket("/ws/chat")
@@ -202,51 +220,4 @@ async def chat_stream(request: Request, message: str = "", session_id: str | Non
                 task.cancel()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-# ── A2A Peer Registry Endpoints ─────────────────────────────────────
-
-
-@router.get("/api/a2a/peers")
-async def list_peers(request: Request):
-    """List all registered A2A peers."""
-    if _peer_registry is None:
-        return {"total_peers": 0, "healthy_peers": 0, "peers": []}
-    return _peer_registry.status()
-
-
-@router.post("/api/a2a/peers")
-async def register_peer(request: Request):
-    """Register a new peer agent by URL (auto-discovers capabilities)."""
-    if _peer_registry is None:
-        return JSONResponse(
-            {"error": "Peer registry not initialized"}, status_code=503,
-        )
-    body = await request.json()
-    url = body.get("url", "")
-    if not url:
-        return JSONResponse({"error": "url is required"}, status_code=400)
-
-    peer = await _peer_registry.discover_and_register(url)
-    if peer is None:
-        return JSONResponse(
-            {"error": f"Failed to discover agent at {url}"},
-            status_code=502,
-        )
-    return peer.model_dump()
-
-
-@router.delete("/api/a2a/peers/{peer_id}")
-async def remove_peer(request: Request, peer_id: str):
-    """Remove a registered peer."""
-    if _peer_registry is None:
-        return JSONResponse(
-            {"error": "Peer registry not initialized"}, status_code=503,
-        )
-    removed = _peer_registry.unregister(peer_id)
-    if not removed:
-        return JSONResponse(
-            {"error": f"Peer not found: {peer_id}"}, status_code=404,
-        )
-    return {"removed": peer_id}
 

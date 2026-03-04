@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from qe.audit import get_audit_log
-from qe.runtime.metrics import get_metrics
 from qe.bus.bus_metrics import get_bus_metrics
+from qe.runtime.feature_flags import get_flag_store
+from qe.runtime.metrics import get_metrics
 
 router = APIRouter(prefix="/api", tags=["Telemetry"])
+
+
+def get_app_globals():
+    import qe.api.app as app_mod
+
+    return app_mod
 
 
 
@@ -17,6 +25,7 @@ router = APIRouter(prefix="/api", tags=["Telemetry"])
 @router.get("/pool/status")
 async def pool_status(request: Request):
     """Return cognitive agent pool status."""
+    _cognitive_pool = get_app_globals()._cognitive_pool
     if _cognitive_pool is None:
         return JSONResponse({"error": "Cognitive pool not initialized"}, status_code=503)
     return _cognitive_pool.pool_status()
@@ -25,6 +34,7 @@ async def pool_status(request: Request):
 @router.get("/arena/status")
 async def arena_status(request: Request):
     """Return competitive arena status and Elo rankings."""
+    _competitive_arena = get_app_globals()._competitive_arena
     if _competitive_arena is None:
         return {"enabled": False, "rankings": []}
     return _competitive_arena.status()
@@ -33,6 +43,9 @@ async def arena_status(request: Request):
 @router.get("/strategy/snapshots")
 async def strategy_snapshots(request: Request):
     """Return strategy evolver snapshots and current strategy."""
+    app_mod = get_app_globals()
+    _strategy_evolver = app_mod._strategy_evolver
+    _elastic_scaler = app_mod._elastic_scaler
     if _strategy_evolver is None:
         return JSONResponse({"error": "Strategy evolver not initialized"}, status_code=503)
     return {
@@ -95,6 +108,7 @@ async def disable_flag(request: Request, flag_name: str):
 @router.get("/episodic/status")
 async def episodic_status(request: Request):
     """Return episodic memory status overview."""
+    _episodic_memory = get_app_globals()._episodic_memory
     if _episodic_memory is None:
         return JSONResponse({"error": "Episodic memory not initialized"}, status_code=503)
     status = _episodic_memory.status()
@@ -115,6 +129,7 @@ async def episodic_search(request: Request,
     time_window_hours: float | None = None,
 ):
     """Search episodic memory by keyword + recency."""
+    _episodic_memory = get_app_globals()._episodic_memory
     if _episodic_memory is None:
         return JSONResponse({"error": "Episodic memory not initialized"}, status_code=503)
     if not query:
@@ -132,6 +147,7 @@ async def episodic_search(request: Request,
 @router.get("/episodic/goal/{goal_id}")
 async def episodic_goal(request: Request, goal_id: str, top_k: int = 20):
     """Return episodes for a specific goal."""
+    _episodic_memory = get_app_globals()._episodic_memory
     if _episodic_memory is None:
         return JSONResponse({"error": "Episodic memory not initialized"}, status_code=503)
     episodes = await _episodic_memory.recall_for_goal(goal_id, top_k=top_k)
@@ -145,6 +161,7 @@ async def episodic_goal(request: Request, goal_id: str, top_k: int = 20):
 @router.get("/episodic/latest")
 async def episodic_latest(request: Request, limit: int = 20):
     """Return most recent episodes from hot store."""
+    _episodic_memory = get_app_globals()._episodic_memory
     if _episodic_memory is None:
         return JSONResponse({"error": "Episodic memory not initialized"}, status_code=503)
     episodes = _episodic_memory.get_latest(limit=limit)

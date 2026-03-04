@@ -113,8 +113,5 @@ async def mass_intelligence_refresh(request: Request):
         "success": True,
         "models_count": len(models),
     }
-    if proposal is None:
-        return JSONResponse({"error": "Proposal not found"}, status_code=404)
-    return proposal.model_dump(mode="json")
 
 
