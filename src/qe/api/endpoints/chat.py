@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from qe.api.auth import get_auth_provider
 from qe.bus import get_bus
 from qe.models.envelope import Envelope
+from qe.services.chat.schemas import AgentPermissions, PermissionScope
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ async def _ws_authenticate(websocket: WebSocket) -> bool:
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(request: Request, websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket):
     if not await _ws_authenticate(websocket):
         return
     app_mod = get_app_globals()
@@ -85,14 +86,14 @@ async def websocket_endpoint(request: Request, websocket: WebSocket):
 
 
 @router.websocket("/ws/chat")
-async def chat_websocket(request: Request, websocket: WebSocket):
+async def chat_websocket(websocket: WebSocket):
     """Per-session chat WebSocket with pipeline progress events."""
     if not await _ws_authenticate(websocket):
         return
     await websocket.accept()
     session_id = str(uuid.uuid4())
 
-    if not request.app.state.chat_service:
+    if not websocket.app.state.chat_service:
         await websocket.send_json({
             "type": "error",
             "error": "Engine not started. Please complete setup first.",
@@ -100,9 +101,15 @@ async def chat_websocket(request: Request, websocket: WebSocket):
         await websocket.close()
         return
 
+    chat_svc = websocket.app.state.chat_service
+    default_perms = AgentPermissions.from_access_mode(chat_svc._access_mode)
     await websocket.send_json({
         "type": "session_init",
         "session_id": session_id,
+        "permissions": {
+            "scopes": {s.value: v for s, v in default_perms.scopes.items()},
+            "budget_cap_usd": default_perms.budget_cap_usd,
+        },
     })
 
     # Track envelopes for pipeline progress forwarding
@@ -181,7 +188,7 @@ async def chat_websocket(request: Request, websocket: WebSocket):
                 forwarder_task = asyncio.create_task(_forward_progress())
                 receiver_task = asyncio.create_task(_receive_interjections())
                 try:
-                    response = await request.app.state.chat_service.handle_message(
+                    response = await websocket.app.state.chat_service.handle_message(
                         session_id, user_text,
                         progress_queue=progress_queue,
                         interjection_queue=interjection_queue,
@@ -205,6 +212,36 @@ async def chat_websocket(request: Request, websocket: WebSocket):
                 envelope_id = data.get("envelope_id")
                 if envelope_id:
                     tracked_envelopes.add(envelope_id)
+
+            elif msg_type == "set_permissions":
+                try:
+                    preset = data.get("preset")
+                    if preset:
+                        perms = AgentPermissions.from_preset(preset)
+                    else:
+                        raw_scopes = data.get("scopes", {})
+                        scope_dict = {
+                            PermissionScope(k): bool(v)
+                            for k, v in raw_scopes.items()
+                            if k in PermissionScope.__members__.values()
+                              or k in [s.value for s in PermissionScope]
+                        }
+                        perms = AgentPermissions(scopes=scope_dict)
+                    budget = data.get("budget_cap_usd")
+                    if budget is not None:
+                        perms.budget_cap_usd = float(budget)
+                    chat_svc.set_session_permissions(session_id, perms)
+                    await websocket.send_json({
+                        "type": "permissions_updated",
+                        "scopes": {s.value: v for s, v in perms.scopes.items()},
+                        "budget_cap_usd": perms.budget_cap_usd,
+                    })
+                except Exception as exc:
+                    log.warning("set_permissions failed: %s", exc)
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": f"Failed to set permissions: {exc}",
+                    })
 
     except WebSocketDisconnect:
         pass

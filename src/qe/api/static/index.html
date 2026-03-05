@@ -30,7 +30,7 @@
     const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
     const API = window.location.origin;
-    const WS_URL = `ws://${window.location.host}/ws`;
+    const WS_URL = `ws://${window.location.host}/api/chat/ws`;
     const SettingsHelpers = window.QESettingsHelpers;
 
     const FONT_MONO = "'IBM Plex Mono', 'Fira Code', 'SF Mono', monospace";
@@ -949,6 +949,10 @@
       const [chatToolStream, setChatToolStream] = useState([]);
       const chatWsRef = useRef(null);
       const chatEndRef = useRef(null);
+      const [permissionsExpanded, setPermissionsExpanded] = useState(false);
+      const [agentPermissions, setAgentPermissions] = useState(() => {
+        try { const saved = localStorage.getItem("qe_agent_permissions"); return saved ? JSON.parse(saved) : null; } catch { return null; }
+      });
 
       // Settings state
       const [settings, setSettings] = useState(() => SettingsHelpers.getDefaultSettings());
@@ -994,6 +998,7 @@
       const [harvestStatus, setHarvestStatus] = useState(null);
       const [massIntelStatus, setMassIntelStatus] = useState(null);
       const [massIntelModels, setMassIntelModels] = useState([]);
+      const [massIntelSelected, setMassIntelSelected] = useState(new Set());
       const [peers, setPeers] = useState([]);
       const [auditLog, setAuditLog] = useState([]);
       const [busStats, setBusStats] = useState(null);
@@ -1020,6 +1025,14 @@
       const [goalInput, setGoalInput] = useState("");
       const [massIntelInput, setMassIntelInput] = useState("");
       const [massIntelResult, setMassIntelResult] = useState(null);
+      const [massIntelLoading, setMassIntelLoading] = useState(false);
+      const [massIntelConsensus, setMassIntelConsensus] = useState(null);
+      const [massIntelConsensusLoading, setMassIntelConsensusLoading] = useState(false);
+      const [massIntelExtendedTimeout, setMassIntelExtendedTimeout] = useState(false);
+      const [massIntelFreeOnly, setMassIntelFreeOnly] = useState(true);
+      const [massIntelSearchOnline, setMassIntelSearchOnline] = useState(false);
+      const [massIntelDeepResearch, setMassIntelDeepResearch] = useState(false);
+      const [massIntelProgress, setMassIntelProgress] = useState(0);
       const [peerAddUrl, setPeerAddUrl] = useState("");
       const [emergencyReason, setEmergencyReason] = useState("");
       const [flagEvaluations, setFlagEvaluations] = useState([]);
@@ -1138,7 +1151,7 @@
       const fetchHarvestStatus = async () => { try { const res = await fetch(`${API}/api/harvest/status`); if (res.ok) setHarvestStatus(await res.json()); } catch {} };
       const fetchMassIntelStatus = async () => {
         try {
-          const [sRes, mRes] = await Promise.all([fetch(`${API}/api/mass-intel/status`), fetch(`${API}/api/mass-intel/models`)]);
+          const [sRes, mRes] = await Promise.all([fetch(`${API}/api/mass-intelligence/status`), fetch(`${API}/api/mass-intelligence/models`)]);
           if (sRes.ok) setMassIntelStatus(await sRes.json());
           if (mRes.ok) setMassIntelModels((await mRes.json()).models || []);
         } catch {}
@@ -1275,13 +1288,65 @@
       };
 
       // Mass Intel
+      const massIntelFilteredModels = massIntelFreeOnly
+        ? massIntelModels.filter(m => /:free/i.test(m.model_id) || /free/i.test(m.model_name || ""))
+        : massIntelModels;
+
       const handleMassIntelQuery = async () => {
-        if (!massIntelInput.trim()) return;
+        if (!massIntelInput.trim() || massIntelLoading) return;
         setMassIntelResult(null);
+        setMassIntelLoading(true);
+        setMassIntelProgress(0);
+
+        // Build prompt with optional modifiers
+        let prompt = massIntelInput.trim();
+        if (massIntelSearchOnline) {
+          prompt = `Search the internet and provide up-to-date information. Use web search to find current data, recent developments, and latest facts.\n\nQuestion: ${prompt}`;
+        }
+        if (massIntelDeepResearch) {
+          prompt = `Conduct extensive, thorough research on this topic. Explore multiple angles, cite sources where possible, provide detailed analysis with supporting evidence, compare different perspectives, and give a comprehensive deep-dive answer. Be as thorough and detailed as possible.\n\n${prompt}`;
+        }
+
+        // Simulate progress bar
+        const progressTimer = setInterval(() => {
+          setMassIntelProgress(p => p >= 90 ? 90 : p + Math.random() * 8);
+        }, 500);
+
         try {
-          const res = await fetch(`${API}/api/mass-intel/query`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: massIntelInput.trim() }) });
+          let url = `${API}/api/mass-intelligence/query?prompt=${encodeURIComponent(prompt)}`;
+          // Use filtered models when free-only is on and no manual selection
+          const effectiveModels = massIntelSelected.size > 0
+            ? [...massIntelSelected]
+            : (massIntelFreeOnly ? massIntelFilteredModels.map(m => m.model_id) : []);
+          if (effectiveModels.length > 0) url += `&model_ids=${encodeURIComponent(effectiveModels.join(","))}`;
+          if (massIntelExtendedTimeout) url += `&timeout_seconds=90`;
+          const res = await fetch(url, { method: "POST" });
           if (res.ok) { setMassIntelResult(await res.json()); addToast("Query complete", palette.green); }
+          else { addToast("Query failed: " + res.status, palette.red); }
         } catch { addToast("Query failed", palette.red); }
+        clearInterval(progressTimer);
+        setMassIntelProgress(100);
+        setTimeout(() => setMassIntelProgress(0), 800);
+        setMassIntelLoading(false);
+        setMassIntelConsensus(null);
+      };
+
+      const handleMassIntelConsensus = async () => {
+        if (!massIntelResult || massIntelConsensusLoading) return;
+        const successful = (massIntelResult.responses || []).filter(r => r.success && r.response);
+        if (successful.length < 2) { addToast("Need at least 2 successful responses", palette.red); return; }
+        setMassIntelConsensusLoading(true);
+        setMassIntelConsensus(null);
+        try {
+          const res = await fetch(`${API}/api/mass-intelligence/consensus`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: massIntelResult.prompt, responses: successful.map(r => ({ model_name: r.model_name, response: r.response })) }),
+          });
+          if (res.ok) { const data = await res.json(); setMassIntelConsensus(data); addToast("Consensus generated", palette.green); }
+          else { addToast("Consensus failed: " + res.status, palette.red); }
+        } catch { addToast("Consensus generation failed", palette.red); }
+        setMassIntelConsensusLoading(false);
       };
 
       // Guardrails
@@ -1303,12 +1368,29 @@
       useEffect(() => {
         if (activeTab !== "chat") return;
         if (chatWsRef.current) return;
-        const chatWs = new WebSocket(`ws://${window.location.host}/ws/chat`);
+        const chatWs = new WebSocket(`ws://${window.location.host}/api/chat/ws/chat`);
         chatWs.onopen = () => console.log("Chat WS connected");
         chatWs.onmessage = (msg) => {
           try {
             const data = JSON.parse(msg.data);
-            if (data.type === "session_init") setChatSessionId(data.session_id);
+            if (data.type === "session_init") {
+              setChatSessionId(data.session_id);
+              if (data.permissions) {
+                const saved = localStorage.getItem("qe_agent_permissions");
+                if (saved) {
+                  try {
+                    const override = JSON.parse(saved);
+                    setAgentPermissions(override);
+                    chatWs.send(JSON.stringify({ type: "set_permissions", scopes: override }));
+                  } catch { setAgentPermissions(data.permissions.scopes); }
+                } else {
+                  setAgentPermissions(data.permissions.scopes);
+                }
+              }
+            }
+            if (data.type === "permissions_updated") {
+              setAgentPermissions(data.scopes);
+            }
             if (data.type === "typing") setChatTyping(data.active);
             if (data.type === "chat_progress") {
               setChatProgress(data);
@@ -1566,6 +1648,67 @@
                 <div style={{ marginBottom: 16, flexShrink: 0 }}>
                   <SectionHeader title="Chat" subtitle="Talk to the Question Engine — ask questions, submit observations, or run commands" />
                 </div>
+                {/* ── Permissions Panel ── */}
+                {agentPermissions && (() => {
+                  const PSCOPES = [
+                    { key: "web_access",     label: "Web Access",      desc: "Search & browse the web" },
+                    { key: "file_system",    label: "File System",     desc: "Read & write local files" },
+                    { key: "code_execution", label: "Code Execution",  desc: "Run shell commands & scripts" },
+                    { key: "knowledge_base", label: "Knowledge Base",  desc: "Query beliefs, submit observations" },
+                    { key: "research",       label: "Research",        desc: "Deep research & planning" },
+                    { key: "reasoning",      label: "Reasoning",       desc: "Epistemic & dialectic analysis" },
+                    { key: "system_control", label: "System Control",  desc: "Browser & service management" },
+                    { key: "communication",  label: "Communication",   desc: "Delegate to external agents" },
+                    { key: "mcp_tools",      label: "MCP Tools",       desc: "External MCP server tools" },
+                  ];
+                  const activeCount = Object.values(agentPermissions).filter(Boolean).length;
+                  const PRESETS = {
+                    restricted: { web_access: true, file_system: false, code_execution: false, knowledge_base: true, research: false, reasoning: false, system_control: false, communication: false, mcp_tools: false },
+                    standard: { web_access: true, file_system: true, code_execution: false, knowledge_base: true, research: true, reasoning: true, system_control: false, communication: false, mcp_tools: true },
+                    autonomous: { web_access: true, file_system: true, code_execution: true, knowledge_base: true, research: true, reasoning: true, system_control: true, communication: true, mcp_tools: true },
+                  };
+                  const currentPreset = Object.entries(PRESETS).find(([, v]) => JSON.stringify(v) === JSON.stringify(agentPermissions))?.[0] || null;
+                  const sendPerms = (scopes) => {
+                    setAgentPermissions(scopes);
+                    localStorage.setItem("qe_agent_permissions", JSON.stringify(scopes));
+                    if (chatWsRef.current) chatWsRef.current.send(JSON.stringify({ type: "set_permissions", scopes }));
+                  };
+                  const toggleScope = (key) => { sendPerms({ ...agentPermissions, [key]: !agentPermissions[key] }); };
+                  const applyPreset = (name) => { sendPerms({ ...PRESETS[name] }); };
+                  return (
+                    <div style={{ flexShrink: 0, marginBottom: 12, border: `1px solid ${palette.border}`, borderRadius: 8, background: palette.surface, overflow: "hidden" }}>
+                      <div onClick={() => setPermissionsExpanded(!permissionsExpanded)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 14px", cursor: "pointer", userSelect: "none" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 14 }}>&#x1f6e1;</span>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600, color: palette.text }}>Agent Permissions</span>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: palette.textDim }}>{activeCount}/9 scopes active</span>
+                          {currentPreset && <Badge color={currentPreset === "restricted" ? palette.green : currentPreset === "standard" ? palette.blue : palette.red}>{currentPreset}</Badge>}
+                        </div>
+                        <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: palette.textDim, transform: permissionsExpanded ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>&#9660;</span>
+                      </div>
+                      {permissionsExpanded && (
+                        <div style={{ padding: "0 14px 14px", borderTop: `1px solid ${palette.border}` }}>
+                          <div style={{ display: "flex", gap: 8, padding: "12px 0 10px" }}>
+                            {[["restricted", palette.green], ["standard", palette.blue], ["autonomous", palette.red]].map(([name, color]) => (
+                              <button key={name} onClick={() => applyPreset(name)} style={{ padding: "4px 12px", borderRadius: 4, border: `1px solid ${currentPreset === name ? color : palette.border}`, background: currentPreset === name ? color + "22" : "transparent", color: currentPreset === name ? color : palette.textDim, fontFamily: FONT_MONO, fontSize: 11, fontWeight: 600, cursor: "pointer", textTransform: "capitalize" }}>{name}</button>
+                            ))}
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 24px" }}>
+                            {PSCOPES.map(s => (
+                              <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <Toggle checked={!!agentPermissions[s.key]} onChange={() => toggleScope(s.key)} />
+                                <div>
+                                  <div style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 600, color: agentPermissions[s.key] ? palette.text : palette.textDim }}>{s.label}</div>
+                                  <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: palette.textDim }}>{s.desc}</div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div style={{ flex: 1, overflow: "auto", padding: "16px 0", display: "flex", flexDirection: "column" }}>
                   {chatMessages.length === 0 && (
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flex: 1, gap: 16, opacity: 0.6 }}>
@@ -2223,12 +2366,12 @@
             {activeTab === "massintel" && (
               <div>
                 <SectionHeader title="Mass Intelligence" subtitle="Multi-model query interface" actions={
-                  <button onClick={async () => { try { await fetch(`${API}/api/mass-intel/refresh`, { method: "POST" }); fetchMassIntelStatus(); addToast("Models refreshed", palette.green); } catch {} }} style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${palette.border}`, background: palette.surface, color: palette.textDim, fontFamily: FONT_MONO, fontSize: 11, cursor: "pointer" }}>Refresh Models</button>
+                  <button onClick={async () => { try { await fetch(`${API}/api/mass-intelligence/refresh`, { method: "POST" }); fetchMassIntelStatus(); addToast("Models refreshed", palette.green); } catch {} }} style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${palette.border}`, background: palette.surface, color: palette.textDim, fontFamily: FONT_MONO, fontSize: 11, cursor: "pointer" }}>Refresh Models</button>
                 } />
                 {massIntelStatus && (
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 20 }}>
                     <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: 16 }}>
-                      <Stat label="Available Models" value={massIntelModels.length} color={palette.blue} />
+                      <Stat label={massIntelFreeOnly ? "Free Models" : "Available Models"} value={massIntelFilteredModels.length} color={palette.blue} />
                     </div>
                     <div style={{ background: palette.surface, border: `1px solid ${palette.border}`, borderRadius: 8, padding: 16 }}>
                       <Stat label="Active Queries" value={massIntelStatus.active_queries || 0} color={palette.accent} />
@@ -2242,22 +2385,114 @@
                   <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
                     <textarea value={massIntelInput} onChange={e => setMassIntelInput(e.target.value)} placeholder="Enter your query for mass intelligence..." rows={3} style={{ flex: 1, padding: "12px 14px", borderRadius: 6, resize: "vertical", background: palette.bg, border: `1px solid ${palette.border}`, color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
                   </div>
-                  <button onClick={handleMassIntelQuery} disabled={!massIntelInput.trim()} style={{ padding: "10px 24px", borderRadius: 6, border: "none", cursor: massIntelInput.trim() ? "pointer" : "not-allowed", fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600, background: palette.accent, color: palette.bg, opacity: massIntelInput.trim() ? 1 : 0.5 }}>Submit Query</button>
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 16, marginBottom: 12 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>
+                      <input type="checkbox" checked={massIntelFreeOnly} onChange={() => setMassIntelFreeOnly(v => !v)} style={{ accentColor: palette.green, cursor: "pointer" }} />
+                      Free models only
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim }}>
+                      <input type="checkbox" checked={massIntelExtendedTimeout} onChange={() => setMassIntelExtendedTimeout(v => !v)} style={{ accentColor: palette.accent, cursor: "pointer" }} />
+                      Extended timeout (90s)
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, fontFamily: FONT_MONO, color: massIntelSearchOnline ? palette.blue : palette.textDim }}>
+                      <input type="checkbox" checked={massIntelSearchOnline} onChange={() => setMassIntelSearchOnline(v => !v)} style={{ accentColor: palette.blue, cursor: "pointer" }} />
+                      Search online
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, fontFamily: FONT_MONO, color: massIntelDeepResearch ? palette.yellow : palette.textDim }}>
+                      <input type="checkbox" checked={massIntelDeepResearch} onChange={() => setMassIntelDeepResearch(v => !v)} style={{ accentColor: palette.yellow, cursor: "pointer" }} />
+                      Extensive research
+                    </label>
+                  </div>
+                  <button onClick={handleMassIntelQuery} disabled={!massIntelInput.trim() || massIntelLoading} style={{ padding: "10px 24px", borderRadius: 6, border: "none", cursor: massIntelInput.trim() && !massIntelLoading ? "pointer" : "not-allowed", fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600, background: massIntelLoading ? palette.border : palette.accent, color: massIntelLoading ? palette.textDim : palette.bg, opacity: massIntelInput.trim() ? 1 : 0.5 }}>{massIntelLoading ? "Querying models..." : "Submit Query"}</button>
+                  {massIntelLoading && (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                        <span style={{ fontSize: 12, color: palette.accent, animation: "pulse 1.5s infinite" }}>⟳</span>
+                        <span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim }}>Querying {massIntelSelected.size > 0 ? massIntelSelected.size : massIntelFilteredModels.length} models... this may take {massIntelExtendedTimeout ? "up to 90s" : "10-30s"}{massIntelDeepResearch ? " (deep research)" : ""}</span>
+                        <span style={{ marginLeft: "auto", fontSize: 11, fontFamily: FONT_MONO, color: palette.accent }}>{Math.round(massIntelProgress)}%</span>
+                      </div>
+                      <div style={{ height: 6, background: palette.border, borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${massIntelProgress}%`, background: `linear-gradient(90deg, ${palette.accent}, ${palette.blue})`, borderRadius: 3, transition: "width 0.3s ease" }} />
+                      </div>
+                    </div>
+                  )}
                   {massIntelResult && (
-                    <div style={{ marginTop: 16, padding: "16px 18px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}` }}>
-                      <div style={{ fontSize: 13, color: palette.textBright, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{massIntelResult.result || massIntelResult.answer || JSON.stringify(massIntelResult, null, 2)}</div>
+                    <div style={{ marginTop: 16 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                        <Badge color={palette.green}>{massIntelResult.successful || 0} succeeded</Badge>
+                        <Badge color={palette.red}>{massIntelResult.failed || 0} failed</Badge>
+                        <Badge color={palette.textDim}>{(massIntelResult.total_time_ms || 0).toFixed(0)}ms total</Badge>
+                        <button onClick={handleMassIntelConsensus} disabled={massIntelConsensusLoading || (massIntelResult.successful || 0) < 2} style={{ marginLeft: "auto", padding: "8px 20px", borderRadius: 6, border: "none", cursor: (massIntelResult.successful || 0) >= 2 && !massIntelConsensusLoading ? "pointer" : "not-allowed", fontFamily: FONT_MONO, fontSize: 12, fontWeight: 700, background: massIntelConsensusLoading ? palette.border : `linear-gradient(135deg, ${palette.accent}, ${palette.yellow})`, color: massIntelConsensusLoading ? palette.textDim : "#fff", opacity: (massIntelResult.successful || 0) >= 2 ? 1 : 0.4 }}>{massIntelConsensusLoading ? "Generating..." : "Generate Consensus"}</button>
+                      </div>
+                      {massIntelConsensusLoading && <div style={{ marginBottom: 12, padding: "12px 16px", background: palette.surface, borderRadius: 6, border: `1px solid ${palette.accent}30`, display: "flex", alignItems: "center", gap: 10 }}><span style={{ fontSize: 12, color: palette.accent, animation: "pulse 1.5s infinite" }}>⟳</span><span style={{ fontSize: 12, fontFamily: FONT_MONO, color: palette.textDim }}>Synthesizing {massIntelResult.successful} model responses into consensus...</span></div>}
+                      {massIntelConsensus && (
+                        <div style={{ marginBottom: 16, padding: "18px 20px", background: `linear-gradient(135deg, ${palette.accentDim}, ${palette.yellowDim || "rgba(251,191,36,0.08)"})`, borderRadius: 8, border: `1px solid ${palette.accent}40` }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                            <span style={{ fontSize: 14 }}>✦</span>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: palette.accent }}>Consensus</span>
+                            <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginLeft: "auto" }}>from {massIntelConsensus.source_count} models · {massIntelConsensus.model_used}</span>
+                          </div>
+                          <div style={{ fontSize: 13, color: palette.textBright, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{massIntelConsensus.consensus}</div>
+                        </div>
+                      )}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {(massIntelResult.responses || []).map((r, i) => (
+                          <div key={i} style={{ padding: "12px 16px", background: palette.bg, borderRadius: 6, border: `1px solid ${r.success ? palette.green + "30" : palette.red + "30"}` }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: r.response ? 8 : 0 }}>
+                              <StatusDot alive={r.success} />
+                              <span style={{ fontSize: 11, fontWeight: 600, color: palette.textBright }}>{r.model_name || r.model_id}</span>
+                              <span style={{ fontSize: 9, fontFamily: FONT_MONO, color: palette.textDim, marginLeft: "auto" }}>{(r.latency_ms || 0).toFixed(0)}ms</span>
+                            </div>
+                            {r.response && <div style={{ fontSize: 12, color: palette.text, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{r.response}</div>}
+                            {r.error && <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.red, marginTop: 4 }}>{r.error}</div>}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </Card>
                 {massIntelModels.length > 0 && (
-                  <Card title="Available Models" style={{ marginTop: 16 }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 8 }}>
-                      {massIntelModels.map((m, i) => (
-                        <div key={m.id || m.name || i} style={{ padding: "10px 14px", background: palette.bg, borderRadius: 6, border: `1px solid ${palette.border}` }}>
-                          <div style={{ fontSize: 12, fontWeight: 500, color: palette.textBright }}>{m.name || m.model}</div>
-                          <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim }}>{m.tier || m.provider || ""}</div>
-                        </div>
-                      ))}
+                  <Card title={`Available Models — ${massIntelFilteredModels.length}${massIntelFreeOnly ? " free" : ""} models${massIntelSelected.size > 0 ? ` (${massIntelSelected.size} selected)` : ""}`}>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                      <button onClick={() => setMassIntelSelected(new Set())} style={{ padding: "4px 12px", borderRadius: 4, border: `1px solid ${palette.border}`, background: massIntelSelected.size === 0 ? palette.accentDim : "transparent", color: massIntelSelected.size === 0 ? palette.accent : palette.textDim, fontFamily: FONT_MONO, fontSize: 10, cursor: "pointer" }}>All Models</button>
+                      {[...new Set(massIntelFilteredModels.map(m => m.provider))].map(prov => {
+                        const provModels = massIntelFilteredModels.filter(m => m.provider === prov).map(m => m.model_id);
+                        const allProvSelected = provModels.every(id => massIntelSelected.has(id));
+                        return <button key={prov} onClick={() => {
+                          setMassIntelSelected(prev => {
+                            const next = new Set(prev);
+                            if (allProvSelected) { provModels.forEach(id => next.delete(id)); } else { provModels.forEach(id => next.add(id)); }
+                            return next;
+                          });
+                        }} style={{ padding: "4px 12px", borderRadius: 4, border: `1px solid ${palette.border}`, background: allProvSelected ? palette.accentDim : "transparent", color: allProvSelected ? palette.accent : palette.textDim, fontFamily: FONT_MONO, fontSize: 10, cursor: "pointer", textTransform: "capitalize" }}>{prov} ({provModels.length})</button>;
+                      })}
+                      {massIntelSelected.size > 0 && <button onClick={() => setMassIntelSelected(new Set())} style={{ padding: "4px 12px", borderRadius: 4, border: `1px solid ${palette.red}40`, background: "transparent", color: palette.red, fontFamily: FONT_MONO, fontSize: 10, cursor: "pointer" }}>Clear Selection</button>}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 8 }}>
+                      {massIntelFilteredModels.map((m, i) => {
+                        const sel = massIntelSelected.size === 0 || massIntelSelected.has(m.model_id);
+                        return (
+                          <div key={m.model_id || i} onClick={() => {
+                            setMassIntelSelected(prev => {
+                              const next = new Set(prev);
+                              if (prev.size === 0) { massIntelFilteredModels.forEach(mm => next.add(mm.model_id)); next.delete(m.model_id); }
+                              else if (next.has(m.model_id)) next.delete(m.model_id);
+                              else next.add(m.model_id);
+                              return next;
+                            });
+                          }} style={{ padding: "10px 14px", background: sel ? palette.bg : palette.surface, borderRadius: 6, border: `1px solid ${sel ? palette.accent + "40" : palette.border}`, cursor: "pointer", opacity: sel ? 1 : 0.4, transition: "all 0.15s" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <div style={{ width: 14, height: 14, borderRadius: 3, border: `1.5px solid ${sel ? palette.accent : palette.border}`, background: sel ? palette.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                {sel && <span style={{ color: "#fff", fontSize: 9, lineHeight: 1 }}>✓</span>}
+                              </div>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 11, fontWeight: 500, color: palette.textBright, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.model_name || m.model_id}</div>
+                                <div style={{ fontSize: 9, fontFamily: FONT_MONO, color: palette.textDim }}>{m.provider}{m.context_length ? ` · ${(m.context_length/1024).toFixed(0)}k ctx` : ""}</div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </Card>
                 )}
@@ -2344,6 +2579,51 @@
                         <input type="number" min="5" max="95" step="5" value={settings.budget?.alert_threshold_pct ?? 20} onChange={e => updateSetting("budget", "alert_threshold_pct", parseInt(e.target.value) || 20)} style={{ width: 120, padding: "8px 10px", borderRadius: 5, border: `1px solid ${palette.border}`, background: palette.bg, color: palette.text, fontFamily: FONT_MONO, fontSize: 13, outline: "none" }} />
                       </div>
                     </div>
+                  </Card>
+
+                  {/* LLM Providers & Model Tiers */}
+                  <Card title="LLM Providers">
+                    {reconfigError && <AlertBanner type="error" message={reconfigError} onDismiss={() => setReconfigError(null)} />}
+                    {reconfigSuccess && <AlertBanner type="success" message="Provider configuration saved!" />}
+                    <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 14 }}>Set API keys for each provider. Active providers are highlighted.</div>
+
+                    {/* Active providers */}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10, marginBottom: 20 }}>
+                      {reconfigProviders.map(p => (
+                        <div key={p.name} style={{ padding: "10px 14px", borderRadius: 8, border: `1px solid ${p.configured ? palette.green + "40" : palette.border}`, background: p.configured ? palette.greenDim : palette.bg }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                            <StatusDot alive={p.configured} />
+                            <span style={{ fontSize: 12, fontWeight: 600, color: palette.textBright }}>{p.name}</span>
+                            {p.env_var && <span style={{ fontSize: 9, fontFamily: FONT_MONO, color: palette.textDim, marginLeft: "auto" }}>{p.env_var}</span>}
+                          </div>
+                          {p.masked_key && !reconfigKeys[p.name] && <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 6 }}>Current: {p.masked_key}</div>}
+                          {p.env_var && <input type="password" placeholder={p.configured ? "Enter new key to update..." : "Paste API key..."} value={reconfigKeys[p.name] || ""} onChange={e => { setReconfigKeys(prev => ({ ...prev, [p.name]: e.target.value })); setReconfigDirty(true); }} style={{ width: "100%", padding: "6px 10px", borderRadius: 5, border: `1px solid ${palette.border}`, background: palette.surface, color: palette.text, fontFamily: FONT_MONO, fontSize: 11, outline: "none", boxSizing: "border-box" }} />}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Model Tier Assignments */}
+                    <div style={{ borderTop: `1px solid ${palette.border}`, paddingTop: 16, marginBottom: 16 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: palette.textBright, marginBottom: 10 }}>Model Tier Assignments</div>
+                      <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: palette.textDim, marginBottom: 12 }}>Assign models to tiers: fast (cheap/quick), balanced (daily driver), powerful (best quality)</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
+                        {["fast", "balanced", "powerful"].map(tier => (
+                          <div key={tier} style={{ padding: "10px 14px", borderRadius: 8, border: `1px solid ${palette.border}`, background: palette.bg }}>
+                            <label style={{ fontSize: 10, fontFamily: FONT_MONO, color: tier === "fast" ? palette.green : tier === "balanced" ? palette.blue : palette.accent, textTransform: "uppercase", letterSpacing: "0.08em", display: "block", marginBottom: 6, fontWeight: 700 }}>{tier}</label>
+                            <input type="text" placeholder="e.g. openai/gpt-4o-mini" value={reconfigTiers[tier] || ""} onChange={e => { setReconfigTiers(prev => ({ ...prev, [tier]: e.target.value })); setReconfigDirty(true); }} style={{ width: "100%", padding: "6px 10px", borderRadius: 5, border: `1px solid ${palette.border}`, background: palette.surface, color: palette.text, fontFamily: FONT_MONO, fontSize: 11, outline: "none", boxSizing: "border-box" }} />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Save Providers Button */}
+                    <button onClick={handleReconfigSave} disabled={!reconfigDirty || reconfigSaving} style={{
+                      width: "100%", padding: "10px 16px", borderRadius: 6, border: "none",
+                      cursor: reconfigDirty && !reconfigSaving ? "pointer" : "not-allowed",
+                      background: reconfigDirty && !reconfigSaving ? palette.green : palette.border,
+                      color: reconfigDirty && !reconfigSaving ? "#fff" : palette.textDim,
+                      fontFamily: FONT_MONO, fontSize: 12, fontWeight: 700, transition: "all 0.2s",
+                    }}>{reconfigSaving ? "Saving..." : reconfigDirty ? "Save Provider Configuration" : "No Provider Changes"}</button>
                   </Card>
 
                   {/* Pipeline & Runtime */}

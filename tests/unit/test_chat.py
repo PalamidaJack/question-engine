@@ -1737,3 +1737,138 @@ class TestChatTrace:
             await svc.handle_message("s1", "hello")
 
         assert svc._last_trace.total_duration_ms > 0
+
+
+# ── Agent Permissions tests ────────────────────────────────────────────────
+
+
+class TestAgentPermissions:
+    def test_permission_defaults(self):
+        """Default scopes: 6 enabled, 3 disabled."""
+        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+
+        perms = AgentPermissions()
+        assert perms.scopes[PermissionScope.WEB_ACCESS] is True
+        assert perms.scopes[PermissionScope.FILE_SYSTEM] is True
+        assert perms.scopes[PermissionScope.KNOWLEDGE_BASE] is True
+        assert perms.scopes[PermissionScope.RESEARCH] is True
+        assert perms.scopes[PermissionScope.REASONING] is True
+        assert perms.scopes[PermissionScope.MCP_TOOLS] is True
+        assert perms.scopes[PermissionScope.CODE_EXECUTION] is False
+        assert perms.scopes[PermissionScope.SYSTEM_CONTROL] is False
+        assert perms.scopes[PermissionScope.COMMUNICATION] is False
+        assert perms.active_count() == 6
+
+    def test_preset_restricted(self):
+        """Restricted preset: only web_access and knowledge_base."""
+        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+
+        perms = AgentPermissions.from_preset("restricted")
+        assert perms.scopes[PermissionScope.WEB_ACCESS] is True
+        assert perms.scopes[PermissionScope.KNOWLEDGE_BASE] is True
+        assert perms.active_count() == 2
+        assert perms.matching_preset() == "restricted"
+
+    def test_preset_autonomous(self):
+        """Autonomous preset: all 9 scopes enabled."""
+        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+
+        perms = AgentPermissions.from_preset("autonomous")
+        assert all(perms.scopes.values())
+        assert perms.active_count() == 9
+        assert perms.matching_preset() == "autonomous"
+
+    def test_from_access_mode_compat(self):
+        """Legacy access modes map to presets correctly."""
+        from qe.services.chat.schemas import AgentPermissions
+
+        strict = AgentPermissions.from_access_mode("strict")
+        assert strict.matching_preset() == "restricted"
+        balanced = AgentPermissions.from_access_mode("balanced")
+        assert balanced.matching_preset() == "standard"
+        full = AgentPermissions.from_access_mode("full")
+        assert full.matching_preset() == "autonomous"
+
+    def test_to_capabilities(self):
+        """to_capabilities returns correct capability strings."""
+        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+
+        perms = AgentPermissions.from_preset("standard")
+        caps = perms.to_capabilities()
+        assert "chat" in caps  # always included
+        assert "web_search" in caps
+        assert "web_fetch" in caps
+        assert "file_read" in caps
+        assert "file_write" in caps
+        assert "mcp" in caps
+        assert "code_execute" not in caps
+        assert "browser_control" not in caps
+
+    def test_allowed_builtin_tools(self):
+        """allowed_builtin_tools returns correct tool name set."""
+        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+
+        perms = AgentPermissions.from_preset("standard")
+        tools = perms.allowed_builtin_tools()
+        assert "query_beliefs" in tools
+        assert "deep_research" in tools
+        assert "reason_about" in tools
+        assert "delegate_to_agent" not in tools  # communication off
+
+    def test_session_no_permissions_uses_default(self):
+        """Session without permissions falls back to service access_mode."""
+        svc = _make_service()
+        session = svc.get_or_create_session("s1")
+        assert session.permissions is None
+        # _resolve_capabilities falls back to mode
+        svc._current_session = session
+        caps = svc._resolve_capabilities()
+        assert caps == svc._tool_capabilities_for_mode()
+        svc._current_session = None
+
+    def test_session_permissions_override(self):
+        """Per-session permissions override service access_mode."""
+        from qe.services.chat.schemas import AgentPermissions
+
+        svc = _make_service()
+        perms = AgentPermissions.from_preset("restricted")
+        svc.set_session_permissions("s1", perms)
+        session = svc.get_or_create_session("s1")
+        svc._current_session = session
+        caps = svc._resolve_capabilities()
+        assert "web_search" in caps
+        assert "file_read" not in caps
+        svc._current_session = None
+
+    @pytest.mark.asyncio
+    async def test_blocked_tool_hil_message(self):
+        """Blocked tool returns user-facing HIL guidance."""
+        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+
+        svc = _make_service()
+        perms = AgentPermissions.from_preset("restricted")
+        svc.set_session_permissions("s1", perms)
+        session = svc.get_or_create_session("s1")
+        svc._current_session = session
+
+        ok, reason = svc._check_tool_gate("deep_research", {})
+        assert ok is False
+        assert "permission_denied:research" in reason
+        assert "permissions panel" in reason
+        svc._current_session = None
+
+    @pytest.mark.asyncio
+    async def test_enabled_scope_allows_tool(self):
+        """Tool passes when its scope is enabled."""
+        from qe.services.chat.schemas import AgentPermissions
+
+        svc = _make_service()
+        perms = AgentPermissions.from_preset("standard")
+        svc.set_session_permissions("s1", perms)
+        session = svc.get_or_create_session("s1")
+        svc._current_session = session
+
+        ok, reason = svc._check_tool_gate("query_beliefs", {})
+        assert ok is True
+        assert reason == ""
+        svc._current_session = None

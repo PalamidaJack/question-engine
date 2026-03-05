@@ -23,7 +23,7 @@ from qe.services.chat.events import (
     LLMCompleteEvent,
     ToolCompleteEvent,
 )
-from qe.services.chat.schemas import ChatIntent, ChatResponsePayload
+from qe.services.chat.schemas import AgentPermissions, ChatIntent, ChatResponsePayload
 from qe.services.inquiry.schemas import InquiryConfig
 from qe.substrate import Substrate
 
@@ -342,6 +342,7 @@ class ChatSession:
         self.context_summary: str | None = None
         self.created_at = datetime.now(UTC)
         self.last_active = datetime.now(UTC)
+        self.permissions: AgentPermissions | None = None
 
     def add_user_message(self, content: str) -> None:
         self.history.append({"role": "user", "content": content})
@@ -423,6 +424,7 @@ class ChatService:
         # Phase 2: Artifact store per service (shared across sessions)
         self._artifact_store: _ArtifactStore = _ArtifactStore()
         self._last_trace: Any = None
+        self._current_session: ChatSession | None = None
 
     _MAX_SESSIONS = 1000
 
@@ -462,6 +464,13 @@ class ChatService:
             mode = "balanced"
         self._access_mode = mode
 
+    def set_session_permissions(
+        self, session_id: str, permissions: AgentPermissions,
+    ) -> None:
+        """Set per-session agent permissions."""
+        session = self.get_or_create_session(session_id)
+        session.permissions = permissions
+
     def _tool_capabilities_for_mode(self) -> set[str]:
         """Resolve tool capabilities from current access mode."""
         base = {"chat", "web_search", "web_fetch", "mcp"}
@@ -470,6 +479,12 @@ class ChatService:
         if self._access_mode == "balanced":
             return base | {"file_read", "file_write", "browser_control"}
         return base | {"file_read", "file_write", "code_execute", "browser_control"}
+
+    def _resolve_capabilities(self) -> set[str]:
+        """Resolve capabilities from session permissions or fallback to access mode."""
+        if self._current_session and self._current_session.permissions:
+            return self._current_session.permissions.to_capabilities()
+        return self._tool_capabilities_for_mode()
 
     # ── Main entry point ────────────────────────────────────────────────
 
@@ -481,6 +496,7 @@ class ChatService:
         """Main entry point: receive user message, return structured response."""
         _handle_start = time.monotonic()
         session = self.get_or_create_session(session_id)
+        self._current_session = session
         message_id = str(uuid.uuid4())
 
         # Phase 1: Input sanitization at boundary
@@ -587,6 +603,7 @@ class ChatService:
             )
 
         session.add_assistant_message(response.reply_text)
+        self._current_session = None
 
         # Phase 4: Record chat response latency
         try:
@@ -600,10 +617,32 @@ class ChatService:
 
     # ── System prompt & context assembly ────────────────────────────────
 
+    def _build_permissions_prompt_section(self) -> str:
+        """Build a prompt section describing current permission scopes."""
+        if not self._current_session or not self._current_session.permissions:
+            return ""
+        perms = self._current_session.permissions
+        enabled = [s.value for s, v in perms.scopes.items() if v]
+        disabled = [s.value for s, v in perms.scopes.items() if not v]
+        lines = ["## Active permissions"]
+        if enabled:
+            lines.append("Enabled: " + ", ".join(enabled))
+        if disabled:
+            lines.append("Disabled: " + ", ".join(disabled))
+            lines.append(
+                "If you need a disabled capability, tell the user which permission "
+                "to enable in the permissions panel above the chat input."
+            )
+        return "\n".join(lines)
+
     def _build_system_prompt(self) -> str:
         """Static identity and behavioral instructions."""
         local_tool_note = ""
-        if self._access_mode == "strict":
+        # Use session permissions if available, otherwise fall back to access mode
+        if self._current_session and self._current_session.permissions:
+            perms_section = self._build_permissions_prompt_section()
+            local_tool_note = perms_section + "\n" if perms_section else ""
+        elif self._access_mode == "strict":
             local_tool_note = (
                 "- Local filesystem and code execution tools are disabled in this session "
                 "(strict security mode).\n"
@@ -833,6 +872,10 @@ class ChatService:
                 proactive = await self._proactive_recall(session)
                 if proactive:
                     dynamic_parts.append(f"## Suggested approaches\n{proactive}")
+            # Session permissions (dynamic, not cached)
+            perms_section = self._build_permissions_prompt_section()
+            if perms_section:
+                dynamic_parts.append(perms_section)
             if dynamic_parts:
                 messages.append(
                     {"role": "system", "content": "\n\n".join(dynamic_parts)}
@@ -895,7 +938,15 @@ class ChatService:
         from qe.runtime.feature_flags import get_flag_store
         flags = get_flag_store()
 
-        tools = list(_CHAT_TOOL_SCHEMAS)
+        # Filter built-in tools by session permissions if set
+        if self._current_session and self._current_session.permissions:
+            allowed = self._current_session.permissions.allowed_builtin_tools()
+            tools = [
+                t for t in _CHAT_TOOL_SCHEMAS
+                if t["function"]["name"] in allowed
+            ]
+        else:
+            tools = list(_CHAT_TOOL_SCHEMAS)
 
         # Phase 2.4: Add load_artifact tool if flag enabled
         if flags.is_enabled("artifact_handles"):
@@ -933,7 +984,7 @@ class ChatService:
                     )
                 else:
                     registry_tools = self._tool_registry.get_tool_schemas(
-                        capabilities=self._tool_capabilities_for_mode(),
+                        capabilities=self._resolve_capabilities(),
                         mode="relevant",
                     )
                 tools.extend(registry_tools)
@@ -2116,6 +2167,23 @@ class ChatService:
         self, tool_name: str, params: dict
     ) -> tuple[bool, str]:
         """Check the tool gate. Returns (allowed, reason)."""
+        # Check session-level permission scopes first
+        if self._current_session and self._current_session.permissions:
+            perms = self._current_session.permissions
+            allowed_builtins = perms.allowed_builtin_tools()
+            allowed_caps = perms.to_capabilities()
+            # Check built-in tools
+            from qe.services.chat.schemas import _SCOPE_BUILTIN_TOOLS, _SCOPE_CAPABILITIES
+            for scope, tool_set in _SCOPE_BUILTIN_TOOLS.items():
+                if tool_name in tool_set and not perms.scopes.get(scope, False):
+                    return False, (
+                        f"permission_denied:{scope.value}|"
+                        f"Tool '{tool_name}' requires the {scope.value} permission "
+                        f"which is currently disabled. "
+                        f"Tell the user they can enable it in the permissions panel "
+                        f"above the chat input."
+                    )
+
         if not self._tool_gate:
             return True, ""
         try:
@@ -2124,7 +2192,7 @@ class ChatService:
             result = self._tool_gate.validate(
                 tool_name=tool_name,
                 params=params,
-                capabilities=self._tool_capabilities_for_mode(),
+                capabilities=self._resolve_capabilities(),
                 goal_id="chat",
             )
             if result.decision == GateDecision.DENY:
