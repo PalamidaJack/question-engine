@@ -68,18 +68,16 @@ log = logging.getLogger(__name__)
 ws_manager = ConnectionManager()
 
 # Global references set during lifespan
+# NOTE: Globals used by endpoints (via get_app_globals()) or tests are kept here.
+# Internal-only variables (used only within lifespan init/shutdown) are local to lifespan().
 _supervisor: Supervisor | None = None
 _substrate: Substrate | None = None
-_supervisor_task: asyncio.Task | None = None
 _event_log: EventLog | None = None
 _chat_service: ChatService | None = None
 _planner: PlannerService | None = None
 _dispatcher: Dispatcher | None = None
-_executor: ExecutorService | None = None
 _goal_store: GoalStore | None = None
 _doctor: DoctorService | None = None
-_verification_gate: VerificationGate | None = None
-_memory_store: MemoryStore | None = None
 _notification_router = None
 _active_adapters: list = []
 _inquiry_engine: InquiryEngine | None = None
@@ -92,23 +90,24 @@ _knowledge_loop = None
 _inquiry_bridge = None
 _elastic_scaler = None
 _episodic_memory = None
-_synthesizer = None
-_tool_registry = None
-_tool_gate = None
-_workspace_manager = None
 _peer_registry = None
-_discovery_service = None
 _scout_service = None
 _scout_store = None
 _harvest_service = None
 _last_inquiry_profile: dict[str, Any] = {}
-_mcp_bridge = None
 _inquiry_profiling_store = InquiryProfilingStore()
 _extra_routes_registered = False
 
 _mass_intelligence_store = None
 _mass_intelligence_market_agent = None
 _mass_intelligence_executor = None
+
+# Shutdown-only globals (assigned in lifespan, read/cleared in _shutdown_services)
+_mcp_bridge = None
+_discovery_service = None
+_synthesizer = None
+_verification_gate = None
+_executor = None
 
 INBOX_DIR = Path("data/runtime_inbox")
 
@@ -531,19 +530,18 @@ def _bus_to_ws_bridge() -> None:
 
 async def _shutdown_services() -> None:
     """Gracefully shut down all active services and clear global references."""
-    global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
-    global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
-    global _memory_store, _inquiry_engine
+    global _supervisor, _substrate, _event_log, _chat_service
+    global _planner, _dispatcher, _goal_store, _doctor
+    global _inquiry_engine
     global _cognitive_pool, _competitive_arena, _strategy_evolver, _prompt_mutator, _knowledge_loop
-    global _inquiry_bridge, _synthesizer
+    global _inquiry_bridge
     global _elastic_scaler, _episodic_memory
-    global _tool_registry, _tool_gate, _workspace_manager
-    global _discovery_service
+    global _peer_registry
     global _scout_service, _scout_store, _harvest_service
     global _mass_intelligence_store, _mass_intelligence_market_agent, _mass_intelligence_executor
     global _prompt_registry
-    global _mcp_bridge, _peer_registry
     global _active_adapters
+    global _mcp_bridge, _discovery_service, _synthesizer, _verification_gate, _executor
 
     # Shutdown — EngramCache cleanup
     try:
@@ -643,19 +641,17 @@ async def _shutdown_services() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the QE engine on app startup, shut down on teardown."""
-    global _supervisor, _substrate, _supervisor_task, _event_log, _chat_service
-    global _planner, _dispatcher, _executor, _goal_store, _doctor, _verification_gate
+    global _supervisor, _substrate, _event_log, _chat_service
+    global _planner, _dispatcher, _goal_store, _doctor
     global _cognitive_pool, _competitive_arena, _strategy_evolver, _prompt_mutator, _knowledge_loop
     global _peer_registry
-    global _inquiry_bridge, _synthesizer
+    global _inquiry_bridge
     global _elastic_scaler, _episodic_memory
-    global _tool_registry, _tool_gate, _workspace_manager
-    global _discovery_service
     global _scout_service, _scout_store, _harvest_service
     global _mass_intelligence_store, _mass_intelligence_market_agent, _mass_intelligence_executor
-    global _mcp_bridge
     global _extra_routes_registered
-    global _memory_store, _prompt_registry, _inquiry_engine
+    global _prompt_registry, _inquiry_engine
+    global _mcp_bridge, _discovery_service, _synthesizer, _verification_gate, _executor
 
     settings = get_settings()
     configure_from_config(settings)

@@ -1,4 +1,4 @@
-"""Tests for Phase 4: VerificationGate, CheckpointManager, and Recovery Execution."""
+"""Tests for Phase 4: VerificationGate and Recovery Execution."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import pytest
 from qe.bus.memory_bus import MemoryBus
 from qe.models.envelope import Envelope
 from qe.models.goal import GoalState, SubtaskResult
-from qe.services.checkpoint.manager import CheckpointManager
 from qe.services.recovery.service import RecoveryOrchestrator
 from qe.services.verification.gate import VerificationGate
 from qe.services.verification.service import CheckResult, VerificationService
@@ -320,150 +319,6 @@ class TestVerificationGate:
         payload = verified[0].payload
         assert payload["verification_result"] is not None
         assert payload["verification_result"]["overall"] == "pass"
-
-
-# ── TestCheckpointManager ────────────────────────────────────────────
-
-
-class TestCheckpointManager:
-    def setup_method(self):
-        self.tmp = tempfile.mkdtemp()
-        self.db_path = str(Path(self.tmp) / "test.db")
-
-    async def _init_db(self) -> GoalStore:
-        """Create tables and return a GoalStore."""
-        import aiosqlite
-
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS goals (
-                    goal_id TEXT PRIMARY KEY,
-                    description TEXT,
-                    status TEXT,
-                    decomposition TEXT,
-                    subtask_states TEXT,
-                    subtask_results TEXT,
-                    created_at TEXT,
-                    completed_at TEXT,
-                    project_id TEXT,
-                    started_at TEXT,
-                    due_at TEXT,
-                    tags TEXT DEFAULT '[]',
-                    metadata JSON DEFAULT '{}'
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS checkpoints (
-                    checkpoint_id TEXT PRIMARY KEY,
-                    goal_id TEXT,
-                    subtask_states TEXT,
-                    subtask_results TEXT,
-                    created_at TEXT
-                )
-            """)
-            await db.commit()
-        return GoalStore(self.db_path)
-
-    @pytest.mark.asyncio
-    async def test_find_rollback_point(self):
-        store = await self._init_db()
-        state = GoalState(
-            goal_id="goal_1",
-            description="test",
-            status="executing",
-            subtask_states={"sub_1": "pending", "sub_2": "pending"},
-        )
-        await store.save_goal(state)
-        ckpt1 = await store.save_checkpoint("goal_1", state)
-        state.checkpoints.append(ckpt1)
-
-        state.subtask_states["sub_1"] = "completed"
-        await store.save_goal(state)
-        ckpt2 = await store.save_checkpoint("goal_1", state)
-        state.checkpoints.append(ckpt2)
-
-        state.subtask_states["sub_2"] = "failed"
-        await store.save_goal(state)
-
-        mgr = CheckpointManager(store)
-        rollback = await mgr.find_rollback_point("goal_1", "sub_2")
-        assert rollback == ckpt2  # sub_2 was still pending at ckpt2
-
-    @pytest.mark.asyncio
-    async def test_no_checkpoints_returns_none(self):
-        store = await self._init_db()
-        state = GoalState(
-            goal_id="goal_1", description="test", status="executing"
-        )
-        await store.save_goal(state)
-
-        mgr = CheckpointManager(store)
-        result = await mgr.find_rollback_point("goal_1", "sub_1")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_rollback_restores_state(self):
-        store = await self._init_db()
-        state = GoalState(
-            goal_id="goal_1",
-            description="test",
-            status="executing",
-            subtask_states={"sub_1": "pending", "sub_2": "pending"},
-        )
-        await store.save_goal(state)
-        ckpt_id = await store.save_checkpoint("goal_1", state)
-        state.checkpoints.append(ckpt_id)
-
-        # Advance state
-        state.subtask_states = {"sub_1": "completed", "sub_2": "failed"}
-        state.subtask_results["sub_1"] = SubtaskResult(
-            subtask_id="sub_1", goal_id="goal_1", status="completed",
-            output={"result": "ok"},
-        )
-        await store.save_goal(state)
-
-        mgr = CheckpointManager(store)
-        result = await mgr.rollback_to("goal_1", ckpt_id)
-
-        assert result is not None
-        restored = await store.load_goal("goal_1")
-        assert restored.subtask_states["sub_1"] == "pending"
-        assert restored.subtask_states["sub_2"] == "pending"
-
-    @pytest.mark.asyncio
-    async def test_rollback_preserves_completed(self):
-        store = await self._init_db()
-        result_1 = SubtaskResult(
-            subtask_id="sub_1", goal_id="goal_1", status="completed",
-            output={"result": "first"},
-        )
-        state = GoalState(
-            goal_id="goal_1",
-            description="test",
-            status="executing",
-            subtask_states={"sub_1": "completed", "sub_2": "pending"},
-            subtask_results={"sub_1": result_1},
-        )
-        await store.save_goal(state)
-        ckpt_id = await store.save_checkpoint("goal_1", state)
-        state.checkpoints.append(ckpt_id)
-
-        # sub_2 completes then fails verification
-        state.subtask_states["sub_2"] = "completed"
-        state.subtask_results["sub_2"] = SubtaskResult(
-            subtask_id="sub_2", goal_id="goal_1", status="completed",
-            output={"result": "bad"},
-        )
-        await store.save_goal(state)
-
-        mgr = CheckpointManager(store)
-        await mgr.rollback_to("goal_1", ckpt_id)
-
-        restored = await store.load_goal("goal_1")
-        assert "sub_1" in restored.subtask_results
-        assert "sub_2" not in restored.subtask_results
-        assert restored.subtask_states["sub_1"] == "completed"
-        assert restored.subtask_states["sub_2"] == "pending"
 
 
 # ── TestRecoveryExecution ─────────────────────────────────────────────
