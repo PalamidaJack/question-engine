@@ -105,11 +105,14 @@ async def setup_channels():
 
 
 @router.post("/reconfigure")
-async def setup_reconfigure(body: dict[str, Any]):
+async def setup_reconfigure(request: Request, body: dict[str, Any]):
     """Reconfigure providers, tiers, and channels after initial setup.
 
     Same payload shape as /api/setup/save but works after setup is complete.
+    API keys are set as environment variables immediately so services pick them up.
     """
+    import os
+
     providers = body.get("providers", {})
     tiers = body.get("tiers", {})
     channels = body.get("channels")
@@ -119,11 +122,58 @@ async def setup_reconfigure(body: dict[str, Any]):
             {"error": "providers, tiers, or channels required"}, status_code=400
         )
 
-    save_setup(providers=providers, tier_config=tiers, channels=channels)
+    # Set API keys as env vars so running services pick them up immediately
+    provider_env_map = {
+        "OpenAI": "OPENAI_API_KEY",
+        "Anthropic": "ANTHROPIC_API_KEY",
+        "OpenRouter": "OPENROUTER_API_KEY",
+        "Google Gemini": "GEMINI_API_KEY",
+        "Groq": "GROQ_API_KEY",
+        "Mistral": "MISTRAL_API_KEY",
+        "Cerebras": "CEREBRAS_API_KEY",
+        "Together AI": "TOGETHERAI_API_KEY",
+        "Kilo Code": "KILOCODE_API_KEY",
+        "GitHub Models": "GITHUB_TOKEN",
+        "Cloudflare Workers AI": "CLOUDFLARE_API_TOKEN",
+        "NVIDIA NIM": "NVIDIA_NIM_API_KEY",
+        "Fireworks AI": "FIREWORKS_AI_API_KEY",
+        "Sambanova": "SAMBANOVA_API_KEY",
+    }
+    env_vars_set = []
+    for provider_name, api_key in providers.items():
+        if api_key and provider_name in provider_env_map:
+            env_var = provider_env_map[provider_name]
+            os.environ[env_var] = api_key
+            env_vars_set.append(env_var)
+
+    # Also update the mass intelligence executor's api_keys if running
+    if env_vars_set and hasattr(request.app.state, "mass_intelligence_executor"):
+        executor = request.app.state.mass_intelligence_executor
+        if executor:
+            key_map = {
+                "OPENROUTER_API_KEY": "openrouter",
+                "GROQ_API_KEY": "groq",
+                "CEREBRAS_API_KEY": "cerebras",
+                "MISTRAL_API_KEY": "mistral",
+                "GEMINI_API_KEY": "google",
+                "SAMBANOVA_API_KEY": "sambanova",
+                "CLOUDFLARE_API_TOKEN": "cloudflare",
+                "KILOCODE_API_KEY": "kilo",
+            }
+            for env_var in env_vars_set:
+                if env_var in key_map:
+                    executor.api_keys[key_map[env_var]] = os.environ[env_var]
+
+    # Translate display names to env var names for save_setup (.env persistence)
+    env_providers = {}
+    for provider_name, api_key in providers.items():
+        if api_key and provider_name in provider_env_map:
+            env_providers[provider_env_map[provider_name]] = api_key
+    save_setup(providers=env_providers, tier_config=tiers, channels=channels)
     return {
         "status": "saved",
         "complete": is_setup_complete(),
-        "note": "Restart required for channel changes to take effect.",
+        "env_vars_updated": env_vars_set,
     }
 
 

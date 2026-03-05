@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -70,6 +71,8 @@ class MassIntelligenceExecutor:
         system_message: str | None = None,
         max_concurrent: int | None = None,
         timeout_seconds: float | None = None,
+        model_ids: list[str] | None = None,
+        providers: list[str] | None = None,
     ) -> MassIntelligenceResult:
         """
         Execute a prompt across all available free models.
@@ -79,6 +82,8 @@ class MassIntelligenceExecutor:
             system_message: Optional system message
             max_concurrent: Max parallel requests (default from init)
             timeout_seconds: Per-model timeout (default from init)
+            model_ids: Optional list of specific model IDs to query
+            providers: Optional list of provider names to filter by
 
         Returns:
             MassIntelligenceResult with all responses
@@ -86,6 +91,13 @@ class MassIntelligenceExecutor:
         start_time = time.perf_counter()
 
         available_models = await self.store.get_available_models()
+
+        if model_ids:
+            id_set = set(model_ids)
+            available_models = [m for m in available_models if m["model_id"] in id_set]
+        if providers:
+            prov_set = set(providers)
+            available_models = [m for m in available_models if m["provider"] in prov_set]
 
         if not available_models:
             return MassIntelligenceResult(
@@ -255,7 +267,8 @@ class MassIntelligenceExecutor:
         }
 
         if provider == "openrouter":
-            api_key = self.api_keys.get("openrouter")
+            kwargs["model"] = f"openrouter/{model_id}"
+            api_key = self.api_keys.get("openrouter") or os.environ.get("OPENROUTER_API_KEY", "")
             if api_key:
                 kwargs["api_key"] = api_key
 
@@ -292,6 +305,13 @@ class MassIntelligenceExecutor:
         elif provider == "cloudflare":
             kwargs["model"] = model_id
             kwargs["api_key"] = self.api_keys.get("cloudflare")
+
+        elif provider == "kilo":
+            kwargs["model"] = f"openrouter/{model_id}"
+            kwargs["api_base"] = "https://kilo.ai/api/openrouter"
+            api_key = self.api_keys.get("kilo") or os.environ.get("KILOCODE_API_KEY", "")
+            if api_key:
+                kwargs["api_key"] = api_key
 
         try:
             response = await litellm.acompletion(**kwargs)

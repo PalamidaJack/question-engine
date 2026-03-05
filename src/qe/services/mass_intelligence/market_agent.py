@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Any
 
 import aiohttp
@@ -180,11 +181,13 @@ class ModelMarketAgent:
             self._scrape_sambanova(),
             self._scrape_scaleway(),
             self._scrape_cloudflare_workers(),
+            self._scrape_kilo(),
         ]
 
         providers = [
             "openrouter", "groq", "cerebras", "cohere",
-            "mistral", "google", "hyperbolic", "sambanova", "scaleway", "cloudflare"
+            "mistral", "google", "hyperbolic", "sambanova", "scaleway", "cloudflare",
+            "kilo",
         ]
 
         results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
@@ -576,6 +579,53 @@ class ModelMarketAgent:
 
         except Exception as e:
             log.error("Error scraping Cloudflare Workers AI: %s", e)
+
+    async def _scrape_kilo(self) -> None:
+        """Scrape free models from Kilo Code (OpenRouter-compatible gateway)."""
+        api_key = self.api_keys.get("kilo") or os.environ.get("KILOCODE_API_KEY", "")
+        if not api_key:
+            log.debug("No Kilo API key, skipping")
+            return
+
+        try:
+            url = "https://kilo.ai/api/openrouter/models"
+            headers = {"Authorization": f"Bearer {api_key}"}
+
+            async with self._session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    log.warning("Kilo scrape failed: %s", resp.status)
+                    return
+
+                data = await resp.json()
+                models = data.get("data", [])
+                count = 0
+
+                for model in models:
+                    model_id = model.get("id", "")
+                    pricing = model.get("pricing", {})
+                    prompt_price = float(pricing.get("prompt", "1") or "1")
+                    completion_price = float(pricing.get("completion", "1") or "1")
+
+                    if prompt_price > 0 or completion_price > 0:
+                        continue
+
+                    name = model.get("name", model_id)
+                    context = model.get("context_length", 32000)
+
+                    await self.store.add_or_update_model(
+                        provider="kilo",
+                        model_id=model_id,
+                        model_name=name,
+                        context_length=context,
+                        rate_limit_rpm=30,
+                        rate_limit_rpd=500,
+                    )
+                    count += 1
+
+                log.info("Scraped %d free models from Kilo Code", count)
+
+        except Exception as e:
+            log.error("Error scraping Kilo Code: %s", e)
 
     async def _process_error_analysis(self) -> None:
         """Analyze errors from the executor service and update model status."""

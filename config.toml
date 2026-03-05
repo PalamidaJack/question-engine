@@ -1,3 +1,4 @@
+
 [runtime]
 log_level = "INFO"
 prefer_local_models = false
@@ -5,7 +6,7 @@ hil_timeout_seconds = 3600
 
 [budget]
 monthly_limit_usd = 50.0
-alert_at_pct = 0.80
+alert_at_pct = 0.8
 
 [substrate]
 db_path = "data/belief_ledger.db"
@@ -13,7 +14,6 @@ cold_storage_path = "cold/"
 
 [bus]
 type = "memory"
-# redis_url = "redis://localhost:6379"
 
 [models]
 fast = "openai/google/gemini-2.5-flash"
@@ -29,9 +29,6 @@ semantic_weight = 0.4
 rrf_k = 60
 
 [ingestion]
-# Future: RSS feeds, webhooks, scheduled scrapes
-# rss_feeds = []
-# webhook_port = 9090
 
 [scout]
 enabled = false
@@ -84,4 +81,3 @@ max_concurrent_harvest = 5
 cycle_timeout_seconds = 300
 
 [api_keys]
-# Do NOT put keys here. Set as environment variables: OPENAI_API_KEY, ANTHROPIC_API_KEY

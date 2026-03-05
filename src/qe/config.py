@@ -77,6 +77,20 @@ class ScoutConfig(BaseModel):
         "cognitive architecture AI",
     ])
 
+    @field_validator("search_topics", mode="before")
+    @classmethod
+    def _parse_search_topics(cls, v):
+        if isinstance(v, str):
+            import ast
+            try:
+                parsed = ast.literal_eval(v)
+                if isinstance(parsed, list):
+                    return parsed
+            except (ValueError, SyntaxError):
+                pass
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
 
 class HarvestConfig(BaseModel):
     enabled: bool = False
