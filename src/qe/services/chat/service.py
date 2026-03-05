@@ -2170,10 +2170,8 @@ class ChatService:
         # Check session-level permission scopes first
         if self._current_session and self._current_session.permissions:
             perms = self._current_session.permissions
-            allowed_builtins = perms.allowed_builtin_tools()
-            allowed_caps = perms.to_capabilities()
             # Check built-in tools
-            from qe.services.chat.schemas import _SCOPE_BUILTIN_TOOLS, _SCOPE_CAPABILITIES
+            from qe.services.chat.schemas import _SCOPE_BUILTIN_TOOLS
             for scope, tool_set in _SCOPE_BUILTIN_TOOLS.items():
                 if tool_name in tool_set and not perms.scopes.get(scope, False):
                     return False, (

@@ -1,8 +1,8 @@
 """Mass Intelligence API endpoints extracted from app.py."""
 
 from __future__ import annotations
-from typing import Any
-from fastapi import APIRouter, HTTPException, Request
+
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/api/mass-intelligence", tags=["Mass Intelligence"])
@@ -45,7 +45,10 @@ async def mass_intelligence_query(
     providers: str | None = None,
     timeout_seconds: float | None = None,
 ):
-    """Execute a prompt across available free models. Optionally filter by model_ids or providers (comma-separated)."""
+    """Execute a prompt across available free models.
+
+    Optionally filter by model_ids or providers (comma-separated).
+    """
     if request.app.state.mass_intelligence_executor is None:
         return {"error": "Service not initialized", "responses": []}
 
@@ -149,21 +152,30 @@ async def mass_intelligence_consensus(request: Request):
     kilo_key = os.environ.get("KILOCODE_API_KEY", "")
     openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
 
+    kilo_base = "https://kilo.ai/api/openrouter"
     candidates = []
     if kilo_key:
         candidates.extend([
-            {"model": "openrouter/arcee-ai/trinity-large-preview:free", "api_base": "https://kilo.ai/api/openrouter", "api_key": kilo_key},
-            {"model": "openrouter/google/gemma-3-27b-it:free", "api_base": "https://kilo.ai/api/openrouter", "api_key": kilo_key},
-            {"model": "openrouter/meta-llama/llama-3.3-70b-instruct:free", "api_base": "https://kilo.ai/api/openrouter", "api_key": kilo_key},
+            {"model": "openrouter/arcee-ai/trinity-large-preview:free",
+             "api_base": kilo_base, "api_key": kilo_key},
+            {"model": "openrouter/google/gemma-3-27b-it:free",
+             "api_base": kilo_base, "api_key": kilo_key},
+            {"model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+             "api_base": kilo_base, "api_key": kilo_key},
         ])
     if openrouter_key:
         candidates.extend([
-            {"model": "openrouter/google/gemma-3-27b-it:free", "api_key": openrouter_key},
-            {"model": "openrouter/meta-llama/llama-3.3-70b-instruct:free", "api_key": openrouter_key},
+            {"model": "openrouter/google/gemma-3-27b-it:free",
+             "api_key": openrouter_key},
+            {"model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+             "api_key": openrouter_key},
         ])
 
     if not candidates:
-        return JSONResponse({"error": "No API keys configured for consensus generation"}, status_code=503)
+        return JSONResponse(
+            {"error": "No API keys configured for consensus generation"},
+            status_code=503,
+        )
 
     messages = [{"role": "user", "content": synthesis_prompt}]
     last_error = None

@@ -6,33 +6,27 @@ import asyncio
 import json
 import logging
 import os
-import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from qe.api.endpoints.memory import register_memory_routes
+from qe.api.endpoints.memory_ops import register_memory_ops_routes
 from qe.api.middleware import AuthMiddleware, RateLimitMiddleware, RequestTimingMiddleware
 from qe.api.profiling import InquiryProfilingStore
 from qe.api.setup import (
-    get_settings,
     get_current_tiers,
+    get_settings,
     is_setup_complete,
-    save_settings,
 )
-from qe.api.endpoints.memory import register_memory_routes
-from qe.api.endpoints.memory_ops import register_memory_ops_routes
 from qe.api.ws import ConnectionManager
-from qe.audit import get_audit_log
 from qe.bus import get_bus
-from qe.bus.bus_metrics import get_bus_metrics
 from qe.bus.event_log import EventLog
 from qe.kernel.supervisor import Supervisor
 from qe.models.envelope import Envelope
@@ -41,9 +35,8 @@ from qe.runtime.context_curator import ContextCurator
 from qe.runtime.episodic_memory import EpisodicMemory
 from qe.runtime.epistemic_reasoner import EpistemicReasoner
 from qe.runtime.feature_flags import get_flag_store
-from qe.runtime.logging_config import configure_from_config, update_log_level
+from qe.runtime.logging_config import configure_from_config
 from qe.runtime.metacognitor import Metacognitor
-from qe.runtime.metrics import get_metrics
 from qe.runtime.persistence_engine import PersistenceEngine
 from qe.runtime.procedural_memory import ProceduralMemory
 from qe.runtime.readiness import get_readiness
@@ -1066,7 +1059,7 @@ async def lifespan(app: FastAPI):
         # Phase 2-4 feature flags
         flag_store.define(
             "stable_prompt_prefix", enabled=False,
-            description="Split system prompt into stable prefix + dynamic suffix for KV-cache optimization",
+            description="Split system prompt into stable prefix + dynamic suffix for KV-cache opt",
         )
         flag_store.define(
             "tool_masking", enabled=False,
@@ -1213,7 +1206,7 @@ async def lifespan(app: FastAPI):
             access_mode=agent_access_mode,
             guardrails=_guardrails_pipeline,
             sanitizer=_input_sanitizer,
-            router=_auto_router if '_auto_router' in dir() else None,
+            router=globals().get("_auto_router"),
             recovery=_recovery if '_recovery' in dir() else None,
         )
 
@@ -1384,29 +1377,30 @@ if _static_dir.exists():
 
 # ── Router Registration ─────────────────────────────────────────────────────
 
-from qe.api.endpoints.setup import router as setup_router
+from qe.api.endpoints.a2a_router import router as a2a_router  # noqa: E402
+from qe.api.endpoints.chat import router as chat_router  # noqa: E402
+from qe.api.endpoints.goals_v2 import router as goals_v2_router  # noqa: E402
+from qe.api.endpoints.guardrails import router as guardrails_router  # noqa: E402
+from qe.api.endpoints.harvest import router as harvest_router  # noqa: E402
+from qe.api.endpoints.knowledge import router as knowledge_router  # noqa: E402
+from qe.api.endpoints.mass_intelligence import router as mass_intel_router  # noqa: E402
+from qe.api.endpoints.memory_ops import router as memory_ops_router  # noqa: E402
+from qe.api.endpoints.scout import router as scout_router  # noqa: E402
+from qe.api.endpoints.setup import router as setup_router  # noqa: E402
+from qe.api.endpoints.system import router as system_router  # noqa: E402
+from qe.api.endpoints.telemetry import router as telemetry_router  # noqa: E402
+from qe.api.endpoints.webhooks import router as webhooks_router  # noqa: E402
+
 app.include_router(setup_router)
-from qe.api.endpoints.webhooks import router as webhooks_router
 app.include_router(webhooks_router)
-from qe.api.endpoints.scout import router as scout_router
 app.include_router(scout_router)
-from qe.api.endpoints.mass_intelligence import router as mass_intel_router
 app.include_router(mass_intel_router)
-from qe.api.endpoints.harvest import router as harvest_router
 app.include_router(harvest_router)
-from qe.api.endpoints.telemetry import router as telemetry_router
 app.include_router(telemetry_router)
-from qe.api.endpoints.goals_v2 import router as goals_v2_router
 app.include_router(goals_v2_router)
-from qe.api.endpoints.knowledge import router as knowledge_router
 app.include_router(knowledge_router)
-from qe.api.endpoints.system import router as system_router
 app.include_router(system_router)
-from qe.api.endpoints.chat import router as chat_router
 app.include_router(chat_router)
-from qe.api.endpoints.a2a_router import router as a2a_router
 app.include_router(a2a_router)
-from qe.api.endpoints.guardrails import router as guardrails_router
 app.include_router(guardrails_router)
-from qe.api.endpoints.memory_ops import router as memory_ops_router
 app.include_router(memory_ops_router)

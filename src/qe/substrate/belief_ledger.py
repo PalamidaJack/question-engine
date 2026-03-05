@@ -396,7 +396,10 @@ class BeliefLedger:
             statement=row["statement"],
             confidence=row["confidence"],
             resolution_criteria=row["resolution_criteria"],
-            resolution_deadline=datetime.fromisoformat(row["resolution_deadline"]) if row["resolution_deadline"] else None,
+            resolution_deadline=(
+                datetime.fromisoformat(row["resolution_deadline"])
+                if row["resolution_deadline"] else None
+            ),
             source_service_id=row["source_service_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
             resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,

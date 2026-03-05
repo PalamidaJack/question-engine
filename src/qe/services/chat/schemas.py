@@ -128,13 +128,16 @@ _DEFAULT_SCOPES: dict[PermissionScope, bool] = {
 }
 
 _PRESETS: dict[str, dict[PermissionScope, bool]] = {
-    "restricted": {s: s in {PermissionScope.WEB_ACCESS, PermissionScope.KNOWLEDGE_BASE} for s in PermissionScope},
+    "restricted": {
+        s: s in {PermissionScope.WEB_ACCESS, PermissionScope.KNOWLEDGE_BASE}
+        for s in PermissionScope
+    },
     "standard": {s: s in {
         PermissionScope.WEB_ACCESS, PermissionScope.FILE_SYSTEM,
         PermissionScope.KNOWLEDGE_BASE, PermissionScope.RESEARCH,
         PermissionScope.REASONING, PermissionScope.MCP_TOOLS,
     } for s in PermissionScope},
-    "autonomous": {s: True for s in PermissionScope},
+    "autonomous": dict.fromkeys(PermissionScope, True),
 }
 
 _ACCESS_MODE_TO_PRESET: dict[str, str] = {
@@ -151,13 +154,13 @@ class AgentPermissions(BaseModel):
     budget_cap_usd: float = 0.0  # 0 = use global limit
 
     @classmethod
-    def from_preset(cls, preset: str) -> "AgentPermissions":
+    def from_preset(cls, preset: str) -> AgentPermissions:
         if preset not in _PRESETS:
             preset = "standard"
         return cls(scopes=dict(_PRESETS[preset]))
 
     @classmethod
-    def from_access_mode(cls, mode: str) -> "AgentPermissions":
+    def from_access_mode(cls, mode: str) -> AgentPermissions:
         preset = _ACCESS_MODE_TO_PRESET.get(mode, "standard")
         return cls.from_preset(preset)
 

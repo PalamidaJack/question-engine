@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -211,15 +212,21 @@ async def replay_events(request: Request, body: dict[str, Any]):
 @router.get("/api/hil/pending")
 async def hil_pending(request: Request):
     """List pending HIL approval requests."""
-    pending_dir = Path("data/hil_queue/pending")
-    if not pending_dir.exists():
-        return {"pending": []}
     import json as _json
 
+    pending_dir = Path("data/hil_queue/pending")
+    exists = await asyncio.to_thread(pending_dir.exists)
+    if not exists:
+        return {"pending": []}
+
+    files = await asyncio.to_thread(
+        lambda: sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    )
     items = []
-    for f in sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for f in files:
         try:
-            items.append(_json.loads(f.read_text(encoding="utf-8")))
+            text = await asyncio.to_thread(f.read_text, "utf-8")
+            items.append(_json.loads(text))
         except Exception:
             continue
     # Mark all as pending status
@@ -235,7 +242,7 @@ async def hil_decide(request: Request, envelope_id: str, decision: str):
         return JSONResponse({"error": "Decision must be 'approve' or 'reject'"}, status_code=400)
     body = await request.json() if request.headers.get("content-type") == "application/json" else {}
     completed_dir = Path("data/hil_queue/completed")
-    completed_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(completed_dir.mkdir, parents=True, exist_ok=True)
     import json as _json
 
     decision_data = {

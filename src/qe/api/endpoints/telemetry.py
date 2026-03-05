@@ -1,15 +1,13 @@
 """Telemetry API endpoints extracted from app.py."""
 
 from __future__ import annotations
-from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from qe.audit import get_audit_log
 from qe.bus.bus_metrics import get_bus_metrics
 from qe.runtime.feature_flags import get_flag_store
-from qe.runtime.metrics import get_metrics
 
 router = APIRouter(prefix="/api", tags=["Telemetry"])
 
@@ -121,7 +119,7 @@ async def episodic_status(request: Request):
 
 
 @router.get("/episodic/search")
-async def episodic_search(request: Request, 
+async def episodic_search(request: Request,
     query: str = "",
     top_k: int = 10,
     goal_id: str | None = None,

@@ -8,7 +8,7 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from qe.api.auth import get_auth_provider
@@ -264,7 +264,9 @@ async def chat_stream(request: Request, message: str = "", session_id: str | Non
     async def event_generator():
         # Start the chat handler in background
         task = asyncio.create_task(
-            request.app.state.chat_service.handle_message(session_id or None, message, progress_queue=progress_queue)
+            request.app.state.chat_service.handle_message(
+                session_id or None, message, progress_queue=progress_queue,
+            )
         )
         try:
             while True:

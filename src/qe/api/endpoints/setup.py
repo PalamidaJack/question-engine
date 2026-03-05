@@ -1,11 +1,11 @@
 """Setup API endpoints extracted from app.py."""
 
 from __future__ import annotations
-from typing import Any
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
 
-router = APIRouter(prefix="/api/setup", tags=["Setup"])
+from typing import Any
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from qe.api.setup import (
     CHANNELS,
@@ -17,7 +17,7 @@ from qe.api.setup import (
     save_setup,
 )
 
-
+router = APIRouter(prefix="/api/setup", tags=["Setup"])
 
 
 @router.get("/status")

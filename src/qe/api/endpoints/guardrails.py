@@ -1,6 +1,8 @@
 """API endpoints for Guardrails (Phase 2)."""
 from __future__ import annotations
+
 from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -19,7 +21,7 @@ async def guardrails_status(request: Request) -> dict[str, Any]:
     pipeline = request.app.state.guardrails_pipeline
     # Note: access _guardrails_config from state too
     config = getattr(request.app.state, "guardrails_config", None)
-    
+
     data = {"configured": pipeline is not None, "config": None, "rules": []}
     if config is not None:
         data["config"] = config.model_dump() if hasattr(config, "model_dump") else config
@@ -31,19 +33,19 @@ async def guardrails_status(request: Request) -> dict[str, Any]:
 async def guardrails_configure(request: Request, update: GuardrailsConfigUpdate):
     cfg = getattr(request.app.state, "guardrails_config", None)
     pipeline = request.app.state.guardrails_pipeline
-    
+
     if cfg is None or pipeline is None:
         raise HTTPException(status_code=503, detail="guardrails not initialized")
-    
+
     body = update.model_dump(exclude_none=True)
     for k, v in body.items():
         if hasattr(cfg, k):
             setattr(cfg, k, v)
-            
+
     from qe.runtime.guardrails import GuardrailsPipeline
     # Rebuild
     new_pipeline = GuardrailsPipeline.default_pipeline(
-        config=cfg, 
+        config=cfg,
         bus=request.app.state.bus
     )
     request.app.state.guardrails_pipeline = new_pipeline

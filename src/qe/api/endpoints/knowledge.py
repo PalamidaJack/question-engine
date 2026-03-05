@@ -67,7 +67,7 @@ async def ask(request: Request, body: dict[str, Any]):
 
 
 @router.get("/claims")
-async def list_claims(request: Request, 
+async def list_claims(request: Request,
     subject: str | None = None,
     include_superseded: bool = False,
 ):
