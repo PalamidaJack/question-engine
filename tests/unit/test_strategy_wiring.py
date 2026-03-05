@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from qe.api.endpoints.goals_v2 import submit_goal
 from qe.models.envelope import Envelope
 from qe.runtime.strategy_models import (
     DEFAULT_STRATEGIES,
@@ -26,6 +27,12 @@ def _make_bus():
     bus.unsubscribe = MagicMock()
     bus.publish = MagicMock()
     return bus
+
+
+def _mock_request():
+    """Create a mock Request whose app.state attributes map to module globals."""
+    req = MagicMock()
+    return req
 
 
 def _make_evolver(**overrides):
@@ -156,9 +163,9 @@ class TestSelectStrategyAtCallSites:
             app_mod._inquiry_engine = engine
             app_mod._inquiry_profiling_store = MagicMock()
 
-            with patch.object(app_mod, "get_flag_store", return_value=flag_store):
-                with patch.object(app_mod, "get_readiness", return_value=MagicMock()):
-                    await app_mod.submit_goal({"description": "test goal"})
+            with patch("qe.api.endpoints.goals_v2.get_flag_store", return_value=flag_store):
+                with patch("qe.api.endpoints.goals_v2.get_readiness", return_value=MagicMock()):
+                    await submit_goal(_mock_request(), {"description": "test goal"})
 
             evolver.select_strategy.assert_called_once()
             # Config should have been passed to run_inquiry
@@ -192,8 +199,8 @@ class TestSelectStrategyAtCallSites:
             app_mod._strategy_evolver = evolver
             app_mod._cognitive_pool = pool
 
-            with patch.object(app_mod, "get_flag_store", return_value=flag_store):
-                await app_mod.submit_goal({"description": "test goal"})
+            with patch("qe.api.endpoints.goals_v2.get_flag_store", return_value=flag_store):
+                await submit_goal(_mock_request(), {"description": "test goal"})
 
             evolver.select_strategy.assert_called_once()
             kw = pool.run_parallel_inquiry.call_args
@@ -260,9 +267,9 @@ class TestSelectStrategyAtCallSites:
             app_mod._inquiry_engine = engine
             app_mod._inquiry_profiling_store = MagicMock()
 
-            with patch.object(app_mod, "get_flag_store", return_value=flag_store):
-                with patch.object(app_mod, "get_readiness", return_value=MagicMock()):
-                    await app_mod.submit_goal({"description": "test"})
+            with patch("qe.api.endpoints.goals_v2.get_flag_store", return_value=flag_store):
+                with patch("qe.api.endpoints.goals_v2.get_readiness", return_value=MagicMock()):
+                    await submit_goal(_mock_request(), {"description": "test"})
 
             # Should succeed without calling select_strategy
             kw = engine.run_inquiry.call_args

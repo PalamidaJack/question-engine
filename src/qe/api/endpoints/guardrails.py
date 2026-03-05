@@ -3,10 +3,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/guardrails", tags=["Guardrails"])
+
+
+def register_guardrails_routes(app: FastAPI) -> None:
+    """Register guardrails routes onto the provided FastAPI app."""
+    app.include_router(router)
 
 class GuardrailsConfigUpdate(BaseModel):
     enabled: bool | None = None

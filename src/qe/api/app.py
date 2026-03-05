@@ -1377,8 +1377,10 @@ if _static_dir.exists():
 
 # ── Router Registration ─────────────────────────────────────────────────────
 
+from qe.api.endpoints.a2a_router import playground_router  # noqa: E402
 from qe.api.endpoints.a2a_router import router as a2a_router  # noqa: E402
 from qe.api.endpoints.chat import router as chat_router  # noqa: E402
+from qe.api.endpoints.goals_v2 import projects_router  # noqa: E402
 from qe.api.endpoints.goals_v2 import router as goals_v2_router  # noqa: E402
 from qe.api.endpoints.guardrails import router as guardrails_router  # noqa: E402
 from qe.api.endpoints.harvest import router as harvest_router  # noqa: E402
@@ -1398,9 +1400,11 @@ app.include_router(mass_intel_router)
 app.include_router(harvest_router)
 app.include_router(telemetry_router)
 app.include_router(goals_v2_router)
+app.include_router(projects_router)
 app.include_router(knowledge_router)
 app.include_router(system_router)
 app.include_router(chat_router)
 app.include_router(a2a_router)
+app.include_router(playground_router)
 app.include_router(guardrails_router)
 app.include_router(memory_ops_router)

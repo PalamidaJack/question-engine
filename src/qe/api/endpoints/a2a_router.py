@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/api/a2a", tags=["A2A"])
+playground_router = APIRouter(tags=["Playground"])
 
 
 
@@ -295,7 +296,7 @@ async function sendRequest() {
 </html>"""
 
 
-@router.get("/playground", include_in_schema=False)
+@playground_router.get("/playground", include_in_schema=False)
 async def playground(request: Request):
     """Interactive API playground for exploring QE endpoints."""
     from fastapi.responses import HTMLResponse

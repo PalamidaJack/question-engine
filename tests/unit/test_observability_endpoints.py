@@ -337,7 +337,7 @@ class TestFlagEndpoints:
         with (
             patch("qe.api.app.is_setup_complete", return_value=False),
             patch("qe.api.app.configure_from_config"),
-            patch("qe.api.app.get_audit_log", return_value=mock_log),
+            patch("qe.api.endpoints.telemetry.get_audit_log", return_value=mock_log),
         ):
             async with _make_client() as client:
                 await client.post("/api/flags/test_flag_a/enable")
@@ -555,28 +555,30 @@ class TestStatusEnrichment:
 
     @pytest.fixture(autouse=True)
     def _setup(self):
-        import qe.api.app as app_module
+        from qe.api.app import app
 
-        self._app = app_module
-        self._old_pool = app_module._cognitive_pool
-        self._old_evolver = app_module._strategy_evolver
-        self._old_scaler = app_module._elastic_scaler
-        self._old_bridge = app_module._inquiry_bridge
-        self._old_kl = app_module._knowledge_loop
-        self._old_supervisor = app_module._supervisor
+        state = app.state
+        # Save old state
+        old = {
+            k: getattr(state, k, None)
+            for k in (
+                "cognitive_pool", "strategy_evolver", "elastic_scaler",
+                "inquiry_bridge", "knowledge_loop", "supervisor",
+            )
+        }
 
-        # Set up mocks
-        app_module._cognitive_pool = _mock_pool()
-        app_module._strategy_evolver = _mock_evolver()
-        app_module._elastic_scaler = _mock_scaler()
+        # Set up mocks on app.state (where endpoints read from)
+        state.cognitive_pool = _mock_pool()
+        state.strategy_evolver = _mock_evolver()
+        state.elastic_scaler = _mock_scaler()
 
         bridge = MagicMock()
         bridge.status.return_value = {"running": True, "events_processed": 5}
-        app_module._inquiry_bridge = bridge
+        state.inquiry_bridge = bridge
 
         kl = MagicMock()
         kl.status.return_value = {"running": True, "cycles": 3}
-        app_module._knowledge_loop = kl
+        state.knowledge_loop = kl
 
         # Mock supervisor
         supervisor = MagicMock()
@@ -586,16 +588,13 @@ class TestStatusEnrichment:
         supervisor.budget_tracker.monthly_limit_usd = 100.0
         supervisor.budget_tracker.spend_by_model.return_value = {}
         supervisor._circuits = {}
-        app_module._supervisor = supervisor
+        state.supervisor = supervisor
 
         yield
 
-        app_module._cognitive_pool = self._old_pool
-        app_module._strategy_evolver = self._old_evolver
-        app_module._elastic_scaler = self._old_scaler
-        app_module._inquiry_bridge = self._old_bridge
-        app_module._knowledge_loop = self._old_kl
-        app_module._supervisor = self._old_supervisor
+        # Restore old state
+        for k, v in old.items():
+            setattr(state, k, v)
 
     @pytest.mark.asyncio
     async def test_includes_pool_section(self):

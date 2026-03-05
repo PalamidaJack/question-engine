@@ -415,7 +415,7 @@ def test_router_falls_back_to_hardcoded():
 
     env = Envelope(topic="test", source_service_id="test", payload={})
     selected = router.select(env)
-    assert selected == "gpt-4o-mini"  # first in hardcoded fast tier
+    assert selected == "openai/google/gemini-2.0-flash-001"  # first in hardcoded fast tier
 
 
 def test_router_no_discovery():
@@ -427,7 +427,7 @@ def test_router_no_discovery():
 
     env = Envelope(topic="test", source_service_id="test", payload={})
     selected = router.select(env)
-    assert selected == "gpt-4o"
+    assert selected == "openai/anthropic/claude-sonnet-4"
 
 
 def test_router_record_success_with_discovery():

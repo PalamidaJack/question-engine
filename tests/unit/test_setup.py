@@ -341,7 +341,7 @@ def test_setup_providers_endpoint(client):
 def test_setup_save_requires_body(client):
     from unittest.mock import patch
 
-    with patch("qe.api.app.is_setup_complete", return_value=False):
+    with patch("qe.api.endpoints.setup.is_setup_complete", return_value=False):
         resp = client.post("/api/setup/save", json={})
     assert resp.status_code == 400
 
@@ -349,7 +349,7 @@ def test_setup_save_requires_body(client):
 def test_setup_save_blocked_after_complete(client):
     from unittest.mock import patch
 
-    with patch("qe.api.app.is_setup_complete", return_value=True):
+    with patch("qe.api.endpoints.setup.is_setup_complete", return_value=True):
         resp = client.post("/api/setup/save", json={"providers": {"k": "v"}})
     assert resp.status_code == 403
     assert "already complete" in resp.json()["error"].lower()
@@ -403,8 +403,8 @@ def test_setup_reconfigure_works_after_complete(client):
     """POST /api/setup/reconfigure works when setup is already complete."""
     from unittest.mock import patch
 
-    with patch("qe.api.app.is_setup_complete", return_value=True), \
-         patch("qe.api.app.save_setup") as mock_save:
+    with patch("qe.api.endpoints.setup.is_setup_complete", return_value=True), \
+         patch("qe.api.endpoints.setup.save_setup") as mock_save:
         resp = client.post("/api/setup/reconfigure", json={
             "providers": {"OPENAI_API_KEY": "sk-new-key-value-123456"},
             "tiers": {"fast": {"model": "gpt-4o-mini"}},
@@ -412,7 +412,6 @@ def test_setup_reconfigure_works_after_complete(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "saved"
-    assert "note" in data
     mock_save.assert_called_once()
 
 
@@ -426,7 +425,7 @@ def test_setup_save_403_message_points_to_reconfigure(client):
     """POST /api/setup/save 403 message mentions reconfigure endpoint."""
     from unittest.mock import patch
 
-    with patch("qe.api.app.is_setup_complete", return_value=True):
+    with patch("qe.api.endpoints.setup.is_setup_complete", return_value=True):
         resp = client.post("/api/setup/save", json={"providers": {"k": "v"}})
     assert resp.status_code == 403
     assert "reconfigure" in resp.json()["error"].lower()

@@ -297,4 +297,46 @@ async def cancel_goal(request: Request, goal_id: str):
 
 # ── Projects ─────────────────────────────────────────────────────────────────
 
+projects_router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
+
+@projects_router.get("")
+async def list_projects(status: str | None = None):
+    """List all projects, optionally filtered by status."""
+    app_mod = get_app_globals()
+    goal_store = app_mod._goal_store
+    if not goal_store:
+        return JSONResponse(
+            {"error": "Engine not started"}, status_code=503
+        )
+    projects = await goal_store.list_projects(status=status)
+    return {
+        "projects": [p.model_dump(mode="json") for p in projects],
+        "count": len(projects),
+    }
+
+
+@projects_router.post("")
+async def create_project(body: dict[str, Any]):
+    """Create a new project."""
+    app_mod = get_app_globals()
+    goal_store = app_mod._goal_store
+    if not goal_store:
+        return JSONResponse(
+            {"error": "Engine not started"}, status_code=503
+        )
+    from qe.models.goal import Project
+
+    name = body.get("name", "").strip()
+    if not name:
+        return JSONResponse(
+            {"error": "name is required"}, status_code=400
+        )
+    project = Project(
+        name=name,
+        description=body.get("description", ""),
+        owner=body.get("owner", ""),
+        tags=body.get("tags", []),
+    )
+    await goal_store.save_project(project)
+    return project.model_dump(mode="json")

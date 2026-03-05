@@ -1,14 +1,28 @@
 """Tests for the /playground endpoint, SSE typed event models, and A2A peer API endpoints."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest  # noqa: F401
 from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures / Helpers
 # ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _patch_peer_registry(value):
+    """Patch app.state.peer_registry (the attribute endpoints actually read)."""
+    from qe.api.app import app
+
+    old = getattr(app.state, "peer_registry", None)
+    app.state.peer_registry = value
+    try:
+        yield
+    finally:
+        app.state.peer_registry = old
 
 
 @pytest.fixture()
@@ -242,7 +256,7 @@ class TestListPeers:
 
     def test_list_peers_when_registry_is_none(self, client):
         """When _peer_registry is None, returns empty list with zero counts."""
-        with patch("qe.api.app._peer_registry", None, create=True):
+        with _patch_peer_registry(None):
             resp = client.get("/api/a2a/peers")
         assert resp.status_code == 200
         data = resp.json()
@@ -262,7 +276,7 @@ class TestListPeers:
                 {"peer_id": "def", "url": "http://b.example.com", "healthy": False},
             ],
         }
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.get("/api/a2a/peers")
         assert resp.status_code == 200
         data = resp.json()
@@ -277,7 +291,7 @@ class TestRegisterPeer:
 
     def test_register_peer_when_registry_is_none(self, client):
         """Returns 503 when _peer_registry is None."""
-        with patch("qe.api.app._peer_registry", None, create=True):
+        with _patch_peer_registry(None):
             resp = client.post("/api/a2a/peers", json={"url": "http://x.example.com"})
         assert resp.status_code == 503
         assert "not initialized" in resp.json()["error"]
@@ -285,7 +299,7 @@ class TestRegisterPeer:
     def test_register_peer_missing_url(self, client):
         """Returns 400 when url is not provided."""
         mock_registry = MagicMock()
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.post("/api/a2a/peers", json={})
         assert resp.status_code == 400
         assert "url is required" in resp.json()["error"]
@@ -293,7 +307,7 @@ class TestRegisterPeer:
     def test_register_peer_empty_url(self, client):
         """Returns 400 when url is empty string."""
         mock_registry = MagicMock()
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.post("/api/a2a/peers", json={"url": ""})
         assert resp.status_code == 400
 
@@ -301,7 +315,7 @@ class TestRegisterPeer:
         """Returns 502 when discover_and_register returns None."""
         mock_registry = MagicMock()
         mock_registry.discover_and_register = AsyncMock(return_value=None)
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.post("/api/a2a/peers", json={"url": "http://bad.example.com"})
         assert resp.status_code == 502
         assert "Failed to discover" in resp.json()["error"]
@@ -318,7 +332,7 @@ class TestRegisterPeer:
         )
         mock_registry = MagicMock()
         mock_registry.discover_and_register = AsyncMock(return_value=peer)
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.post("/api/a2a/peers", json={"url": "http://good.example.com"})
         assert resp.status_code == 200
         data = resp.json()
@@ -333,7 +347,7 @@ class TestRemovePeer:
 
     def test_remove_peer_when_registry_is_none(self, client):
         """Returns 503 when _peer_registry is None."""
-        with patch("qe.api.app._peer_registry", None, create=True):
+        with _patch_peer_registry(None):
             resp = client.delete("/api/a2a/peers/abc123")
         assert resp.status_code == 503
 
@@ -341,7 +355,7 @@ class TestRemovePeer:
         """Returns 404 when peer_id does not exist."""
         mock_registry = MagicMock()
         mock_registry.unregister.return_value = False
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.delete("/api/a2a/peers/nonexistent")
         assert resp.status_code == 404
         assert "not found" in resp.json()["error"].lower()
@@ -350,7 +364,7 @@ class TestRemovePeer:
         """Returns removed peer_id on success."""
         mock_registry = MagicMock()
         mock_registry.unregister.return_value = True
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.delete("/api/a2a/peers/abc123")
         assert resp.status_code == 200
         assert resp.json()["removed"] == "abc123"
@@ -362,7 +376,7 @@ class TestCheckPeerHealth:
 
     def test_health_when_registry_is_none(self, client):
         """Returns 503 when _peer_registry is None."""
-        with patch("qe.api.app._peer_registry", None, create=True):
+        with _patch_peer_registry(None):
             resp = client.get("/api/a2a/peers/abc123/health")
         assert resp.status_code == 503
 
@@ -370,7 +384,7 @@ class TestCheckPeerHealth:
         """Returns 404 when peer is not in the registry."""
         mock_registry = MagicMock()
         mock_registry.get.return_value = None
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.get("/api/a2a/peers/nonexistent/health")
         assert resp.status_code == 404
 
@@ -382,7 +396,7 @@ class TestCheckPeerHealth:
         mock_registry = MagicMock()
         mock_registry.get.return_value = peer
         mock_registry.check_health = AsyncMock(return_value=True)
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.get("/api/a2a/peers/p1/health")
         assert resp.status_code == 200
         data = resp.json()
@@ -398,7 +412,7 @@ class TestCheckPeerHealth:
         mock_registry = MagicMock()
         mock_registry.get.return_value = peer
         mock_registry.check_health = AsyncMock(return_value=False)
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             resp = client.get("/api/a2a/peers/p2/health")
         assert resp.status_code == 200
         data = resp.json()
@@ -413,7 +427,7 @@ class TestCheckPeerHealth:
         mock_registry = MagicMock()
         mock_registry.get.return_value = peer
         mock_registry.check_health = AsyncMock(return_value=True)
-        with patch("qe.api.app._peer_registry", mock_registry, create=True):
+        with _patch_peer_registry(mock_registry):
             client.get("/api/a2a/peers/p3/health")
         mock_registry.get.assert_called_once_with("p3")
         mock_registry.check_health.assert_called_once_with("p3")

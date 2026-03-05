@@ -1771,7 +1771,7 @@ class TestAgentPermissions:
 
     def test_preset_autonomous(self):
         """Autonomous preset: all 9 scopes enabled."""
-        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+        from qe.services.chat.schemas import AgentPermissions
 
         perms = AgentPermissions.from_preset("autonomous")
         assert all(perms.scopes.values())
@@ -1791,7 +1791,7 @@ class TestAgentPermissions:
 
     def test_to_capabilities(self):
         """to_capabilities returns correct capability strings."""
-        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+        from qe.services.chat.schemas import AgentPermissions
 
         perms = AgentPermissions.from_preset("standard")
         caps = perms.to_capabilities()
@@ -1806,7 +1806,7 @@ class TestAgentPermissions:
 
     def test_allowed_builtin_tools(self):
         """allowed_builtin_tools returns correct tool name set."""
-        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+        from qe.services.chat.schemas import AgentPermissions
 
         perms = AgentPermissions.from_preset("standard")
         tools = perms.allowed_builtin_tools()
@@ -1843,7 +1843,7 @@ class TestAgentPermissions:
     @pytest.mark.asyncio
     async def test_blocked_tool_hil_message(self):
         """Blocked tool returns user-facing HIL guidance."""
-        from qe.services.chat.schemas import AgentPermissions, PermissionScope
+        from qe.services.chat.schemas import AgentPermissions
 
         svc = _make_service()
         perms = AgentPermissions.from_preset("restricted")

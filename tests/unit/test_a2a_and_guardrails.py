@@ -6,6 +6,8 @@ from qe.api.endpoints.guardrails import register_guardrails_routes
 from qe.api.endpoints.memory_ops import register_memory_ops_routes
 
 app = FastAPI()
+app.state.guardrails_pipeline = None
+app.state.guardrails_config = None
 register_a2a_routes(app=app)
 register_guardrails_routes(app=app)
 register_memory_ops_routes(app=app)
