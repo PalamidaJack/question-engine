@@ -109,6 +109,10 @@ _synthesizer = None
 _verification_gate = None
 _executor = None
 
+# Memory-tier globals (assigned in lifespan, read by memory_ops endpoints)
+_context_curator = None
+_procedural_memory = None
+
 INBOX_DIR = Path("data/runtime_inbox")
 
 _AGENT_ACCESS_MODES = {"strict", "balanced", "full"}
@@ -652,6 +656,7 @@ async def lifespan(app: FastAPI):
     global _extra_routes_registered
     global _prompt_registry, _inquiry_engine
     global _mcp_bridge, _discovery_service, _synthesizer, _verification_gate, _executor
+    global _context_curator, _procedural_memory
 
     settings = get_settings()
     configure_from_config(settings)
