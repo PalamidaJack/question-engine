@@ -33,9 +33,9 @@ _BUILTIN_TOOLS = [
 ]
 
 
-def create_default_registry() -> ToolRegistry:
+def create_default_registry(tool_metrics=None) -> ToolRegistry:
     """Create a ToolRegistry and register all built-in tools."""
-    registry = ToolRegistry()
+    registry = ToolRegistry(tool_metrics=tool_metrics)
     for spec, handler in _BUILTIN_TOOLS:
         registry.register(spec, handler)
     log.info(

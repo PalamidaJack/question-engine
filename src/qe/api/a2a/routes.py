@@ -19,6 +19,9 @@ router = APIRouter()
 # In-memory mapping for A2A task -> goal
 _a2a_task_map: dict[str, str] = {}
 
+# In-memory mapping for A2A task -> received permissions
+_a2a_task_permissions: dict[str, dict[str, Any]] = {}
+
 
 def register_a2a_routes(app: FastAPI) -> None:
     app.include_router(router)
@@ -58,6 +61,11 @@ async def create_task(payload: dict[str, Any]):
             goal_id = None
 
     _a2a_task_map[task_id] = goal_id or ""
+
+    # Store received permissions if present
+    metadata = payload.get("metadata") or {}
+    if "permissions" in metadata:
+        _a2a_task_permissions[task_id] = metadata["permissions"]
 
     # publish bus event
     if bus is not None:

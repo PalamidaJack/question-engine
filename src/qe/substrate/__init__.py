@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,56 @@ from qe.substrate.entities import EntityResolver
 from qe.substrate.magma import MultiGraphQuery
 
 log = logging.getLogger(__name__)
+
+
+def _bm25_rerank(
+    claims: list[Any],
+    query: str,
+    *,
+    k1: float = 1.2,
+    b: float = 0.75,
+) -> list[Any]:
+    """Re-rank claims using BM25 term-frequency scoring.
+
+    Uses a simplified BM25 computation over claim text fields.
+    """
+    query_terms = set(query.lower().split())
+    if not query_terms:
+        return claims
+
+    # Compute average document length
+    def _claim_text(c: Any) -> str:
+        subj = getattr(c, "subject_entity_id", "")
+        pred = getattr(c, "predicate", "")
+        obj = getattr(c, "object_value", "")
+        return f"{subj} {pred} {obj}".lower()
+
+    doc_texts = [_claim_text(c) for c in claims]
+    doc_lengths = [len(t.split()) for t in doc_texts]
+    avgdl = sum(doc_lengths) / len(doc_lengths) if doc_lengths else 1.0
+    n = len(claims)
+
+    # IDF for each query term
+    idf: dict[str, float] = {}
+    for term in query_terms:
+        df = sum(1 for t in doc_texts if term in t.split())
+        idf[term] = math.log((n - df + 0.5) / (df + 0.5) + 1.0) if n > 0 else 0.0
+
+    # Score each document
+    scored: list[tuple[float, Any]] = []
+    for i, claim in enumerate(claims):
+        score = 0.0
+        words = doc_texts[i].split()
+        dl = doc_lengths[i]
+        for term in query_terms:
+            tf = words.count(term)
+            numerator = tf * (k1 + 1)
+            denominator = tf + k1 * (1 - b + b * (dl / avgdl))
+            score += idf.get(term, 0.0) * (numerator / denominator) if denominator > 0 else 0.0
+        scored.append((score, claim))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [claim for _, claim in scored]
 
 
 class Substrate:
@@ -97,12 +148,18 @@ class Substrate:
         fts_weight: float = 0.6,
         semantic_weight: float = 0.4,
         rrf_k: int = 60,
+        use_bm25: bool = False,
+        bm25_k1: float = 1.2,
+        bm25_b: float = 0.75,
     ) -> list[Any]:
         """Hybrid claim retrieval using reciprocal-rank fusion (RRF).
 
         Combines:
-        - lexical ranking from FTS5 over claims
+        - lexical ranking from FTS5 over claims (optionally BM25-scored)
         - semantic ranking from embedding nearest-neighbors
+
+        When ``use_bm25=True``, FTS results are re-ranked using BM25 term
+        frequency scoring with configurable k1 and b parameters.
         """
         from qe.runtime.metrics import get_metrics
 
@@ -111,6 +168,10 @@ class Substrate:
         fts_claims = await self.search_full_text(query, limit=fts_top_k)
         if fts_claims:
             metrics.counter("retrieval_hybrid_fts_nonempty_total").inc()
+
+        # Optional BM25 re-ranking of FTS results
+        if use_bm25 and fts_claims:
+            fts_claims = _bm25_rerank(fts_claims, query, k1=bm25_k1, b=bm25_b)
 
         semantic_claims: list[Any] = []
         try:

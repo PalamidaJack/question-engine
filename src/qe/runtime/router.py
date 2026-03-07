@@ -4,7 +4,7 @@ import os
 import time
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -63,10 +63,12 @@ class AutoRouter:
         preference: ModelPreference,
         budget_tracker: BudgetTracker | None = None,
         discovery: ModelDiscoveryService | None = None,
+        tool_registry: Any | None = None,
     ) -> None:
         self.preference = preference
         self.budget_tracker = budget_tracker
         self.discovery = discovery
+        self.tool_registry = tool_registry
         self._error_timestamps: dict[str, datetime] = {}
 
     def select(self, envelope: Envelope) -> str:
@@ -201,6 +203,41 @@ class AutoRouter:
                 tier=original_tier,
                 max_cost_per_call_usd=self.preference.max_cost_per_call_usd,
             )
+
+    def select_for_tool(
+        self,
+        envelope: Envelope,
+        tool_name: str | None = None,
+    ) -> str:
+        """Select a model respecting the tool's preferred tier, if set."""
+        if tool_name and self.tool_registry is not None:
+            preferred = self.tool_registry.get_tier_for_tool(tool_name)
+            if preferred and preferred in TIER_MODELS:
+                original_tier = self.preference.tier
+                self.preference = ModelPreference(
+                    tier=preferred,
+                    max_cost_per_call_usd=self.preference.max_cost_per_call_usd,
+                )
+                try:
+                    return self.select(envelope)
+                finally:
+                    self.preference = ModelPreference(
+                        tier=original_tier,
+                        max_cost_per_call_usd=self.preference.max_cost_per_call_usd,
+                    )
+        return self.select(envelope)
+
+    def tier_config(self) -> dict[str, Any]:
+        """Return current tier configuration for API exposure."""
+        return {
+            "tiers": dict(TIER_MODELS),
+            "active_tier": self.preference.tier,
+            "task_tier_map": dict(_TASK_TIER_MAP),
+            "cooldowns": {
+                model: ts.isoformat()
+                for model, ts in self._error_timestamps.items()
+            },
+        }
 
     def _elapsed_ms(self) -> float:
         """Milliseconds since last select() call."""

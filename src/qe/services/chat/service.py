@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -304,6 +305,127 @@ _CHAT_TOOL_SCHEMAS: list[dict] = [
     },
 ]
 
+# ── Introspection tool schemas (Phase 5) ──────────────────────────────────
+
+_INTROSPECTION_TOOL_SCHEMAS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_playbook",
+            "description": (
+                "Run a saved playbook/workflow by name. "
+                "Use list_playbooks to see available playbooks first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The playbook name (without .md).",
+                    },
+                    "input": {
+                        "type": "string",
+                        "description": "Input text or query for the playbook.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_playbooks",
+            "description": (
+                "List available playbooks with names and descriptions."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_models",
+            "description": (
+                "List available LLM models with their profile summaries, "
+                "scores, and health status."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_model_profile",
+            "description": (
+                "Get the detailed profile for a specific model, including "
+                "benchmark scores, strengths, weaknesses, and best use cases."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "model_id": {
+                        "type": "string",
+                        "description": "The model identifier.",
+                    },
+                },
+                "required": ["model_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_conversations",
+            "description": (
+                "Search past conversation history for relevant context."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_self_knowledge",
+            "description": (
+                "Read your own self-knowledge document describing your "
+                "architecture, capabilities, memory system, and ecosystem."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "discover_tools",
+            "description": (
+                "Search for available tools in the registry, MCP bridges, "
+                "and external sources. Use when you need a capability "
+                "you don't have a built-in tool for."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What capability you're looking for.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+]
+
 
 # ── Artifact store for large tool results (Phase 2) ───────────────────────
 
@@ -392,6 +514,12 @@ class ChatService:
         sanitizer: Any | None = None,
         router: Any | None = None,
         recovery: Any | None = None,
+        # Phase 5: Agent context
+        profile_loader: Any | None = None,
+        chat_store: Any | None = None,
+        model_intelligence: Any | None = None,
+        workflow_executor: Any | None = None,
+        runtime_context: Any | None = None,
     ) -> None:
         self.substrate = substrate
         self.bus = bus
@@ -416,6 +544,12 @@ class ChatService:
         self._sanitizer = sanitizer
         self._router = router
         self._recovery = recovery
+        # Phase 5: Agent context — profiles, persistence, intelligence
+        self._profile_loader = profile_loader
+        self._chat_store = chat_store
+        self._model_intelligence = model_intelligence
+        self._workflow_executor = workflow_executor
+        self._runtime_context = runtime_context
         self._sessions: dict[str, ChatSession] = {}
         self._access_mode = "balanced"
         self.set_access_mode(access_mode)
@@ -492,11 +626,13 @@ class ChatService:
         self, session_id: str, user_message: str,
         progress_queue: asyncio.Queue[dict] | None = None,
         interjection_queue: asyncio.Queue[str] | None = None,
+        model_override: str | None = None,
     ) -> ChatResponsePayload:
         """Main entry point: receive user message, return structured response."""
         _handle_start = time.monotonic()
         session = self.get_or_create_session(session_id)
         self._current_session = session
+        self._model_override = model_override or None
         message_id = str(uuid.uuid4())
 
         # Phase 1: Input sanitization at boundary
@@ -548,6 +684,17 @@ class ChatService:
                 log.debug("Guardrails input check failed", exc_info=True)
 
         try:
+            # Fast path: simple messages skip the tool loop entirely (#67)
+            fast_reply = self._fast_path_check(user_message)
+            if fast_reply is not None:
+                session.history.append({"role": "user", "content": user_message})
+                session.history.append({"role": "assistant", "content": fast_reply})
+                return ChatResponsePayload(
+                    message_id=message_id,
+                    reply_text=fast_reply,
+                    intent=ChatIntent.CONVERSATION,
+                )
+
             messages = await self._build_messages(session)
             tool_schemas = self._get_chat_tools()
             reply_text, tool_audit, cumulative_cost = await asyncio.wait_for(
@@ -609,9 +756,33 @@ class ChatService:
         try:
             from qe.runtime.metrics import get_metrics
             _elapsed_ms = (time.monotonic() - _handle_start) * 1000
-            get_metrics().histogram("chat_response_latency_ms").observe(_elapsed_ms)
+            get_metrics().histogram("chat_response_latency_ms").observe(
+                _elapsed_ms,
+            )
         except Exception:
             pass
+
+        # Phase 5: Persist to ChatStore (non-blocking)
+        if self._chat_store:
+            try:
+                conv_id = getattr(session, "_conversation_id", None)
+                if not conv_id:
+                    conv_id = await self._chat_store.create_conversation(
+                        model=self.model,
+                    )
+                    session._conversation_id = conv_id  # type: ignore[attr-defined]
+                await self._chat_store.add_message(
+                    conv_id, "user", user_message,
+                )
+                _latency = int(
+                    (time.monotonic() - _handle_start) * 1000,
+                )
+                await self._chat_store.add_message(
+                    conv_id, "assistant", response.reply_text,
+                    model_id=self.model, latency_ms=_latency,
+                )
+            except Exception:
+                log.debug("ChatStore persist failed", exc_info=True)
 
         return response
 
@@ -635,40 +806,308 @@ class ChatService:
             )
         return "\n".join(lines)
 
+    # ── Capability manifest (rich permission context) ──────────────────
+
+    def _scope_detail_map(
+        self, caps: set[str], ctx: Any | None,
+    ) -> dict[str, str]:
+        """Return per-scope description strings based on active capabilities."""
+        from qe.services.chat.schemas import PermissionScope
+
+        project_root = str(ctx.project_root) if ctx and ctx.project_root else None
+        has_escape = "sandbox_escape" in caps
+
+        details: dict[str, str] = {}
+        details[PermissionScope.WEB_ACCESS] = "web_search, web_fetch tools"
+        details[PermissionScope.KNOWLEDGE_BASE] = (
+            "query_beliefs, list_entities, get_entity_details, "
+            "submit_observation, retract_claim, get_budget_status"
+        )
+        details[PermissionScope.RESEARCH] = (
+            "deep_research, swarm_research, plan_and_execute"
+        )
+        details[PermissionScope.REASONING] = (
+            "reason_about, crystallize_insights, consolidate_knowledge"
+        )
+        details[PermissionScope.MCP_TOOLS] = (
+            "Access to tools from connected MCP servers"
+        )
+        details[PermissionScope.COMMUNICATION] = (
+            "delegate_to_agent (dispatch tasks to peer QE agents)"
+        )
+        details[PermissionScope.CODE_EXECUTION] = (
+            "Shell command execution"
+        )
+
+        if has_escape and project_root:
+            details[PermissionScope.FILE_SYSTEM] = (
+                f"file_read, file_write with project-wide access. "
+                f"Absolute paths allowed within `{project_root}`"
+            )
+            details[PermissionScope.SYSTEM_CONTROL] = (
+                "browser_control. Combined with FILE_SYSTEM, "
+                "grants sandbox_escape (project-wide file access)"
+            )
+        else:
+            details[PermissionScope.FILE_SYSTEM] = (
+                "file_read, file_write within workspace sandbox "
+                "(relative paths only)"
+            )
+            details[PermissionScope.SYSTEM_CONTROL] = (
+                "browser_control, service management"
+            )
+
+        return details
+
+    def _scope_unlock_hint(self, scope: str) -> str:
+        """Return what enabling a disabled scope would unlock."""
+        from qe.services.chat.schemas import PermissionScope
+
+        hints: dict[str, str] = {
+            PermissionScope.WEB_ACCESS: "Would enable web_search and web_fetch",
+            PermissionScope.FILE_SYSTEM: (
+                "Would enable file read/write in workspace sandbox"
+            ),
+            PermissionScope.CODE_EXECUTION: (
+                "Would enable shell command execution"
+            ),
+            PermissionScope.KNOWLEDGE_BASE: (
+                "Would enable belief queries and observation submission"
+            ),
+            PermissionScope.RESEARCH: (
+                "Would enable deep_research, swarm_research, plan_and_execute"
+            ),
+            PermissionScope.REASONING: (
+                "Would enable epistemic reasoning and insight crystallization"
+            ),
+            PermissionScope.SYSTEM_CONTROL: (
+                "Would enable browser control. If FILE_SYSTEM is also "
+                "enabled, would grant project-wide file access"
+            ),
+            PermissionScope.COMMUNICATION: (
+                "Would enable delegate_to_agent for peer dispatch"
+            ),
+            PermissionScope.MCP_TOOLS: (
+                "Would enable access to connected MCP server tools"
+            ),
+        }
+        return hints.get(scope, "")
+
+    def _build_capability_manifest(self) -> str:
+        """Build a rich capability manifest for the dynamic system message."""
+        if not self._current_session or not self._current_session.permissions:
+            return self._build_permissions_prompt_section()
+
+        perms = self._current_session.permissions
+        caps = perms.to_capabilities()
+        ctx = self._runtime_context
+        detail_map = self._scope_detail_map(caps, ctx)
+
+        enabled_scopes = [s for s, v in perms.scopes.items() if v]
+        disabled_scopes = [s for s, v in perms.scopes.items() if not v]
+        active = perms.active_count()
+        total = len(perms.scopes)
+        preset = perms.matching_preset() or "custom"
+
+        lines: list[str] = [f"## Capability Manifest"]
+        lines.append(f"**Mode**: {preset} ({active}/{total} scopes)\n")
+
+        # Enabled capabilities
+        if enabled_scopes:
+            lines.append("### Enabled Capabilities")
+            for scope in enabled_scopes:
+                desc = detail_map.get(scope, scope.value)
+                lines.append(f"- **{scope.value}**: {desc}")
+
+        # Elevated access notice
+        if "sandbox_escape" in caps:
+            project_root = str(ctx.project_root) if ctx and ctx.project_root else "unknown"
+            lines.append("\n### Elevated Access")
+            lines.append(
+                "FILE_SYSTEM + SYSTEM_CONTROL grants project-wide "
+                "file access (sandbox_escape)."
+            )
+            lines.append(f"- Project root: `{project_root}`")
+
+        # MCP servers
+        if ctx:
+            mcp_summaries = ctx.mcp_server_summaries()
+            if mcp_summaries:
+                lines.append(
+                    f"\n### Connected MCP Servers ({len(mcp_summaries)})"
+                )
+                for s in mcp_summaries:
+                    status = "alive" if s.alive else "dead"
+                    tool_preview = ", ".join(s.tool_names[:8])
+                    if len(s.tool_names) > 8:
+                        tool_preview += ", ..."
+                    lines.append(
+                        f"- **{s.name}** [{status}]: "
+                        f"{s.tool_count} tools ({tool_preview})"
+                    )
+
+            # Peer agents
+            peer_total = ctx.peer_count()
+            peer_healthy = ctx.healthy_peer_count()
+            lines.append(f"\n### Peer Agents")
+            if peer_total > 0:
+                lines.append(
+                    f"- {peer_total} registered, {peer_healthy} healthy"
+                )
+            else:
+                lines.append("- 0 registered")
+
+        # Disabled capabilities with unlock hints
+        if disabled_scopes:
+            lines.append("\n### Disabled Capabilities")
+            for scope in disabled_scopes:
+                hint = self._scope_unlock_hint(scope)
+                lines.append(f"- ~~{scope.value}~~: {hint}")
+
+        # Permission boundary
+        lines.append("\n### Permission Boundary")
+        lines.append(
+            "You CANNOT change your own permissions. If you need a "
+            "disabled capability, tell the user which scope to enable "
+            "in the permissions panel."
+        )
+
+        return "\n".join(lines)
+
     def _build_system_prompt(self) -> str:
-        """Static identity and behavioral instructions."""
-        local_tool_note = ""
-        # Use session permissions if available, otherwise fall back to access mode
+        """Dynamic system prompt assembled from profiles + runtime state.
+
+        If a profile loader is available, builds prompt from profile files.
+        Falls back to hardcoded prompt for backward compatibility.
+        """
+        if self._profile_loader:
+            return self._build_profile_system_prompt()
+        return self._build_hardcoded_system_prompt()
+
+    def _build_profile_system_prompt(self) -> str:
+        """Assemble system prompt from profile markdown files."""
+        loader = self._profile_loader
+        parts: list[str] = []
+
+        # Always-present: identity
+        identity = loader.identity
+        if identity:
+            parts.append(identity)
+        else:
+            parts.append(
+                "You are a helpful AI assistant powered by the "
+                "Question Engine — a cognitive research platform with "
+                "persistent memory, deep research, and knowledge "
+                "management capabilities."
+            )
+
+        # Runtime info
+        active_model = getattr(self, "_model_override", None) or self.model
+        parts.append(f"\n## Runtime\n- Current model: {active_model}")
+
+        # Personality
+        personality = loader.personality
+        if personality:
+            parts.append(f"\n{personality}")
+
+        # Strategies
+        strategies = loader.strategies
+        if strategies:
+            parts.append(f"\n{strategies}")
+
+        # Tool policies
+        tool_policies = loader.tool_policies
+        if tool_policies:
+            parts.append(f"\n{tool_policies}")
+
+        # Permission context / capability manifest
+        perms_note = self._build_access_note()
+        if perms_note:
+            # Manifest already has its own heading; plain access notes get wrapped
+            if perms_note.startswith("## "):
+                parts.append(f"\n{perms_note}")
+            else:
+                parts.append(f"\n## Access Mode\n{perms_note}")
+
+        # Self-knowledge (condensed)
+        self_knowledge = loader.self_knowledge
+        if self_knowledge and len(self_knowledge) < 2000:
+            parts.append(f"\n{self_knowledge}")
+
+        # Available playbooks (task-relevant context)
+        playbooks = loader.list_playbooks()
+        if playbooks:
+            pb_list = "\n".join(
+                f"- **{p['name']}**: {p['description']}"
+                for p in playbooks[:10]
+            )
+            parts.append(
+                f"\n## Available Playbooks\n{pb_list}\n"
+                "Use `execute_playbook` tool to run a playbook by name."
+            )
+
+        # Introspection tools hint
+        parts.append(
+            "\n## Introspection\n"
+            "You have tools to inspect your own system: "
+            "list_playbooks, get_self_knowledge, list_models, "
+            "get_model_profile, search_conversations, discover_tools, "
+            "execute_playbook."
+        )
+
+        return "\n".join(parts)
+
+    def _build_access_note(self) -> str:
+        """Build access mode context for the system prompt."""
         if self._current_session and self._current_session.permissions:
-            perms_section = self._build_permissions_prompt_section()
-            local_tool_note = perms_section + "\n" if perms_section else ""
+            return self._build_capability_manifest()
+        if self._access_mode == "strict":
+            return (
+                "Filesystem and code execution tools are disabled "
+                "(strict security mode)."
+            )
+        if self._access_mode == "balanced":
+            return (
+                "Constrained file access. Raw code execution disabled."
+            )
+        return "Full file and code execution access available."
+
+    def _build_hardcoded_system_prompt(self) -> str:
+        """Fallback hardcoded prompt (backward compat, no profiles)."""
+        local_tool_note = ""
+        if self._current_session and self._current_session.permissions:
+            manifest = self._build_capability_manifest()
+            local_tool_note = manifest + "\n" if manifest else ""
         elif self._access_mode == "strict":
             local_tool_note = (
-                "- Local filesystem and code execution tools are disabled in this session "
-                "(strict security mode).\n"
+                "- Local filesystem and code execution tools are "
+                "disabled in this session (strict security mode).\n"
             )
         elif self._access_mode == "balanced":
             local_tool_note = (
-                "- You can read/write local files in a constrained workspace sandbox. "
-                "Raw code execution tools are disabled in this mode.\n"
+                "- You can read/write local files in a constrained "
+                "workspace sandbox. Raw code execution tools are "
+                "disabled in this mode.\n"
             )
         else:
             local_tool_note = (
-                "- You can read/write local files and execute code when needed for user tasks.\n"
+                "- You can read/write local files and execute code "
+                "when needed for user tasks.\n"
             )
+        active_model = getattr(self, "_model_override", None) or self.model
         return (
-            "You are the Question Engine assistant — an AI agent with a "
-            "full cognitive architecture: belief ledger, episodic memory, "
-            "multi-phase research engine, agent swarms, goal orchestration, "
-            "epistemic reasoning, dialectic analysis, insight crystallization, "
-            "and knowledge consolidation.\n\n"
+            "You are a helpful AI assistant powered by the Question "
+            "Engine — a cognitive research platform with persistent "
+            "memory, deep research, agent swarms, and knowledge "
+            "management capabilities.\n\n"
             f"## About you\n"
-            f"- You are powered by model: {self.model}\n"
-            "- You are NOT a generic chatbot — you are a knowledge "
-            "management and cognitive research agent.\n"
-            "- When asked what you are or what model you run, "
-            "identify yourself as the Question Engine assistant "
-            f"running on {self.model}.\n\n"
+            f"- You are powered by model: {active_model}\n"
+            "- You have access to powerful research and knowledge "
+            "tools, but you should respond naturally and helpfully "
+            "like a conversational assistant.\n"
+            "- When asked what model you are, say you are "
+            f"{active_model} running on the Question Engine "
+            "platform.\n\n"
             "## What you can do\n"
             "- Answer questions using the knowledge base "
             "(query_beliefs)\n"
@@ -684,9 +1123,10 @@ class ChatService:
             "- Perform deep multi-phase research on complex "
             "questions (deep_research) — 5-iteration cognitive loop "
             "with hypothesis testing and evidence synthesis\n"
-            "- Deploy a swarm of parallel cognitive agents to research "
-            "a question from multiple perspectives, with optional "
-            "competitive tournament scoring (swarm_research)\n"
+            "- Deploy a swarm of parallel cognitive agents to "
+            "research a question from multiple perspectives, with "
+            "optional competitive tournament scoring "
+            "(swarm_research)\n"
             "- Decompose complex goals into subtask DAGs, dispatch "
             "to agents, and synthesize results (plan_and_execute)\n"
             "- Apply epistemic reasoning: uncertainty assessment, "
@@ -714,17 +1154,19 @@ class ChatService:
             "Only mention budget if the user explicitly asks.\n"
             "- ONLY use submit_observation for information the "
             "USER explicitly provides (facts, news, things they "
-            "tell you). NEVER submit your own analyses, "
-            "summaries, or responses as observations.\n"
+            "tell you). NEVER submit your own analyses, summaries, "
+            "or responses as observations.\n"
             "- When the user asks what is known about a topic, "
             "use query_beliefs first. If the results are "
             "insufficient, use deep_research.\n"
             "- When the user asks to retract, list, or inspect "
             "claims/entities, use the appropriate tool.\n"
             "- For complex, multi-faceted questions, prefer "
-            "swarm_research or plan_and_execute over deep_research.\n"
+            "swarm_research or plan_and_execute over "
+            "deep_research.\n"
             "- When the user asks for critical analysis, use "
-            "reason_about to apply epistemic and dialectic reasoning.\n"
+            "reason_about to apply epistemic and dialectic "
+            "reasoning.\n"
             "- For simple greetings and conversation, respond "
             "directly without tools.\n"
             "- Always suggest 2-3 short follow-up prompts at the "
@@ -872,10 +1314,10 @@ class ChatService:
                 proactive = await self._proactive_recall(session)
                 if proactive:
                     dynamic_parts.append(f"## Suggested approaches\n{proactive}")
-            # Session permissions (dynamic, not cached)
-            perms_section = self._build_permissions_prompt_section()
-            if perms_section:
-                dynamic_parts.append(perms_section)
+            # Session permissions / capability manifest (dynamic, not cached)
+            manifest = self._build_capability_manifest()
+            if manifest:
+                dynamic_parts.append(manifest)
             if dynamic_parts:
                 messages.append(
                     {"role": "system", "content": "\n\n".join(dynamic_parts)}
@@ -948,6 +1390,10 @@ class ChatService:
         else:
             tools = list(_CHAT_TOOL_SCHEMAS)
 
+        # Phase 5: Add introspection tools if profile system available
+        if self._profile_loader or self._chat_store or self._model_intelligence:
+            tools.extend(_INTROSPECTION_TOOL_SCHEMAS)
+
         # Phase 2.4: Add load_artifact tool if flag enabled
         if flags.is_enabled("artifact_handles"):
             tools.append({
@@ -990,6 +1436,32 @@ class ChatService:
                 tools.extend(registry_tools)
             except Exception:
                 log.debug("Failed to get registry tool schemas", exc_info=True)
+
+        # Dynamic tool descriptions: enrich file tools when sandbox_escape active
+        caps = self._resolve_capabilities()
+        if "sandbox_escape" in caps:
+            ctx = self._runtime_context
+            root = str(ctx.project_root) if ctx and ctx.project_root else "project root"
+            for t in tools:
+                fname = t.get("function", {}).get("name", "")
+                if fname == "file_read":
+                    t["function"]["description"] = (
+                        f"Read a file. Accepts absolute paths within "
+                        f"`{root}` or relative workspace paths. "
+                        f"sandbox_escape active."
+                    )
+                    props = t["function"].get("parameters", {}).get("properties", {})
+                    if "path" in props:
+                        props["path"]["description"] = "Absolute or relative file path"
+                elif fname == "file_write":
+                    t["function"]["description"] = (
+                        f"Write to a file. Accepts absolute paths within "
+                        f"`{root}` or relative workspace paths. "
+                        f"sandbox_escape active."
+                    )
+                    props = t["function"].get("parameters", {}).get("properties", {})
+                    if "path" in props:
+                        props["path"]["description"] = "Absolute or relative file path"
 
         return tools
 
@@ -1432,13 +1904,229 @@ class ChatService:
         try:
             from qe.runtime.a2a_client import A2AClient
 
+            # Look up peer permissions and compute intersection with session caps
+            permissions: dict[str, Any] | None = None
+            try:
+                from qe.api import app as _app_module
+                registry = getattr(_app_module, "_peer_registry", None)
+                if registry is not None:
+                    # Find peer by URL
+                    url_norm = agent_url.rstrip("/")
+                    peer = next(
+                        (p for p in registry.list_peers()
+                         if p.url.rstrip("/") == url_norm),
+                        None,
+                    )
+                    if peer is not None:
+                        from qe.services.chat.schemas import AgentPermissions
+                        peer_perms = AgentPermissions.from_preset(peer.permissions)
+                        session_caps = self._resolve_capabilities()
+                        peer_caps = peer_perms.to_capabilities()
+                        intersected = session_caps & peer_caps
+                        permissions = {
+                            "capabilities": sorted(intersected),
+                            "preset": peer.permissions,
+                        }
+            except Exception:
+                log.debug("delegate_to_agent.permissions_lookup_failed", exc_info=True)
+
             client = A2AClient(agent_url)
-            resp = await client.send_task(description=task_description)
+            resp = await client.send_task(
+                description=task_description, permissions=permissions,
+            )
             task_id = resp.get("task_id") or resp.get("id") or ""
             return f"Delegated to {agent_url} as task {task_id}"
         except Exception as e:
             log.exception("delegate_to_agent_failed")
             return f"Delegate error: {e}"
+
+    # ── Introspection tool handlers (Phase 5) ──────────────────────────
+
+    async def _tool_execute_playbook(
+        self, name: str, input_text: str = "",
+    ) -> str:
+        if not self._profile_loader:
+            return "Profile system not available."
+        content = self._profile_loader.get_playbook(name)
+        if not content:
+            return f"Playbook '{name}' not found."
+        return (
+            f"Playbook '{name}' loaded:\n\n{content}\n\n"
+            f"Follow these instructions to process: {input_text}"
+        )
+
+    async def _tool_list_playbooks(self) -> str:
+        if not self._profile_loader:
+            return "Profile system not available."
+        playbooks = self._profile_loader.list_playbooks()
+        if not playbooks:
+            return "No playbooks available."
+        lines = [
+            f"- **{p['name']}**: {p['description']}"
+            for p in playbooks
+        ]
+        return "Available playbooks:\n" + "\n".join(lines)
+
+    async def _tool_list_models(self) -> str:
+        if not self._model_intelligence:
+            return "Model Intelligence not available."
+        try:
+            models = await self._model_intelligence.list_models()
+            if not models:
+                return "No models discovered yet."
+            lines = []
+            for m in models[:20]:
+                name = m.get("model_id", "unknown")
+                provider = m.get("provider", "")
+                status = m.get("status", "")
+                lines.append(f"- {name} ({provider}) [{status}]")
+            return f"{len(models)} models available:\n" + "\n".join(lines)
+        except Exception as e:
+            return f"Error listing models: {e}"
+
+    async def _tool_get_model_profile(self, model_id: str) -> str:
+        if not self._model_intelligence:
+            return "Model Intelligence not available."
+        try:
+            md = await self._model_intelligence.get_markdown_profile(
+                model_id,
+            )
+            if md:
+                return md
+            profile = await self._model_intelligence.get_model_profile(
+                model_id,
+            )
+            if profile:
+                return json.dumps(profile, indent=2)
+            return f"No profile found for model '{model_id}'."
+        except Exception as e:
+            return f"Error getting model profile: {e}"
+
+    async def _tool_search_conversations(self, query: str) -> str:
+        if not self._chat_store:
+            return "Chat history not available."
+        try:
+            results = await self._chat_store.search(query, limit=5)
+            if not results:
+                return "No matching conversations found."
+            lines = []
+            for c in results:
+                title = c.get("title", "Untitled")
+                lines.append(f"- {title} (id: {c['id'][:8]}...)")
+            return (
+                f"Found {len(results)} conversations:\n"
+                + "\n".join(lines)
+            )
+        except Exception as e:
+            return f"Error searching conversations: {e}"
+
+    def _build_runtime_self_knowledge(self) -> str:
+        """Build dynamic runtime state section for self-knowledge."""
+        lines: list[str] = ["\n## Current Runtime State"]
+
+        active_model = getattr(self, "_model_override", None) or self.model
+        lines.append(f"- **Active model**: {active_model}")
+        if self._fast_model:
+            lines.append(f"- **Fast model**: {self._fast_model}")
+
+        # Permission mode
+        if self._current_session and self._current_session.permissions:
+            perms = self._current_session.permissions
+            preset = perms.matching_preset() or "custom"
+            active = perms.active_count()
+            total = len(perms.scopes)
+            caps = perms.to_capabilities()
+            lines.append(f"- **Permission mode**: {preset} ({active}/{total} scopes)")
+            lines.append(f"- **Active capabilities**: {', '.join(sorted(caps))}")
+        else:
+            lines.append(f"- **Access mode**: {self._access_mode}")
+
+        # Paths
+        ctx = self._runtime_context
+        if ctx:
+            if ctx.workspace_root:
+                lines.append(f"- **Workspace root**: `{ctx.workspace_root}`")
+            if ctx.project_root:
+                lines.append(f"- **Project root**: `{ctx.project_root}`")
+
+            # MCP
+            mcp_summaries = ctx.mcp_server_summaries()
+            if mcp_summaries:
+                names = [s.name for s in mcp_summaries]
+                lines.append(
+                    f"- **MCP servers**: {len(mcp_summaries)} "
+                    f"({', '.join(names)})"
+                )
+            else:
+                lines.append("- **MCP servers**: none connected")
+
+            # Peers
+            lines.append(
+                f"- **Peer agents**: {ctx.peer_count()} registered, "
+                f"{ctx.healthy_peer_count()} healthy"
+            )
+
+        # Feature flags
+        try:
+            from qe.runtime.feature_flags import get_flag_store
+            flags = get_flag_store()
+            key_flags = [
+                "stable_prompt_prefix", "tool_masking",
+                "artifact_handles", "proactive_recall",
+            ]
+            flag_states = []
+            for f in key_flags:
+                state = "on" if flags.is_enabled(f) else "off"
+                flag_states.append(f"{f}={state}")
+            lines.append(f"- **Feature flags**: {', '.join(flag_states)}")
+        except Exception:
+            pass
+
+        lines.append(
+            "\n**Note**: You cannot change your own permissions. "
+            "Direct the user to the permissions panel to modify scopes."
+        )
+
+        return "\n".join(lines)
+
+    async def _tool_get_self_knowledge(self) -> str:
+        if not self._profile_loader:
+            return "Profile system not available."
+        knowledge = self._profile_loader.self_knowledge
+        if not knowledge:
+            return "Self-knowledge document not found."
+        # Append dynamic runtime state
+        runtime = self._build_runtime_self_knowledge()
+        return knowledge + runtime
+
+    async def _tool_discover_tools(self, query: str) -> str:
+        tools: list[str] = []
+        # Check built-in tools
+        for t in _CHAT_TOOL_SCHEMAS:
+            name = t["function"]["name"]
+            desc = t["function"].get("description", "")
+            if query.lower() in name.lower() or query.lower() in desc.lower():
+                tools.append(f"- {name}: {desc[:80]}")
+        # Check registry
+        if self._tool_registry:
+            try:
+                schemas = self._tool_registry.get_tool_schemas(
+                    capabilities={"chat", "web_search", "mcp"},
+                    mode="relevant",
+                )
+                for t in schemas:
+                    name = t["function"]["name"]
+                    desc = t["function"].get("description", "")
+                    if (
+                        query.lower() in name.lower()
+                        or query.lower() in desc.lower()
+                    ):
+                        tools.append(f"- {name}: {desc[:80]}")
+            except Exception:
+                pass
+        if not tools:
+            return f"No tools found matching '{query}'."
+        return f"Tools matching '{query}':\n" + "\n".join(tools[:15])
 
     # ── Model selection ─────────────────────────────────────────────────
 
@@ -1476,6 +2164,10 @@ class ChatService:
         task_hint: str | None = None,
     ) -> str:
         """Choose balanced or fast model based on iteration context."""
+        # User-selected model override takes priority
+        if getattr(self, "_model_override", None):
+            return self._model_override
+
         from qe.runtime.feature_flags import get_flag_store
         flags = get_flag_store()
 
@@ -1510,12 +2202,21 @@ class ChatService:
             return self._fast_model
         return self.model
 
+    @staticmethod
+    def _sanitize_messages(messages: list[dict]) -> list[dict]:
+        """Strip provider-specific fields that cause errors on cross-model calls."""
+        _strip = {"reasoning_content", "provider_specific_fields"}
+        return [{k: v for k, v in m.items() if k not in _strip} for m in messages]
+
     async def _call_llm_with_recovery(
         self, kwargs: dict[str, Any], iteration: int, max_retries: int = 2,
     ) -> Any:
         """Phase 3.4: LLM call with retry and model escalation."""
         from qe.runtime.feature_flags import get_flag_store
         flags = get_flag_store()
+
+        if "messages" in kwargs:
+            kwargs["messages"] = self._sanitize_messages(kwargs["messages"])
 
         if not flags.is_enabled("chat_llm_recovery"):
             return await asyncio.wait_for(
@@ -1565,6 +2266,50 @@ class ChatService:
                 if attempt >= max_retries:
                     break
         raise last_error  # type: ignore[misc]
+
+    # ── Fast path bypass (#67) ──────────────────────────────────────────
+
+    _FAST_PATH_GREETINGS = re.compile(
+        r"^(hi|hello|hey|good\s+(morning|afternoon|evening)|thanks|thank\s+you|ok|okay|"
+        r"bye|goodbye|cheers|great|sure|yes|no|yep|nope|cool|nice|awesome)\s*[.!?]?$",
+        re.IGNORECASE,
+    )
+    _FAST_PATH_ACKS = re.compile(
+        r"^(got\s+it|understood|makes\s+sense|i\s+see|noted|alright|right|exactly)\s*[.!?]?$",
+        re.IGNORECASE,
+    )
+
+    def _fast_path_check(self, user_message: str) -> str | None:
+        """Return a direct response for simple messages that don't need tools.
+
+        Returns None if the message requires the full tool loop.
+        Gated behind the ``fast_path_bypass`` feature flag.
+        """
+        from qe.runtime.feature_flags import get_flag_store
+
+        if not get_flag_store().is_enabled("fast_path_bypass"):
+            return None
+
+        msg = user_message.strip()
+        if len(msg) > 100:
+            return None
+
+        if self._FAST_PATH_GREETINGS.match(msg):
+            lower = msg.lower().rstrip(".!?")
+            if lower in ("hi", "hello", "hey"):
+                return "Hello! How can I help you today?"
+            if lower.startswith("good "):
+                return f"{msg.rstrip('.!?').capitalize()}! How can I assist you?"
+            if lower in ("thanks", "thank you"):
+                return "You're welcome! Let me know if you need anything else."
+            if lower in ("bye", "goodbye"):
+                return "Goodbye! Feel free to come back anytime."
+            return None
+
+        if self._FAST_PATH_ACKS.match(msg):
+            return "Let me know if you have any other questions."
+
+        return None
 
     # ── Agent loop ──────────────────────────────────────────────────────
 
@@ -2207,6 +2952,24 @@ class ChatService:
         progress_queue: asyncio.Queue | None = None,
     ) -> str:
         """Dispatch to local handler or tool registry."""
+        # Intercept file_read/file_write: pass elevation flag when sandbox_escape
+        if tool_name in ("file_read", "file_write"):
+            elevated = "sandbox_escape" in self._resolve_capabilities()
+            try:
+                from qe.tools.file_ops import file_read as _fr
+                from qe.tools.file_ops import file_write as _fw
+
+                if tool_name == "file_read":
+                    result = await _fr(params["path"], elevated=elevated)
+                else:
+                    result = await _fw(
+                        params["path"], params["content"], elevated=elevated,
+                    )
+                return str(result)
+            except Exception as e:
+                log.exception("File tool %s failed", tool_name)
+                return f"Tool error: {e}"
+
         handlers: dict[str, Any] = {
             "query_beliefs": lambda p: self._tool_query_beliefs(p["query"]),
             "list_entities": lambda _p: self._tool_list_entities(),
@@ -2238,6 +3001,24 @@ class ChatService:
             ),
             "delegate_to_agent": lambda p: self._tool_delegate_to_agent(
                 p["agent_url"], p["task_description"]
+            ),
+            # Phase 5: Introspection tools
+            "execute_playbook": lambda p: self._tool_execute_playbook(
+                p["name"], p.get("input", ""),
+            ),
+            "list_playbooks": lambda _p: self._tool_list_playbooks(),
+            "list_models": lambda _p: self._tool_list_models(),
+            "get_model_profile": lambda p: self._tool_get_model_profile(
+                p["model_id"],
+            ),
+            "search_conversations": lambda p: (
+                self._tool_search_conversations(p["query"])
+            ),
+            "get_self_knowledge": (
+                lambda _p: self._tool_get_self_knowledge()
+            ),
+            "discover_tools": lambda p: self._tool_discover_tools(
+                p["query"],
             ),
         }
 
@@ -2341,3 +3122,136 @@ class ChatService:
         except Exception:
             cost = 0.0
         self.budget_tracker.record_cost(self.model, cost, service_id="chat")
+
+    # ── /common-ground command (#81) ─────────────────────────────────────
+
+    async def common_ground(self, session_id: str) -> dict[str, Any]:
+        """Surface shared assumptions, unstated premises, and knowledge gaps.
+
+        Gated behind ``structured_workflow`` feature flag.
+        """
+        from qe.runtime.feature_flags import get_flag_store
+
+        if not get_flag_store().is_enabled("structured_workflow"):
+            return {"error": "structured_workflow flag is disabled"}
+
+        session = self._sessions.get(session_id)
+        if not session:
+            return {"assumptions": [], "premises": [], "gaps": [], "summary": "No session found."}
+
+        # Gather recent conversation context
+        recent = session.history[-20:] if len(session.history) > 20 else session.history
+        user_msgs = [m["content"] for m in recent if m.get("role") == "user"]
+
+        # Extract assumptions (things both sides treat as true)
+        assumptions: list[str] = []
+        premises: list[str] = []
+        gaps: list[str] = []
+
+        # Heuristic extraction from conversation
+        for msg in user_msgs:
+            # Detect assumed facts (statements without hedging)
+            raw = msg.replace("!", ".").replace("?", ".")
+            sentences = [s.strip() for s in raw.split(".") if s.strip()]
+            for s in sentences:
+                lower = s.lower()
+                if any(w in lower for w in ("i think", "maybe", "perhaps", "might")):
+                    premises.append(s)
+                elif len(s.split()) > 3 and not lower.startswith((
+                    "what", "how", "why", "when", "where",
+                    "who", "can", "could", "would",
+                )):
+                    assumptions.append(s)
+
+        # Detect knowledge gaps (questions asked but not fully answered)
+        questions_asked = [m for m in user_msgs if "?" in m]
+        for q in questions_asked[-5:]:
+            gaps.append(f"User asked: {q[:100]}")
+
+        summary_parts = []
+        if assumptions:
+            summary_parts.append(f"{len(assumptions)} shared assumption(s)")
+        if premises:
+            summary_parts.append(f"{len(premises)} unstated premise(s)")
+        if gaps:
+            summary_parts.append(f"{len(gaps)} knowledge gap(s)")
+
+        return {
+            "assumptions": assumptions[:10],
+            "premises": premises[:10],
+            "gaps": gaps[:10],
+            "summary": (
+                ", ".join(summary_parts)
+                if summary_parts
+                else "No common ground detected yet."
+            ),
+        }
+
+    # ── Auto session memory extraction (#86) ─────────────────────────────
+
+    async def extract_session_memory(self, session_id: str) -> dict[str, Any]:
+        """Extract key decisions, facts, and preferences from a session.
+
+        Called at end-of-session to persist important information to episodic memory.
+        Gated behind ``auto_session_memory`` feature flag.
+        """
+        from qe.runtime.feature_flags import get_flag_store
+
+        if not get_flag_store().is_enabled("auto_session_memory"):
+            return {"extracted": 0, "items": []}
+
+        session = self._sessions.get(session_id)
+        if not session or not session.history:
+            return {"extracted": 0, "items": []}
+
+        # Extract key items from conversation
+        items: list[dict[str, str]] = []
+        for msg in session.history:
+            content = msg.get("content", "")
+            role = msg.get("role", "")
+            if not content or role == "system":
+                continue
+
+            lower = content.lower()
+            # Detect decisions
+            _decision_phrases = (
+                "decided to", "let's go with", "we'll use",
+                "the answer is", "conclusion",
+            )
+            _fact_phrases = (
+                "found that", "according to",
+                "the data shows", "result:",
+            )
+            _pref_phrases = (
+                "i prefer", "i like", "i want",
+                "always use", "never use",
+            )
+            if any(phrase in lower for phrase in _decision_phrases):
+                items.append({"type": "decision", "content": content[:200]})
+            # Detect facts/findings
+            elif role == "assistant" and any(
+                phrase in lower for phrase in _fact_phrases
+            ):
+                items.append({"type": "fact", "content": content[:200]})
+            # Detect preferences
+            elif role == "user" and any(
+                phrase in lower for phrase in _pref_phrases
+            ):
+                items.append({"type": "preference", "content": content[:200]})
+
+        # Store to episodic memory if available
+        if self._episodic_memory and items:
+            from qe.runtime.episodic_memory import Episode
+            for item in items[:20]:
+                ep = Episode(
+                    episode_type="observation",
+                    content={"session_id": session_id, **item},
+                    summary=f"[{item['type']}] {item['content'][:80]}",
+                    relevance_to_goal=0.7,
+                )
+                try:
+                    await self._episodic_memory.store(ep)
+                except Exception:
+                    log.debug("Failed to store session memory item", exc_info=True)
+
+        return {"extracted": len(items), "items": items[:20]}

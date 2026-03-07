@@ -256,7 +256,10 @@ class TestFlagEndpoints:
                 resp = await client.get("/api/flags")
         assert resp.status_code == 200
         data = resp.json()
-        names = {f["name"] for f in data["flags"]}
+        all_flags = [
+            f for group in data["flags"].values() for f in group
+        ]
+        names = {f["name"] for f in all_flags}
         assert "test_flag_a" in names
         assert "test_flag_b" in names
 
@@ -756,7 +759,10 @@ class TestFlagIntegration:
         with skip_lifespan():
             async with _make_client() as client:
                 resp = await client.get("/api/flags")
-        names = {f["name"] for f in resp.json()["flags"]}
+        all_flags = [
+            f for group in resp.json()["flags"].values() for f in group
+        ]
+        names = {f["name"] for f in all_flags}
         assert "inquiry_mode" in names
         assert "multi_agent_mode" in names
         assert "prompt_evolution" in names

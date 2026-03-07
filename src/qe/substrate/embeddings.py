@@ -402,3 +402,86 @@ class EmbeddingStore:
             cursor = await db.execute("SELECT COUNT(*) FROM embeddings")
             row = await cursor.fetchone()
         return row[0]
+
+    async def coverage_stats(self, total_claims: int) -> dict[str, Any]:
+        """Report embedding coverage over the claim corpus.
+
+        Args:
+            total_claims: Total number of claims in the belief ledger.
+
+        Returns:
+            Dict with embedded count, total claims, coverage percentage,
+            and model name.
+        """
+        embedded = await self.count()
+        coverage = (embedded / total_claims * 100.0) if total_claims > 0 else 0.0
+        return {
+            "embedded_count": embedded,
+            "total_claims": total_claims,
+            "coverage_pct": round(coverage, 2),
+            "model": self._model,
+        }
+
+    async def re_embed_all(
+        self,
+        claims: list[dict[str, Any]],
+        *,
+        batch_size: int = 50,
+        on_progress: Any | None = None,
+    ) -> dict[str, Any]:
+        """Re-embed all claims with the current embedding model.
+
+        Each claim dict must have 'claim_id', 'subject_entity_id',
+        'predicate', and 'object_value' keys.
+
+        Args:
+            claims: List of claim dicts to embed.
+            batch_size: Number of claims to process per batch.
+            on_progress: Optional async callback(done, total).
+
+        Returns:
+            Dict with counts of succeeded, failed, and total.
+        """
+        succeeded = 0
+        failed = 0
+        total = len(claims)
+
+        for i in range(0, total, batch_size):
+            batch = claims[i : i + batch_size]
+            for claim in batch:
+                cid = claim.get("claim_id", "")
+                text = (
+                    f"{claim.get('subject_entity_id', '')} "
+                    f"{claim.get('predicate', '')} "
+                    f"{claim.get('object_value', '')}"
+                )
+                try:
+                    await self.store(
+                        id=f"claim:{cid}",
+                        text=text,
+                        metadata={
+                            "kind": "claim",
+                            "claim_id": cid,
+                            "subject_entity_id": claim.get("subject_entity_id", ""),
+                            "predicate": claim.get("predicate", ""),
+                        },
+                    )
+                    succeeded += 1
+                except Exception:
+                    log.warning("re_embed_all.failed claim_id=%s", cid, exc_info=True)
+                    failed += 1
+
+            if on_progress is not None:
+                done = min(i + batch_size, total)
+                await on_progress(done, total)
+
+        self._hnsw_dirty = True
+        log.info("re_embed_all.complete succeeded=%d failed=%d total=%d", succeeded, failed, total)
+        return {"succeeded": succeeded, "failed": failed, "total": total}
+
+    async def list_embedded_ids(self) -> set[str]:
+        """Return the set of all embedding IDs in the store."""
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute("SELECT id FROM embeddings")
+            rows = await cursor.fetchall()
+        return {row[0] for row in rows}

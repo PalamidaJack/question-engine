@@ -840,8 +840,9 @@ class TestFeatureFlagStore:
         store.define("flag_a", enabled=True)
         store.define("flag_b", enabled=False)
         flags = store.list_flags()
-        assert len(flags) == 2
-        names = {f["name"] for f in flags}
+        all_flags = [f for group in flags.values() for f in group]
+        assert len(all_flags) == 2
+        names = {f["name"] for f in all_flags}
         assert names == {"flag_a", "flag_b"}
 
     def test_evaluation_log(self):

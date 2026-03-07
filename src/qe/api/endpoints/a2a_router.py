@@ -55,6 +55,24 @@ async def remove_peer(request: Request, peer_id: str):
     return {"removed": peer_id}
 
 
+@router.put("/peers/{peer_id}/permissions")
+async def set_peer_permissions(request: Request, peer_id: str):
+    """Set permission preset for a peer agent."""
+    if request.app.state.peer_registry is None:
+        return JSONResponse(
+            {"error": "Peer registry not initialized"}, status_code=503,
+        )
+    peer = request.app.state.peer_registry.get(peer_id)
+    if peer is None:
+        return JSONResponse(
+            {"error": f"Peer not found: {peer_id}"}, status_code=404,
+        )
+    body = await request.json()
+    preset = body.get("preset", "restricted")
+    request.app.state.peer_registry.set_peer_permissions(peer_id, preset)
+    return {"peer_id": peer_id, "permissions": preset}
+
+
 @router.get("/peers/{peer_id}/health")
 async def check_peer_health(request: Request, peer_id: str):
     """Check health of a registered peer."""

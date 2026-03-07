@@ -6,6 +6,8 @@ Multi-agent orchestration system being redesigned from a pipeline into a **cogni
 
 Full architecture plan: `.claude/plans/tranquil-hopping-harbor.md`
 
+**Planned: Agent Profiles** — Declarative, shareable, agent-writable profile system (identity, personality, playbooks, strategies, self-knowledge). Replaces hardcoded system prompts with markdown files. All autonomy levels supported (supervised, full, read-only, tiered). See memory file `agent-profiles-architecture.md` for full spec.
+
 ## Tech Stack
 
 - Python 3.14, FastAPI, Pydantic v2, aiosqlite, litellm, instructor

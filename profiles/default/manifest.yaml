@@ -1,0 +1,13 @@
+name: "Question Engine Default"
+version: "1.0"
+description: "Default agent profile for Question Engine"
+author: "system"
+
+autonomy:
+  mode: "supervised"  # supervised, full_autonomy, read_only, tiered
+  tiered_config:
+    identity: "supervised"
+    personality: "supervised"
+    strategies: "supervised"
+    playbooks: "full_autonomy"
+    tool_policies: "supervised"

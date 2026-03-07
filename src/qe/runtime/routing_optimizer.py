@@ -271,3 +271,63 @@ class RoutingOptimizer:
                 best_model = model
 
         return best_model
+
+    # ── Self-learning EMA extensions (#45) ──────────────────────────
+
+    def ema_record(
+        self,
+        model: str,
+        task_type: str,
+        success: bool,
+        latency_ms: float,
+        quality: float = 0.5,
+        *,
+        alpha: float = 0.1,
+    ) -> None:
+        """Record with EMA smoothing for latency and quality."""
+        key = (model, task_type)
+        stats = self._stats[key]
+        stats["total"] += 1
+        if success:
+            stats["successes"] += 1
+        stats["total_latency"] += int(latency_ms)
+
+        # EMA fields
+        if "ema_latency" not in stats:
+            stats["ema_latency"] = latency_ms
+            stats["ema_quality"] = quality
+        else:
+            stats["ema_latency"] = (
+                alpha * latency_ms
+                + (1 - alpha) * stats["ema_latency"]
+            )
+            stats["ema_quality"] = (
+                alpha * quality
+                + (1 - alpha) * stats["ema_quality"]
+            )
+
+        self._arms[key].update(success)
+
+    def dynamic_rankings(
+        self,
+        task_type: str,
+        available_models: list[str],
+    ) -> list[dict[str, Any]]:
+        """Rank models by EMA quality * success_rate."""
+        ranked = []
+        for model in available_models:
+            key = (model, task_type)
+            stats = self._stats.get(key)
+            if stats and stats["total"] > 0:
+                sr = stats["successes"] / stats["total"]
+                eq = stats.get("ema_quality", 0.5)
+                score = sr * eq
+            else:
+                score = 0.25  # Uninformed prior
+            ranked.append({
+                "model": model,
+                "score": round(score, 4),
+                "calls": stats["total"] if stats else 0,
+            })
+        ranked.sort(key=lambda r: r["score"], reverse=True)
+        return ranked

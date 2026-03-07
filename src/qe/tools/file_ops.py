@@ -71,6 +71,9 @@ file_write_spec = ToolSpec(
 # Module-level workspace root; set by WorkspaceManager before use
 _workspace_root: Path | None = None
 
+# Elevated root for sandbox_escape mode (e.g. project root)
+_elevated_root: Path | None = None
+
 
 def set_workspace_root(root: Path) -> None:
     """Set the workspace root directory for sandboxing."""
@@ -78,11 +81,33 @@ def set_workspace_root(root: Path) -> None:
     _workspace_root = root
 
 
-def _resolve_sandboxed(relative_path: str) -> Path:
-    """Resolve a relative path within the workspace sandbox.
+def set_elevated_root(root: Path) -> None:
+    """Set the elevated root directory for sandbox_escape mode."""
+    global _elevated_root  # noqa: PLW0603
+    _elevated_root = root
 
-    Raises ValueError if the resolved path escapes the workspace.
+
+def _resolve_sandboxed(relative_path: str, elevated: bool = False) -> Path:
+    """Resolve a path within the workspace or elevated sandbox.
+
+    When elevated=True, resolves against _elevated_root (project root) and
+    allows absolute paths. Otherwise resolves relative to _workspace_root.
+
+    Raises ValueError if the resolved path escapes the allowed root.
     """
+    if elevated and _elevated_root is not None:
+        root = _elevated_root
+        if Path(relative_path).is_absolute():
+            resolved = Path(relative_path).resolve()
+        else:
+            resolved = (root / relative_path).resolve()
+        root_resolved = root.resolve()
+        if not str(resolved).startswith(str(root_resolved)):
+            raise ValueError(
+                f"Path escapes elevated sandbox: {relative_path}"
+            )
+        return resolved
+
     if _workspace_root is None:
         raise RuntimeError("Workspace root not configured. Call set_workspace_root() first.")
 
@@ -97,9 +122,9 @@ def _resolve_sandboxed(relative_path: str) -> Path:
     return resolved
 
 
-async def file_read(path: str) -> dict[str, Any]:
+async def file_read(path: str, elevated: bool = False) -> dict[str, Any]:
     """Read a file from the sandboxed workspace."""
-    resolved = _resolve_sandboxed(path)
+    resolved = _resolve_sandboxed(path, elevated=elevated)
 
     if not resolved.exists():
         raise FileNotFoundError(f"File not found: {path}")
@@ -114,9 +139,9 @@ async def file_read(path: str) -> dict[str, Any]:
     }
 
 
-async def file_write(path: str, content: str) -> dict[str, Any]:
+async def file_write(path: str, content: str, elevated: bool = False) -> dict[str, Any]:
     """Write content to a file in the sandboxed workspace."""
-    resolved = _resolve_sandboxed(path)
+    resolved = _resolve_sandboxed(path, elevated=elevated)
 
     created = not resolved.exists()
     resolved.parent.mkdir(parents=True, exist_ok=True)

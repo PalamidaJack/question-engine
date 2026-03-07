@@ -26,6 +26,87 @@ def get_app_globals():
 
     return app_mod
 
+@router.get("/models")
+async def chat_models():
+    """Return models available for chat selection.
+
+    Combines configured tier models with discovered models.
+    """
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # Add tier models first (always available)
+    try:
+        from qe.api.setup import get_current_tiers
+
+        tiers = get_current_tiers()
+        for tier_name in ("fast", "balanced", "powerful"):
+            model_id = tiers.get(tier_name, "")
+            if model_id and model_id not in seen:
+                models.append({
+                    "model_id": model_id,
+                    "tier": tier_name,
+                    "source": "configured",
+                })
+                seen.add(model_id)
+    except Exception:
+        log.debug("Failed to load tiers", exc_info=True)
+
+    # Add discovered models, filtered by health status
+    try:
+        app_mod = get_app_globals()
+        discovery = getattr(app_mod, "_discovery_service", None)
+        if discovery:
+            available = discovery.get_available_models(
+                free_only=False,
+            )
+            health_map = getattr(discovery, "_health", {})
+            for m in available:
+                mid = m.model_id
+                if mid in seen:
+                    continue
+                # Skip models marked as "gone"
+                status = getattr(m, "status", "active")
+                if status == "gone":
+                    continue
+                h = health_map.get(mid)
+                health = "unknown"
+                if h and h.total_calls >= 3:
+                    err_rate = h.error_count / h.total_calls
+                    if err_rate > 0.5:
+                        health = "degraded"
+                    else:
+                        health = "healthy"
+                models.append({
+                    "model_id": mid,
+                    "provider": m.provider,
+                    "source": "discovered",
+                    "health": health,
+                    "is_free": getattr(m, "is_free", False),
+                })
+                seen.add(mid)
+        else:
+            # Fallback to model intelligence DB
+            mi_svc = getattr(
+                app_mod, "_model_intelligence", None,
+            )
+            if mi_svc:
+                discovered = await mi_svc.list_models()
+                for m in discovered:
+                    mid = m.get("model_id", "")
+                    if mid and mid not in seen:
+                        models.append({
+                            "model_id": mid,
+                            "provider": m.get("provider", ""),
+                            "source": "discovered",
+                        })
+                        seen.add(mid)
+    except Exception:
+        log.debug("Failed to load discovered models", exc_info=True)
+
+    return {"models": models, "count": len(models)}
+
+
 @router.post("")
 async def chat_rest(request: Request, body: dict[str, Any]):
     """REST endpoint for chat (non-streaming fallback)."""
@@ -145,10 +226,27 @@ async def chat_websocket(websocket: WebSocket):
             data = await websocket.receive_json()
             msg_type = data.get("type", "message")
 
-            if msg_type == "message":
+            if msg_type == "set_model":
+                model_id = data.get("model", "")
+                chat_svc._model_override_ws = model_id or None
+                await websocket.send_json({
+                    "type": "model_changed",
+                    "model": model_id or "default",
+                })
+
+            elif msg_type == "message":
                 user_text = data.get("content", "").strip()
                 if not user_text:
                     continue
+
+                # Pick model: per-message > session > default
+                msg_model = data.get("model", "")
+                session_model = getattr(
+                    chat_svc, "_model_override_ws", None,
+                )
+                model_override = (
+                    msg_model or session_model or None
+                )
 
                 await websocket.send_json({"type": "typing", "active": True})
 
@@ -192,6 +290,7 @@ async def chat_websocket(websocket: WebSocket):
                         session_id, user_text,
                         progress_queue=progress_queue,
                         interjection_queue=interjection_queue,
+                        model_override=model_override,
                     )
                 finally:
                     _mid_execution[0] = False

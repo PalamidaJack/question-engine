@@ -111,11 +111,23 @@ class ToolGate:
         if tool_name in ("file_read", "file_write"):
             path = params.get("path", "")
             if ".." in path or path.startswith("/"):
-                return GateResult(
-                    decision=GateDecision.DENY,
-                    reason=f"Path escapes sandbox: {path}",
-                    policy_name="sandbox_check",
+                if "sandbox_escape" not in capabilities:
+                    return GateResult(
+                        decision=GateDecision.DENY,
+                        reason=f"Path escapes sandbox: {path}",
+                        policy_name="sandbox_check",
+                    )
+                # Even with sandbox_escape, block system paths
+                _BLOCKED = (
+                    "/etc", "/var", "/usr", "/bin", "/sbin",
+                    "/proc", "/sys", "/dev", "/boot", "/root",
                 )
+                if any(path.startswith(p) for p in _BLOCKED):
+                    return GateResult(
+                        decision=GateDecision.DENY,
+                        reason=f"System path blocked: {path}",
+                        policy_name="sandbox_system_block",
+                    )
 
         # Record the call
         if goal_id:

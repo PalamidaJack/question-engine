@@ -19,7 +19,7 @@ class TestSystemPromptContent:
     def test_contains_identity(self):
         svc = _make_service()
         prompt = svc._build_system_prompt()
-        assert "Question Engine assistant" in prompt
+        assert "Question Engine" in prompt
 
     def test_contains_model_name(self):
         svc = _make_service(model="gpt-4o")

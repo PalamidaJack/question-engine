@@ -315,7 +315,12 @@ async def fetch_together(api_key: str) -> list[DiscoveredModel]:
 
 
 async def fetch_mistral(api_key: str) -> list[DiscoveredModel]:
-    """Fetch models from Mistral (free tier)."""
+    """Fetch models from Mistral.
+
+    Mistral offers free API access (free to sign up) but models have
+    per-token costs.  The ``is_free`` flag is only set for models that
+    are genuinely free to call (e.g. promotional free models).
+    """
     now = datetime.now()
     data = await _http_get_json(
         "https://api.mistral.ai/v1/models",
@@ -331,13 +336,11 @@ async def fetch_mistral(api_key: str) -> list[DiscoveredModel]:
                 model_id=model_id,
                 provider="mistral",
                 base_model_name=mid,
-                is_free=True,
+                is_free=False,
                 context_length=ctx,
                 supports_tool_calling=True,
                 supports_json_mode=True,
                 quality_tier=_infer_quality_tier(mid, ctx),
-                cost_per_m_input=0.0,
-                cost_per_m_output=0.0,
                 rate_limit_rpm=60,
                 discovered_at=now,
                 last_seen=now,
@@ -347,40 +350,55 @@ async def fetch_mistral(api_key: str) -> list[DiscoveredModel]:
     return models
 
 
-async def fetch_kilo(api_key: str) -> list[DiscoveredModel]:
-    """Fetch models from Kilo Code (all free via API gateway).
+async def fetch_kilo(api_key: str, api_base: str) -> list[DiscoveredModel]:
+    """Fetch models from Kilo Code gateway.
 
-    Kilo's catalog endpoint returns a flat JSON list (not OpenAI-compatible).
-    Each entry uses ``openrouterId`` as the model identifier and
-    ``contextLength`` for context window.  All models are free through
-    the Kilo gateway regardless of the listed pricing.
+    Kilo exposes an OpenRouter-compatible ``/models`` endpoint at
+    ``KILOCODE_API_BASE`` that returns all available models with per-token
+    pricing.  Models with zero prompt **and** completion pricing are
+    genuinely free to call; the rest have real per-token costs.
     """
     now = datetime.now()
+    url = f"{api_base.rstrip('/')}/models"
     data = await _http_get_json(
-        "https://kilo.ai/api/models",
+        url,
         headers={"Authorization": f"Bearer {api_key}"},
     )
-    items = data if isinstance(data, list) else data.get("data", [])
+    items = data.get("data", []) if isinstance(data, dict) else data
     models: list[DiscoveredModel] = []
     for m in items:
-        or_id = m.get("openrouterId", "")
-        if not or_id:
+        mid = m.get("id", "")
+        if not mid:
             continue
-        # Kilo routes via openai/ prefix + api_base
-        model_id = f"openai/{or_id}"
-        ctx = m.get("contextLength", 8192) or 8192
-        base_name = or_id.rsplit("/", 1)[-1]
-        caps = _infer_capabilities({"id": or_id})
+        model_id = f"openai/{mid}"
+        ctx = m.get("context_length", 8192) or 8192
+        top = m.get("top_provider", {})
+        if top.get("context_length"):
+            ctx = top["context_length"]
+        base_name = mid.rsplit("/", 1)[-1]
+        caps = _infer_capabilities(m)
+
+        pricing = m.get("pricing", {})
+        try:
+            price_in = float(pricing.get("prompt", "1") or "1")
+            price_out = float(pricing.get("completion", "1") or "1")
+        except (ValueError, TypeError):
+            price_in, price_out = 1.0, 1.0
+        is_free = price_in == 0 and price_out == 0
+        # Convert per-token to per-million-token for cost fields
+        cost_per_m_in = price_in * 1_000_000
+        cost_per_m_out = price_out * 1_000_000
+
         models.append(
             DiscoveredModel(
                 model_id=model_id,
                 provider="kilo",
                 base_model_name=base_name,
-                is_free=True,
+                is_free=is_free,
                 context_length=ctx,
-                quality_tier=_infer_quality_tier(or_id, ctx),
-                cost_per_m_input=0.0,
-                cost_per_m_output=0.0,
+                quality_tier=_infer_quality_tier(mid, ctx),
+                cost_per_m_input=cost_per_m_in,
+                cost_per_m_output=cost_per_m_out,
                 rate_limit_rpm=60,
                 discovered_at=now,
                 last_seen=now,
@@ -426,7 +444,11 @@ async def fetch_cloudflare(account_id: str, api_token: str) -> list[DiscoveredMo
 
 
 async def fetch_nvidia_nim(api_key: str) -> list[DiscoveredModel]:
-    """Fetch models from NVIDIA NIM (free preview)."""
+    """Fetch models from NVIDIA NIM.
+
+    NVIDIA offers free API access but models have per-token costs.
+    Free preview credits do not make the models permanently free.
+    """
     now = datetime.now()
     data = await _http_get_json(
         "https://integrate.api.nvidia.com/v1/models",
@@ -443,11 +465,9 @@ async def fetch_nvidia_nim(api_key: str) -> list[DiscoveredModel]:
                 model_id=model_id,
                 provider="nvidia_nim",
                 base_model_name=mid.rsplit("/", 1)[-1],
-                is_free=True,
+                is_free=False,
                 context_length=ctx,
                 quality_tier=_infer_quality_tier(mid, ctx),
-                cost_per_m_input=0.0,
-                cost_per_m_output=0.0,
                 rate_limit_rpm=30,
                 discovered_at=now,
                 last_seen=now,
@@ -459,7 +479,10 @@ async def fetch_nvidia_nim(api_key: str) -> list[DiscoveredModel]:
 
 
 async def fetch_fireworks(api_key: str) -> list[DiscoveredModel]:
-    """Fetch models from Fireworks AI."""
+    """Fetch models from Fireworks AI.
+
+    Fireworks offers free API access but models have per-token costs.
+    """
     now = datetime.now()
     data = await _http_get_json(
         "https://api.fireworks.ai/inference/v1/models",
@@ -476,11 +499,9 @@ async def fetch_fireworks(api_key: str) -> list[DiscoveredModel]:
                 model_id=model_id,
                 provider="fireworks_ai",
                 base_model_name=mid.rsplit("/", 1)[-1],
-                is_free=True,
+                is_free=False,
                 context_length=ctx,
                 quality_tier=_infer_quality_tier(mid, ctx),
-                cost_per_m_input=0.0,
-                cost_per_m_output=0.0,
                 rate_limit_rpm=60,
                 discovered_at=now,
                 last_seen=now,
@@ -536,7 +557,7 @@ PROVIDER_FETCHERS: dict[str, tuple[list[str], Any]] = {
     "github": (["GITHUB_TOKEN"], fetch_github_models),
     "together_ai": (["TOGETHERAI_API_KEY"], fetch_together),
     "mistral": (["MISTRAL_API_KEY"], fetch_mistral),
-    "kilo": (["KILOCODE_API_KEY"], fetch_kilo),
+    "kilo": (["KILOCODE_API_KEY", "KILOCODE_API_BASE"], fetch_kilo),
     "cloudflare": (["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"], fetch_cloudflare),
     "nvidia_nim": (["NVIDIA_NIM_API_KEY"], fetch_nvidia_nim),
     "fireworks_ai": (["FIREWORKS_AI_API_KEY"], fetch_fireworks),

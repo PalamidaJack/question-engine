@@ -119,6 +119,126 @@ class HallucinationGuardRule(GuardrailRule):
         return GuardrailResult(passed=True, rule_name=self.name)
 
 
+class ConstraintGuardrails:
+    """Constraint-based guardrails: max_tool_calls, max_cost, max_tokens, domain restrictions.
+
+    Tracks per-session usage counters and enforces limits.
+    Gated behind ``constraint_guardrails`` feature flag.
+    """
+
+    def __init__(
+        self,
+        max_tool_calls: int = 50,
+        max_cost_usd: float = 5.0,
+        max_tokens: int = 100_000,
+        allowed_domains: list[str] | None = None,
+        blocked_domains: list[str] | None = None,
+    ) -> None:
+        self.max_tool_calls = max_tool_calls
+        self.max_cost_usd = max_cost_usd
+        self.max_tokens = max_tokens
+        self.allowed_domains = allowed_domains or []
+        self.blocked_domains = blocked_domains or []
+        # Per-session counters: session_id -> counts
+        self._sessions: dict[str, dict[str, Any]] = {}
+
+    def _get_session(self, session_id: str) -> dict[str, Any]:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = {
+                "tool_calls": 0,
+                "cost_usd": 0.0,
+                "tokens_used": 0,
+            }
+        return self._sessions[session_id]
+
+    def record_tool_call(self, session_id: str) -> None:
+        self._get_session(session_id)["tool_calls"] += 1
+
+    def record_cost(self, session_id: str, cost_usd: float) -> None:
+        self._get_session(session_id)["cost_usd"] += cost_usd
+
+    def record_tokens(self, session_id: str, tokens: int) -> None:
+        self._get_session(session_id)["tokens_used"] += tokens
+
+    def check_tool_calls(self, session_id: str) -> GuardrailResult:
+        s = self._get_session(session_id)
+        if s["tool_calls"] >= self.max_tool_calls:
+            return GuardrailResult(
+                passed=False, rule_name="ConstraintGuardrails",
+                message=f"Tool call limit reached: {s['tool_calls']}/{self.max_tool_calls}",
+                severity="block",
+            )
+        return GuardrailResult(passed=True, rule_name="ConstraintGuardrails")
+
+    def check_cost(self, session_id: str) -> GuardrailResult:
+        s = self._get_session(session_id)
+        if s["cost_usd"] >= self.max_cost_usd:
+            return GuardrailResult(
+                passed=False, rule_name="ConstraintGuardrails",
+                message=f"Cost limit reached: ${s['cost_usd']:.4f}/${self.max_cost_usd}",
+                severity="block",
+            )
+        return GuardrailResult(passed=True, rule_name="ConstraintGuardrails")
+
+    def check_tokens(self, session_id: str) -> GuardrailResult:
+        s = self._get_session(session_id)
+        if s["tokens_used"] >= self.max_tokens:
+            return GuardrailResult(
+                passed=False, rule_name="ConstraintGuardrails",
+                message=f"Token limit reached: {s['tokens_used']}/{self.max_tokens}",
+                severity="block",
+            )
+        return GuardrailResult(passed=True, rule_name="ConstraintGuardrails")
+
+    def check_domain(self, url: str) -> GuardrailResult:
+        """Check if a URL domain is allowed/blocked."""
+        domain = _extract_domain(url)
+        if self.blocked_domains and domain in self.blocked_domains:
+            return GuardrailResult(
+                passed=False, rule_name="ConstraintGuardrails",
+                message=f"Domain blocked: {domain}",
+                severity="block",
+            )
+        if self.allowed_domains and domain not in self.allowed_domains:
+            return GuardrailResult(
+                passed=False, rule_name="ConstraintGuardrails",
+                message=f"Domain not in allowlist: {domain}",
+                severity="block",
+            )
+        return GuardrailResult(passed=True, rule_name="ConstraintGuardrails")
+
+    def check_all(self, session_id: str) -> list[GuardrailResult]:
+        """Run all constraint checks. Returns list of results."""
+        return [
+            self.check_tool_calls(session_id),
+            self.check_cost(session_id),
+            self.check_tokens(session_id),
+        ]
+
+    def session_status(self, session_id: str) -> dict[str, Any]:
+        s = self._get_session(session_id)
+        return {
+            "tool_calls": s["tool_calls"],
+            "max_tool_calls": self.max_tool_calls,
+            "cost_usd": round(s["cost_usd"], 4),
+            "max_cost_usd": self.max_cost_usd,
+            "tokens_used": s["tokens_used"],
+            "max_tokens": self.max_tokens,
+        }
+
+    def reset_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+
+def _extract_domain(url: str) -> str:
+    """Extract domain from a URL string."""
+    # Simple extraction without urllib for speed
+    url = url.lower().strip()
+    if "://" in url:
+        url = url.split("://", 1)[1]
+    return url.split("/", 1)[0].split(":", 1)[0]
+
+
 class GuardrailsPipeline:
     def __init__(self, rules: list[GuardrailRule] | None = None, bus: Any | None = None):
         self._bus = bus

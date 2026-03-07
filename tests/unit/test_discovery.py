@@ -30,7 +30,7 @@ def test_discovered_model_defaults():
         provider="groq",
         base_model_name="llama-3.3-70b",
     )
-    assert m.is_free is True
+    assert m.is_free is False
     assert m.status == "active"
     assert m.context_length == 4096
     assert m.cost_per_m_input == 0.0
@@ -119,7 +119,9 @@ def _make_bus() -> MemoryBus:
     return MemoryBus()
 
 
-def _make_models(n: int = 3, tier: str = "fast", provider: str = "groq") -> list[DiscoveredModel]:
+def _make_models(
+    n: int = 3, tier: str = "fast", provider: str = "groq", is_free: bool = True,
+) -> list[DiscoveredModel]:
     return [
         DiscoveredModel(
             model_id=f"{provider}/model-{i}",
@@ -127,6 +129,7 @@ def _make_models(n: int = 3, tier: str = "fast", provider: str = "groq") -> list
             base_model_name=f"model-{i}",
             quality_tier=tier,
             context_length=8192,
+            is_free=is_free,
         )
         for i in range(n)
     ]

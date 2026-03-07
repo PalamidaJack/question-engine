@@ -23,10 +23,17 @@ class A2AClient:
             r.raise_for_status()
             return r.json()
 
-    async def send_task(self, description: str, task_id: str | None = None) -> dict[str, Any]:
-        payload = {"description": description}
+    async def send_task(
+        self,
+        description: str,
+        task_id: str | None = None,
+        permissions: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"description": description}
         if task_id:
             payload["id"] = task_id
+        if permissions is not None:
+            payload.setdefault("metadata", {})["permissions"] = permissions
         async with httpx.AsyncClient(timeout=self._timeout) as c:
             r = await c.post(f"{self.base_url}/api/a2a/tasks", json=payload)
             r.raise_for_status()

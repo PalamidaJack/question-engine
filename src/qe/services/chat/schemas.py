@@ -170,6 +170,10 @@ class AgentPermissions(BaseModel):
         for scope, enabled in self.scopes.items():
             if enabled and scope in _SCOPE_CAPABILITIES:
                 caps |= _SCOPE_CAPABILITIES[scope]
+        # Grant sandbox_escape only when both FILE_SYSTEM and SYSTEM_CONTROL are active
+        if (self.scopes.get(PermissionScope.FILE_SYSTEM)
+                and self.scopes.get(PermissionScope.SYSTEM_CONTROL)):
+            caps.add("sandbox_escape")
         return caps
 
     def allowed_builtin_tools(self) -> set[str]:

@@ -14,7 +14,7 @@ class DiscoveredModel(BaseModel):
     model_id: str  # e.g. "openrouter/google/gemini-2.0-flash-exp:free"
     provider: str  # e.g. "openrouter"
     base_model_name: str  # e.g. "gemini-2.0-flash-exp"
-    is_free: bool = True
+    is_free: bool = False
     context_length: int = 4096
     supports_tool_calling: bool = False
     supports_json_mode: bool = False

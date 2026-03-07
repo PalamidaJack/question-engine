@@ -164,6 +164,9 @@ TOPICS = {
     # Model Discovery
     "models.discovered",
     "models.tiers_updated",
+    # Model Intelligence
+    "model_intelligence.profile_started",
+    "model_intelligence.profile_completed",
     # Innovation Scout
     "scout.cycle_started",
     "scout.cycle_completed",

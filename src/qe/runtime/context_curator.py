@@ -45,6 +45,15 @@ DEFAULT_BUDGET_ALLOCATION: dict[str, float] = {
     "progress": 0.00,        # Shares with finding
 }
 
+# Section-level budget allocation for LLM context assembly (#71)
+DEFAULT_SECTION_BUDGET: dict[str, float] = {
+    "system": 0.20,       # System prompt + identity
+    "knowledge": 0.30,    # Retrieved claims, graph context
+    "memory": 0.20,       # Episodic + procedural memory
+    "history": 0.25,      # Conversation history
+    "margin": 0.05,       # Safety margin for response
+}
+
 
 class WorkingMemorySlot(BaseModel):
     """A single item in working memory with relevance scoring."""
@@ -395,6 +404,105 @@ class ContextCurator:
         union = words_a | words_b
         return len(intersection) / len(union)
 
+    # -------------------------------------------------------------------
+    # #71 — Section-level token budget management
+    # -------------------------------------------------------------------
+
+    def assemble_sections(
+        self,
+        *,
+        max_tokens: int = 8192,
+        system_content: str = "",
+        knowledge_items: list[str] | None = None,
+        memory_items: list[str] | None = None,
+        history_messages: list[dict[str, str]] | None = None,
+        section_budget: dict[str, float] | None = None,
+    ) -> list[dict[str, str]]:
+        """Assemble LLM context with explicit per-section token budgets.
+
+        Sections (primacy → recency placement):
+        1. system (20%) — system prompt, identity (primacy)
+        2. knowledge (30%) — retrieved claims, graph context
+        3. memory (20%) — episodic + procedural memory
+        4. history (25%) — conversation history (recency)
+        5. margin (5%) — reserved for response generation
+
+        Items within each section are truncated to fit their budget.
+        """
+        budget = section_budget or DEFAULT_SECTION_BUDGET
+        messages: list[dict[str, str]] = []
+
+        # 1. System section (primacy position)
+        sys_budget = int(max_tokens * budget.get("system", 0.20))
+        if system_content:
+            trimmed = self._trim_to_tokens(system_content, sys_budget)
+            messages.append({"role": "system", "content": trimmed})
+
+        # 2. Knowledge section
+        know_budget = int(max_tokens * budget.get("knowledge", 0.30))
+        if knowledge_items:
+            packed = self._pack_items(knowledge_items, know_budget)
+            if packed:
+                messages.append({
+                    "role": "system",
+                    "content": "[KNOWLEDGE]\n" + "\n---\n".join(packed),
+                })
+
+        # 3. Memory section
+        mem_budget = int(max_tokens * budget.get("memory", 0.20))
+        if memory_items:
+            packed = self._pack_items(memory_items, mem_budget)
+            if packed:
+                messages.append({
+                    "role": "system",
+                    "content": "[MEMORY]\n" + "\n---\n".join(packed),
+                })
+
+        # 4. History section (recency position — most recent messages)
+        hist_budget = int(max_tokens * budget.get("history", 0.25))
+        if history_messages:
+            trimmed_hist = self._trim_history(history_messages, hist_budget)
+            messages.extend(trimmed_hist)
+
+        return messages
+
+    def _trim_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Trim text to fit within max_tokens (approximate)."""
+        est = self._estimate_tokens(text)
+        if est <= max_tokens:
+            return text
+        # Approximate: 4 chars per token
+        max_chars = max_tokens * 4
+        return text[:max_chars] + "..."
+
+    def _pack_items(self, items: list[str], budget_tokens: int) -> list[str]:
+        """Pack as many items as possible within the token budget."""
+        packed: list[str] = []
+        used = 0
+        for item in items:
+            tokens = self._estimate_tokens(item)
+            if used + tokens > budget_tokens:
+                break
+            packed.append(item)
+            used += tokens
+        return packed
+
+    def _trim_history(
+        self, messages: list[dict[str, str]], budget_tokens: int
+    ) -> list[dict[str, str]]:
+        """Keep the most recent messages that fit within budget."""
+        result: list[dict[str, str]] = []
+        used = 0
+        # Walk backwards (most recent first)
+        for msg in reversed(messages):
+            tokens = self._estimate_tokens(msg.get("content", ""))
+            if used + tokens > budget_tokens:
+                break
+            result.append(msg)
+            used += tokens
+        result.reverse()
+        return result
+
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
         """Cosine similarity between two vectors."""
@@ -404,3 +512,185 @@ class ContextCurator:
         if norm_a == 0 or norm_b == 0:
             return 0.0
         return dot / (norm_a * norm_b)
+
+    # ── Context Degradation Detection (#69) ──────────────────────────
+
+    def check_context_health(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int = 128_000,
+    ) -> dict[str, Any]:
+        """Detect context degradation issues.
+
+        Checks:
+        - Lost-in-the-middle: important info buried in middle
+        - Context size approaching limit
+        - Repetition/redundancy
+        - Attention scatter (too many topics)
+
+        Gated behind ``context_health_check`` feature flag.
+        """
+        issues: list[str] = []
+        total_tokens = sum(
+            self._estimate_tokens(m.get("content", ""))
+            for m in messages
+        )
+
+        # Size check
+        usage_pct = total_tokens / max(max_tokens, 1)
+        if usage_pct > 0.9:
+            issues.append(
+                f"Context nearly full: {usage_pct:.0%} used"
+            )
+        elif usage_pct > 0.7:
+            issues.append(
+                f"Context usage high: {usage_pct:.0%} used"
+            )
+
+        # Repetition detection
+        seen_texts: set[str] = set()
+        duplicates = 0
+        for m in messages:
+            text = m.get("content", "")[:200].lower().strip()
+            if text in seen_texts:
+                duplicates += 1
+            seen_texts.add(text)
+        if duplicates > 2:
+            issues.append(
+                f"Redundancy detected: {duplicates} duplicate messages"
+            )
+
+        # Topic scatter (count unique "topics" via word frequency)
+        all_words: list[str] = []
+        for m in messages:
+            all_words.extend(
+                m.get("content", "").lower().split()
+            )
+        unique_ratio = (
+            len(set(all_words)) / max(len(all_words), 1)
+        )
+        if unique_ratio > 0.8 and len(messages) > 10:
+            issues.append("High topic scatter detected")
+
+        health_score = 1.0 - min(len(issues) * 0.2, 0.8)
+
+        remediation: list[str] = []
+        if usage_pct > 0.7:
+            remediation.append("Compact conversation history")
+        if duplicates > 2:
+            remediation.append("Remove duplicate messages")
+        if unique_ratio > 0.8:
+            remediation.append("Focus on fewer topics")
+
+        return {
+            "health_score": round(health_score, 2),
+            "total_tokens": total_tokens,
+            "usage_pct": round(usage_pct, 3),
+            "issues": issues,
+            "remediation": remediation,
+        }
+
+    # ── Tiered Context Loading (#83) ─────────────────────────────────
+
+    def tiered_context(
+        self,
+        query: str,
+        system_prompt: str,
+        claims: list[Any] | None = None,
+        history: list[dict[str, str]] | None = None,
+        *,
+        tier: str = "auto",
+        query_complexity: float | None = None,
+    ) -> dict[str, Any]:
+        """Load context at L0/L1/L2 tiers to reduce token cost.
+
+        L0: System prompt only (simple greetings, acks)
+        L1: System + top-5 claims + recent 3 history messages
+        L2: Full context assembly (all claims, full history)
+
+        Gated behind ``tiered_context_loading`` feature flag.
+        """
+        if tier == "auto":
+            tier = self._auto_select_tier(
+                query, query_complexity
+            )
+
+        if tier == "L0":
+            return {
+                "tier": "L0",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                ],
+                "claims_included": 0,
+                "history_included": 0,
+            }
+
+        if tier == "L1":
+            top_claims = (claims or [])[:5]
+            recent_history = (history or [])[-3:]
+            claim_text = "\n".join(
+                f"- {getattr(c, 'predicate', '')}: "
+                f"{getattr(c, 'object_value', '')}"
+                for c in top_claims
+            ) if top_claims else ""
+            msgs: list[dict[str, str]] = [
+                {"role": "system", "content": system_prompt},
+            ]
+            if claim_text:
+                msgs.append({
+                    "role": "system",
+                    "content": f"Relevant knowledge:\n{claim_text}",
+                })
+            msgs.extend(recent_history)
+            return {
+                "tier": "L1",
+                "messages": msgs,
+                "claims_included": len(top_claims),
+                "history_included": len(recent_history),
+            }
+
+        # L2: full assembly
+        all_claims = claims or []
+        all_history = history or []
+        claim_text = "\n".join(
+            f"- {getattr(c, 'predicate', '')}: "
+            f"{getattr(c, 'object_value', '')}"
+            for c in all_claims
+        ) if all_claims else ""
+        msgs = [
+            {"role": "system", "content": system_prompt},
+        ]
+        if claim_text:
+            msgs.append({
+                "role": "system",
+                "content": f"Knowledge base:\n{claim_text}",
+            })
+        msgs.extend(all_history)
+        return {
+            "tier": "L2",
+            "messages": msgs,
+            "claims_included": len(all_claims),
+            "history_included": len(all_history),
+        }
+
+    def _auto_select_tier(
+        self,
+        query: str,
+        complexity: float | None = None,
+    ) -> str:
+        """Auto-select context tier based on query complexity."""
+        if complexity is not None:
+            if complexity < 0.2:
+                return "L0"
+            if complexity < 0.5:
+                return "L1"
+            return "L2"
+
+        # Heuristic: short queries → L0, medium → L1, complex → L2
+        words = query.split()
+        if len(words) <= 3:
+            return "L0"
+        if len(words) <= 10:
+            return "L1"
+        return "L2"

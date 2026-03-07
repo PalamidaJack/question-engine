@@ -28,6 +28,7 @@ class PeerAgent(BaseModel):
     last_seen: float = Field(default_factory=time.time)
     healthy: bool = True
     version: str = ""
+    permissions: str = "restricted"  # preset: restricted / standard / autonomous
 
 
 class PeerRegistry:
@@ -100,6 +101,16 @@ class PeerRegistry:
         """Mark a peer as unhealthy."""
         if peer := self._peers.get(peer_id):
             peer.healthy = False
+
+    def set_peer_permissions(self, peer_id: str, preset: str) -> bool:
+        """Set permission preset for a peer. Returns True if peer found."""
+        if preset not in ("restricted", "standard", "autonomous"):
+            preset = "restricted"
+        if peer := self._peers.get(peer_id):
+            peer.permissions = preset
+            log.info("peer_registry.permissions_set peer_id=%s preset=%s", peer_id, preset)
+            return True
+        return False
 
     @staticmethod
     def _validate_peer_url(url: str) -> str:

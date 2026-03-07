@@ -113,6 +113,18 @@ _executor = None
 _context_curator = None
 _procedural_memory = None
 
+# Phase 5: New service globals
+_profile_loader = None
+_chat_store = None
+_model_intelligence = None
+_workflow_executor = None
+_webhook_notifier = None
+
+# Phase 1 enhancement globals
+_unified_llm = None
+_tool_metrics = None
+_knowledge_graph = None
+
 INBOX_DIR = Path("data/runtime_inbox")
 
 _AGENT_ACCESS_MODES = {"strict", "balanced", "full"}
@@ -546,6 +558,9 @@ async def _shutdown_services() -> None:
     global _prompt_registry
     global _active_adapters
     global _mcp_bridge, _discovery_service, _synthesizer, _verification_gate, _executor
+    global _profile_loader, _chat_store, _model_intelligence
+    global _workflow_executor, _webhook_notifier
+    global _unified_llm, _tool_metrics, _knowledge_graph
 
     # Shutdown — EngramCache cleanup
     try:
@@ -579,9 +594,16 @@ async def _shutdown_services() -> None:
         except Exception:
             log.debug("shutdown.mass_intelligence_store_close_failed")
 
+    await _stop_svc(_model_intelligence, "model_intelligence")
     await _stop_svc(_discovery_service, "discovery")
     await _stop_svc(_scout_service, "scout")
     await _stop_svc(_harvest_service, "harvest")
+
+    if _chat_store:
+        try:
+            await _chat_store.close()
+        except Exception:
+            log.debug("shutdown.chat_store_close_failed")
     await _stop_svc(_inquiry_bridge, "inquiry_bridge")
     await _stop_svc(_knowledge_loop, "knowledge_loop")
     await _stop_svc(_strategy_evolver, "strategy_evolver")
@@ -640,6 +662,9 @@ async def _shutdown_services() -> None:
     _synthesizer = None
     _peer_registry = None
     _mcp_bridge = None
+    _unified_llm = None
+    _tool_metrics = None
+    _knowledge_graph = None
 
 
 @asynccontextmanager
@@ -657,6 +682,8 @@ async def lifespan(app: FastAPI):
     global _prompt_registry, _inquiry_engine
     global _mcp_bridge, _discovery_service, _synthesizer, _verification_gate, _executor
     global _context_curator, _procedural_memory
+    global _profile_loader, _chat_store, _model_intelligence
+    global _workflow_executor, _webhook_notifier
 
     settings = get_settings()
     configure_from_config(settings)
@@ -737,8 +764,8 @@ async def lifespan(app: FastAPI):
     _mass_intelligence_executor = MassIntelligenceExecutor(
         store=_mass_intelligence_store,
         market_agent=_mass_intelligence_market_agent,
-        default_timeout_seconds=30.0,
-        max_concurrent=10,
+        default_timeout_seconds=45.0,
+        max_concurrent=20,
         api_keys=api_keys,
     )
 
@@ -769,14 +796,29 @@ async def lifespan(app: FastAPI):
         fast_model = get_current_tiers().get("fast", "gpt-4o-mini")
         _db_path = _substrate.belief_ledger._db_path
 
+        # Phase 1 Enhancements: ToolMetrics, UnifiedLLM, KnowledgeGraph
+        from qe.runtime.llm import UnifiedLLM
+        from qe.runtime.metrics import get_metrics
+        from qe.runtime.tools import ToolMetrics
+        from qe.substrate.knowledge_graph import KnowledgeGraph
+
+        global _tool_metrics, _unified_llm, _knowledge_graph
+        _tool_metrics = ToolMetrics()
+        _unified_llm = UnifiedLLM(
+            default_model=balanced_model,
+            budget_tracker=_supervisor.budget_tracker,
+            metrics=get_metrics(),
+        )
+        _knowledge_graph = KnowledgeGraph()
+
         # Tool Infrastructure
         from qe.runtime.tool_bootstrap import create_default_gate, create_default_registry
         from qe.runtime.tool_gate import SecurityPolicy
         from qe.runtime.workspace import WorkspaceManager
-        from qe.tools.file_ops import set_workspace_root
+        from qe.tools.file_ops import set_elevated_root, set_workspace_root
 
         agent_access_mode = _resolve_agent_access_mode(settings)
-        _tool_registry = create_default_registry()
+        _tool_registry = create_default_registry(tool_metrics=_tool_metrics)
         _tool_gate = create_default_gate(policies=[
             SecurityPolicy(
                 name="default",
@@ -788,10 +830,19 @@ async def lifespan(app: FastAPI):
         workspace_root = _workspace_root_for_mode(agent_access_mode)
         workspace_root.mkdir(parents=True, exist_ok=True)
         set_workspace_root(workspace_root)
+        # Set elevated root for sandbox_escape mode (project root)
+        project_root = Path(
+            os.environ.get(
+                "QE_PROJECT_ROOT",
+                str(Path(__file__).resolve().parent.parent.parent.parent),
+            )
+        )
+        set_elevated_root(project_root)
         log.info(
-            "agent_access.configured mode=%s workspace_root=%s",
+            "agent_access.configured mode=%s workspace_root=%s elevated_root=%s",
             agent_access_mode,
             workspace_root,
+            project_root,
         )
         BaseService.set_tool_registry(_tool_registry)
         BaseService.set_tool_gate(_tool_gate)
@@ -1103,6 +1154,290 @@ async def lifespan(app: FastAPI):
             description="Include LLM connectivity in Doctor health checks",
         )
 
+        # Phase 5: New system feature flags
+        flag_store.define(
+            "agent_profiles", enabled=True,
+            description="Use profile-based system prompt assembly",
+        )
+        flag_store.define(
+            "chat_persistence", enabled=True,
+            description="Persist conversations to ChatStore",
+        )
+        flag_store.define(
+            "model_intelligence", enabled=True,
+            description="Enable Model Intelligence profiling service",
+        )
+        flag_store.define(
+            "workflow_executor", enabled=False,
+            description="Enable visual workflow execution engine",
+        )
+        flag_store.define(
+            "multi_model_compare", enabled=False,
+            description="Enable side-by-side multi-model comparison",
+        )
+        flag_store.define(
+            "introspection_tools", enabled=True,
+            description="Give the agent self-inspection tools",
+        )
+
+        # Phase 1 enhancement flags
+        flag_store.define(
+            "vector_embeddings", enabled=False,
+            description="Vector embedding enhancements: re-embed, coverage metrics",
+            category="knowledge",
+            maturity="preview",
+        )
+        flag_store.define(
+            "graph_knowledge_retrieval", enabled=False,
+            description="Graph-based knowledge retrieval with entity traversal",
+            category="knowledge",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "tool_quality_metrics", enabled=False,
+            description="Per-tool success rate, latency, and error tracking",
+            category="observability",
+            maturity="preview",
+        )
+
+        # Phase 2 enhancement flags
+        flag_store.define(
+            "token_budget_management", enabled=False,
+            description="Section-level token budgets for context assembly",
+            category="context",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "adaptive_memory_weighting", enabled=False,
+            description="Query-type-aware memory tier weighting",
+            category="context",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "workflow_checkpoints", enabled=False,
+            description="Checkpoint/resume for workflow executions",
+            category="orchestration",
+            maturity="preview",
+        )
+        flag_store.define(
+            "smart_failover", enabled=False,
+            description="Multi-provider failover with circuit breaker",
+            category="routing",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "filesystem_artifacts", enabled=False,
+            description="Store artifacts on filesystem instead of memory",
+            category="system",
+            maturity="preview",
+        )
+        flag_store.define(
+            "bm25_hybrid_search", enabled=False,
+            description="True BM25 scoring in hybrid search",
+            category="knowledge",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "fast_path_bypass", enabled=False,
+            description="Skip tool loop for simple messages (greetings, acks)",
+            category="performance",
+            maturity="preview",
+        )
+
+        # Phase 3 enhancement flags
+        flag_store.define(
+            "cognitive_personas", enabled=False,
+            description="Behavioral profiles for tool categories",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "orchestrator_handoff", enabled=False,
+            description="Rule-based tool routing and handoff",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "specialist_profiles", enabled=False,
+            description="Role-specific specialist agent profiles",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "verification_protocol", enabled=False,
+            description="Verify cognitive tool outputs for quality",
+            category="safety",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "two_stage_review", enabled=False,
+            description="Two-stage review of merged swarm results",
+            category="safety",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "structured_workflow", enabled=False,
+            description="Design-Plan-Execute structured workflow",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "rpi_methodology", enabled=False,
+            description="Research-Plan-Implement with confidence tags",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "auto_session_memory", enabled=False,
+            description="Extract decisions/facts/preferences at session end",
+            category="memory",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "constraint_guardrails", enabled=False,
+            description="Per-session constraint limits (tool calls, cost, tokens, domains)",
+            category="safety",
+            maturity="experimental",
+        )
+
+        # Phase 4 enhancement flags
+        flag_store.define(
+            "belief_clustering", enabled=False,
+            description="Cluster similar claims and detect causal chains",
+            category="knowledge",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "contradiction_cascade", enabled=False,
+            description="Blast radius analysis for claim retraction",
+            category="knowledge",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "self_learning_routing", enabled=False,
+            description="EMA-tracked self-learning model routing",
+            category="routing",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "domain_swarms", enabled=False,
+            description="Domain-specialized parallel agent swarms",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "subagent_context_isolation", enabled=False,
+            description="Isolated context per swarm sub-agent",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "swarm_consensus", enabled=False,
+            description="Voting and agreement protocols for swarm results",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "context_health_check", enabled=False,
+            description="Detect context degradation (lost-in-middle, scatter)",
+            category="context",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "tiered_context_loading", enabled=False,
+            description="L0/L1/L2 tiered context loading for token savings",
+            category="context",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "knowledge_filesystem", enabled=False,
+            description="Hierarchical tree view over knowledge claims",
+            category="knowledge",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "task_scheduler", enabled=False,
+            description="Cron-based task scheduling",
+            category="system",
+            maturity="experimental",
+        )
+
+        # Phase 5 enhancement flags
+        flag_store.define(
+            "artifact_system", enabled=False,
+            description="4-tier artifact system (instructions/prompts/agents/skills)",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "composable_skills", enabled=False,
+            description="DAG-based composable workflow skills",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "skill_chaining", enabled=False,
+            description="Multi-skill chaining with data passing",
+            category="agent",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "skill_catalog", enabled=False,
+            description="Catalog of external skills with install/uninstall",
+            category="system",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "progressive_tool_loading", enabled=False,
+            description="Load tool schemas by detected intent",
+            category="performance",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "learning_loop", enabled=False,
+            description="5-stage knowledge improvement cycle",
+            category="intelligence",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "bdi_tracking", enabled=False,
+            description="Beliefs-Desires-Intentions mental state tracking",
+            category="agent",
+            maturity="experimental",
+        )
+
+        # Phase 6 enhancement flags
+        flag_store.define(
+            "mcp_server", enabled=False,
+            description="Expose QE tools via MCP protocol",
+            category="integration",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "output_pipeline", enabled=False,
+            description="Multi-channel output formatting",
+            category="integration",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "discord_integration", enabled=False,
+            description="Discord channel adapter with /ask command",
+            category="integration",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "retrieval_trace_ui", enabled=False,
+            description="Retrieval trace panel in chat UI",
+            category="observability",
+            maturity="experimental",
+        )
+        flag_store.define(
+            "analyze_then_validate", enabled=False,
+            description="Two-step analyze-then-validate retrieval",
+            category="knowledge",
+            maturity="experimental",
+        )
+
         _goal_store = GoalStore(_substrate.belief_ledger._db_path)
         _planner = PlannerService(
             bus=bus,
@@ -1175,6 +1510,11 @@ async def lifespan(app: FastAPI):
                 _mcp_configs = [MCPServerConfig(**c) for c in _mcp_raw]
             except Exception:
                 log.warning("mcp_bridge.config_parse_failed", exc_info=True)
+        # Inject project root into MCP filesystem server args
+        _project_root = Path(os.environ.get("QE_PROJECT_ROOT", str(Path.cwd())))
+        for _cfg in _mcp_configs:
+            if _cfg.name == "filesystem" and str(_project_root) not in _cfg.args:
+                _cfg.args.append(str(_project_root))
         _mcp_bridge = MCPBridge(configs=_mcp_configs, tool_registry=_tool_registry)
         if _mcp_configs:
             _mcp_tool_count = await _mcp_bridge.start()
@@ -1183,6 +1523,38 @@ async def lifespan(app: FastAPI):
         from qe.runtime.sanitizer import InputSanitizer
 
         _input_sanitizer = InputSanitizer()
+
+        # Phase 5: Initialize new foundation services
+        from qe.runtime.profiles import ProfileLoader
+        from qe.substrate.chat_store import ChatStore
+
+        _profile_loader = ProfileLoader(
+            profiles_dir="profiles", active_profile="default",
+        )
+        _chat_store = ChatStore(db_path=_db_path.replace(
+            ".db", "_chat.db",
+        ) if isinstance(_db_path, str) else "data/chat_history.db")
+        await _chat_store.initialize()
+
+        from qe.services.model_intelligence import ModelIntelligenceService
+
+        _model_intelligence = ModelIntelligenceService(
+            bus=bus, discovery_service=_discovery_service,
+        )
+        await _model_intelligence.start()
+
+        from qe.runtime.workflow_executor import WorkflowExecutor
+
+        _workflow_executor = WorkflowExecutor(bus=bus)
+
+        from qe.services.chat.runtime_context import RuntimeContext
+
+        _runtime_context = RuntimeContext(
+            workspace_root=workspace_root,
+            project_root=project_root,
+            mcp_bridge=_mcp_bridge,
+            peer_registry=_peer_registry,
+        )
 
         _chat_service = ChatService(
             substrate=_substrate,
@@ -1209,6 +1581,11 @@ async def lifespan(app: FastAPI):
             sanitizer=_input_sanitizer,
             router=globals().get("_auto_router"),
             recovery=_recovery if '_recovery' in dir() else None,
+            profile_loader=_profile_loader,
+            chat_store=_chat_store,
+            model_intelligence=_model_intelligence,
+            workflow_executor=_workflow_executor,
+            runtime_context=_runtime_context,
         )
 
         # Register the default executor as an agent in the pool
@@ -1299,6 +1676,13 @@ async def lifespan(app: FastAPI):
         app.state.goal_store = _goal_store
         app.state.supervisor = _supervisor
         app.state.chat_service = _chat_service
+        app.state.profile_loader = _profile_loader
+        app.state.chat_store = _chat_store
+        app.state.model_intelligence = _model_intelligence
+        app.state.workflow_executor = _workflow_executor
+        app.state.unified_llm = _unified_llm
+        app.state.tool_metrics = _tool_metrics
+        app.state.knowledge_graph = _knowledge_graph
         yield
     finally:
         await _shutdown_services()
@@ -1345,6 +1729,11 @@ app.state.dispatcher = None
 app.state.goal_store = None
 app.state.supervisor = None
 app.state.chat_service = None
+app.state.profile_loader = None
+app.state.chat_store = None
+app.state.model_intelligence = None
+app.state.workflow_executor = None
+app.state.webhook_notifier = None
 
 _cors_origins = (
     [o.strip() for o in os.environ["QE_CORS_ORIGINS"].split(",")]
@@ -1381,6 +1770,8 @@ if _static_dir.exists():
 from qe.api.endpoints.a2a_router import playground_router  # noqa: E402
 from qe.api.endpoints.a2a_router import router as a2a_router  # noqa: E402
 from qe.api.endpoints.chat import router as chat_router  # noqa: E402
+from qe.api.endpoints.communications import router as comms_router  # noqa: E402
+from qe.api.endpoints.conversations import router as conv_router  # noqa: E402
 from qe.api.endpoints.goals_v2 import projects_router  # noqa: E402
 from qe.api.endpoints.goals_v2 import router as goals_v2_router  # noqa: E402
 from qe.api.endpoints.guardrails import router as guardrails_router  # noqa: E402
@@ -1388,11 +1779,15 @@ from qe.api.endpoints.harvest import router as harvest_router  # noqa: E402
 from qe.api.endpoints.knowledge import router as knowledge_router  # noqa: E402
 from qe.api.endpoints.mass_intelligence import router as mass_intel_router  # noqa: E402
 from qe.api.endpoints.memory_ops import router as memory_ops_router  # noqa: E402
+from qe.api.endpoints.models_api import router as models_router  # noqa: E402
+from qe.api.endpoints.profiles import router as profiles_router  # noqa: E402
 from qe.api.endpoints.scout import router as scout_router  # noqa: E402
 from qe.api.endpoints.setup import router as setup_router  # noqa: E402
 from qe.api.endpoints.system import router as system_router  # noqa: E402
 from qe.api.endpoints.telemetry import router as telemetry_router  # noqa: E402
+from qe.api.endpoints.tools import router as tools_router  # noqa: E402
 from qe.api.endpoints.webhooks import router as webhooks_router  # noqa: E402
+from qe.api.endpoints.workflows import router as workflows_router  # noqa: E402
 
 app.include_router(setup_router)
 app.include_router(webhooks_router)
@@ -1409,3 +1804,11 @@ app.include_router(a2a_router)
 app.include_router(playground_router)
 app.include_router(guardrails_router)
 app.include_router(memory_ops_router)
+# Phase 5: New routers
+app.include_router(profiles_router)
+app.include_router(conv_router)
+app.include_router(models_router)
+app.include_router(workflows_router)
+app.include_router(comms_router)
+# Phase 1 enhancement routers
+app.include_router(tools_router)
